@@ -1,0 +1,41 @@
+# --- 依赖 / 构建产物 ---
+node_modules/
+dist/
+release*/
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# --- 本机私有 / 内部计划 ---
+.workbuddy/
+.trae/
+.tmp/
+
+# 分发版 EULA（与开源 MIT LICENSE 冲突，不入源码仓库）
+LICENSE.txt
+
+# --- 逆向/探测实验产物：不入库 ---
+capture/
+e2e_*
+_e2e_*
+*.tmp.cjs
+*.tmp.mjs
+*.tmp.ts
+
+# 站点级研究文档（源健康/解密分析等，不开源）
+docs/
+
+# --- 专有 / 运行时 / 编译产物：不随源码分发 ---
+# 逆向自第三方 app 的私有蜘蛛 jar 与壳，版权属原作者，不接受开源分发
+resources/jvm/shell-shim/
+resources/jvm/real/
+resources/jvm/libs/
+resources/jvm/stubs/
+resources/jvm/jre/
+resources/jvm/dex2jar/
+resources/jvm/**/*.jar
+resources/jvm/*.jar
+
+# --- 内部交付文档（含产物 SHA / 版本节奏等） ---
+docs/交付说明.md

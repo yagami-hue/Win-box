@@ -1,0 +1,183 @@
+// src/renderer/api/client.ts — window.api 的类型化封装 + IpcResult 解包
+import type { IpcResult } from '../../shared/ipc-result';
+import type {
+  SiteConfig,
+  ImportReport,
+  SourceBean,
+  VodItem,
+  VodDetail,
+  PlayResult,
+  LiveGroup,
+  LiveBean,
+  UserConfig,
+  SourceMoveDirection,
+  SourceUpdatePatch,
+  SearchAllReport,
+  SourceDebugReport,
+  UserProfile,
+  AuditItem,
+  FilterGroup,
+} from '../../shared/types';
+import type { SubtitleCandidate, SubtitleSettings } from '../../shared/subtitle';
+
+interface HomeResult {
+  sortClasses: { id: string; name: string; flag?: string; filters?: FilterGroup[] }[];
+  items: VodItem[];
+  page: number;
+  pagecount: number;
+  total: number;
+  sourceKey: string;
+  /** true = 首页无推荐列表，已自动回退（homeVideoContent 或首个分类）取到内容 */
+  homeFallback?: boolean;
+}
+
+interface ImportReturn {
+  config: SiteConfig;
+  report: ImportReport;
+  warnings: string[];
+  urls?: { name: string; url: string }[];
+}
+
+declare global {
+  interface Window {
+    api: {
+      system: { ping: () => Promise<IpcResult<string>>; icon: () => Promise<IpcResult<string>>; setTheme: (t: string) => Promise<IpcResult<void>>; quit: () => Promise<IpcResult<void>> };
+      config: {
+        import: (a: { url?: string; json?: string }) => Promise<IpcResult<ImportReturn>>;
+        listSites: () => Promise<IpcResult<SourceBean[]>>;
+        diagnose: () => Promise<IpcResult<ImportReport | null>>;
+        cfgGet: () => Promise<IpcResult<UserConfig>>;
+        addSource: (bean: SourceBean) => Promise<IpcResult<SourceBean>>;
+        updateSource: (key: string, patch: SourceUpdatePatch) => Promise<IpcResult<SourceBean>>;
+        deleteSource: (key: string) => Promise<IpcResult<void>>;
+        moveSource: (key: string, direction: SourceMoveDirection) => Promise<IpcResult<void>>;
+        setActiveSource: (key: string) => Promise<IpcResult<void>>;
+        setActiveLive: (index: number) => Promise<IpcResult<void>>;
+        importUrl: (url: string) => Promise<IpcResult<ImportReturn>>;
+        importJson: (json: string) => Promise<IpcResult<ImportReturn>>;
+        saveAsProfile: (name: string) => Promise<IpcResult<UserProfile>>;
+        activateProfile: (id: string) => Promise<IpcResult<void>>;
+        deleteProfile: (id: string) => Promise<IpcResult<void>>;
+        updateProfileName: (a: { id: string; name: string }) => Promise<IpcResult<void>>;
+        cfgProfiles: () => Promise<IpcResult<Omit<UserProfile, 'json'>[]>>;
+        vodDebug: (key: string) => Promise<IpcResult<SourceDebugReport>>;
+        audit: () => Promise<IpcResult<AuditItem[]>>;
+        cacheClear: () => Promise<IpcResult<{ freedBytes: number; cleared: string[]; failed: string[] }>>;
+      };
+      vod: {
+        home: (key: string) => Promise<IpcResult<HomeResult>>;
+        category: (a: { key: string; tid: string; pg: string; extend?: Record<string, string> }) => Promise<IpcResult<HomeResult>>;
+        detail: (a: { key: string; ids: string[] }) => Promise<IpcResult<VodDetail | null>>;
+        search: (a: { key: string; wd: string }) => Promise<IpcResult<VodItem[]>>;
+        searchAll: (wd: string) => Promise<IpcResult<SearchAllReport>>;
+        play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => Promise<IpcResult<PlayResult>>;
+      };
+      live: {
+        load: (index: number) => Promise<IpcResult<{ groups: LiveGroup[]; liveName: string }>>;
+        meta: () => Promise<IpcResult<LiveBean[]>>;
+      };
+      subtitle: {
+        get: () => Promise<IpcResult<SubtitleSettings>>;
+        set: (patch: Partial<SubtitleSettings>) => Promise<IpcResult<SubtitleSettings>>;
+        search: (name: string) => Promise<IpcResult<SubtitleCandidate[]>>;
+        fetch: (cand: SubtitleCandidate) => Promise<IpcResult<string>>;
+      };
+      drives: {
+        get: () => Promise<IpcResult<Record<string, string>>>;
+        set: (a: { provider: string; token: string }) => Promise<IpcResult<void>>;
+        remove: (provider: string) => Promise<IpcResult<void>>;
+        qrCreate: (provider?: string) => Promise<IpcResult<{ provider: string; content: string; sid: string }>>;
+        qrPoll: (
+          provider: string,
+          sid: string,
+        ) => Promise<
+          IpcResult<{ state: number; token?: string; tokenKind?: 'refresh_token' | 'cookie' | 'access_token'; username?: string; hint?: string }>
+        >;
+        webLogin: (provider: string) => Promise<IpcResult<void>>;
+      };
+      win: {
+        minimize: () => Promise<IpcResult<void>>;
+        maximize: () => Promise<IpcResult<void>>;
+        close: () => Promise<IpcResult<void>>;
+        isMaximized: () => Promise<IpcResult<boolean>>;
+      };
+      player: {
+        open: (init: unknown) => Promise<IpcResult<void>>;
+        switchEp: (epIndex: number) => Promise<IpcResult<void>>;
+        isOpen: () => Promise<IpcResult<{ open: boolean }>>;
+        close: () => Promise<IpcResult<void>>;
+        onInit: (cb: (init: unknown) => void) => () => void;
+        onSwitchEp: (cb: (epIndex: number) => void) => () => void;
+      };
+      merge: {
+        export: (ids: string[]) => Promise<IpcResult<{ content: string; summary: { name: string; kept: number; duplicated: number; total: number; error?: string }[] }>>;
+        save: (a: { content: string; defaultName?: string }) => Promise<IpcResult<{ saved: boolean; path: string }>>;
+      };
+    };
+  }
+}
+
+async function unwrap<T>(p: Promise<IpcResult<T>>): Promise<T> {
+  const r = await p;
+  if (!r.ok) throw new Error(r.error.message);
+  return r.data as T;
+}
+
+export const client = {
+  ping: () => unwrap(window.api.system.ping()),
+  appIcon: () => unwrap(window.api.system.icon()),
+  setTheme: (t: string) => unwrap(window.api.system.setTheme(t)),
+  importConfig: (a: { url?: string; json?: string }) => unwrap(window.api.config.import(a)),
+  listSites: () => unwrap(window.api.config.listSites()),
+  diagnose: () => unwrap(window.api.config.diagnose()),
+  cfgGet: () => unwrap(window.api.config.cfgGet()),
+  cfgAddSource: (bean: SourceBean) => unwrap(window.api.config.addSource(bean)),
+  cfgUpdateSource: (key: string, patch: SourceUpdatePatch) => unwrap(window.api.config.updateSource(key, patch)),
+  cfgDeleteSource: (key: string) => unwrap(window.api.config.deleteSource(key)),
+  cfgMoveSource: (key: string, direction: SourceMoveDirection) => unwrap(window.api.config.moveSource(key, direction)),
+  cfgSetActiveSource: (key: string) => unwrap(window.api.config.setActiveSource(key)),
+  cfgSetActiveLive: (index: number) => unwrap(window.api.config.setActiveLive(index)),
+  cfgImportUrl: (url: string) => unwrap(window.api.config.importUrl(url)),
+  cfgImportJson: (json: string) => unwrap(window.api.config.importJson(json)),
+  cfgSaveAsProfile: (name: string) => unwrap(window.api.config.saveAsProfile(name)),
+  cfgActivateProfile: (id: string) => unwrap(window.api.config.activateProfile(id)),
+  cfgDeleteProfile: (id: string) => unwrap(window.api.config.deleteProfile(id)),
+  cfgUpdateProfileName: (a: { id: string; name: string }) => unwrap(window.api.config.updateProfileName(a)),
+  cfgProfiles: () => unwrap(window.api.config.cfgProfiles()),
+  vodDebug: (key: string) => unwrap(window.api.config.vodDebug(key)),
+  audit: () => unwrap(window.api.config.audit()),
+  cacheClear: () => unwrap(window.api.config.cacheClear()),
+  winMinimize: () => unwrap(window.api.win.minimize()),
+  winMaximize: () => unwrap(window.api.win.maximize()),
+  winClose: () => unwrap(window.api.win.close()),
+  winIsMaximized: () => unwrap(window.api.win.isMaximized()),
+  appQuit: () => unwrap(window.api.system.quit()),
+  playerOpen: (init: unknown) => unwrap(window.api.player.open(init)),
+  playerSwitchEp: (epIndex: number) => unwrap(window.api.player.switchEp(epIndex)),
+  playerIsOpen: () => unwrap(window.api.player.isOpen()),
+  playerClose: () => unwrap(window.api.player.close()),
+  playerOnInit: (cb: (init: unknown) => void) => window.api.player.onInit(cb),
+  playerOnSwitchEp: (cb: (epIndex: number) => void) => window.api.player.onSwitchEp(cb),
+  mergeExport: (ids: string[]) => unwrap(window.api.merge.export(ids)),
+  mergeSave: (a: { content: string; defaultName?: string }) => unwrap(window.api.merge.save(a)),
+  driveGet: () => unwrap(window.api.drives.get()),
+  driveSet: (provider: string, token: string) => unwrap(window.api.drives.set({ provider, token })),
+  driveRemove: (provider: string) => unwrap(window.api.drives.remove(provider)),
+  driveQrCreate: (provider?: string) => unwrap(window.api.drives.qrCreate(provider)),
+  driveQrPoll: (provider: string, sid: string) => unwrap(window.api.drives.qrPoll(provider, sid)),
+  driveWebLogin: (provider: string) => unwrap(window.api.drives.webLogin(provider)),
+  home: (key: string) => unwrap(window.api.vod.home(key)),
+  category: (a: { key: string; tid: string; pg: string; extend?: Record<string, string> }) => unwrap(window.api.vod.category(a)),
+  detail: (a: { key: string; ids: string[] }) => unwrap(window.api.vod.detail(a)),
+  search: (a: { key: string; wd: string }) => unwrap(window.api.vod.search(a)),
+  searchAll: (wd: string) => unwrap(window.api.vod.searchAll(wd)),
+  play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => unwrap(window.api.vod.play(a)),
+  loadLive: (index: number) => unwrap(window.api.live.load(index)),
+  liveMeta: () => unwrap(window.api.live.meta()),
+  subtitleGet: () => unwrap(window.api.subtitle.get()),
+  subtitleSet: (patch: Partial<SubtitleSettings>) => unwrap(window.api.subtitle.set(patch)),
+  subtitleSearch: (name: string) => unwrap(window.api.subtitle.search(name)),
+  subtitleFetch: (cand: SubtitleCandidate) => unwrap(window.api.subtitle.fetch(cand)),
+};
+
+export type { HomeResult, ImportReturn };

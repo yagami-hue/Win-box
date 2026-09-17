@@ -1,0 +1,85 @@
+{
+  // TVBox Win 用户配置示例（resources/config.example.json）
+  // ---------------------------------------------------------------
+  // 本文件是"标准订阅 JSON"格式（顶层 sites/lives/spider/flags），可以直接复制到
+  // 「配置」页 → 粘贴 JSON 文本导入，或放到任意 http(s) 地址后"从地址导入"。
+  // 导入即"全量替换"：应用会把本文件解析后的 sources/lives/global(spider+flags)
+  // 持久化到 <userData>/user-config.json（结构见 docs/config-file.md）。
+  // 说明：
+  //   type=0  → 苹果 CMS（XML）
+  //   type=1  → 苹果 CMS（JSON）
+  //   type=3  → Spider：api 以 .js 结尾走 JS 沙箱；api 形如 csp_ 走 JVM 桥（jar/dex）；
+  //             api 以 .py 结尾桌面版不支持（与安卓 normal flavor 一致）
+  // 下面的 spider 是全局 jar URL（仅 type=3 + csp_ 的源需要）。
+  "version": 1,
+  "spider": "",
+  "flags": [],
+  "sites": [
+    {
+      "key": "cms_json_demo",
+      "name": "示例 CMS(JSON) 源",
+      "type": 1,
+      "api": "https://your-cms.example.com/api.php/provide/vod",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 0,
+      "changeable": 1,
+      "playUrl": "",
+      "ext": "",
+      "jar": "",
+      "timeout": 15
+    },
+    {
+      "key": "cms_xml_demo",
+      "name": "示例 CMS(XML) 源",
+      "type": 0,
+      "api": "https://your-cms.example.com/xml.php/provide/vod",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1,
+      "changeable": 1,
+      "playUrl": "",
+      "ext": "",
+      "jar": "",
+      "timeout": 15
+    },
+    {
+      "key": "csp_demo",
+      "name": "示例 jar(dex) 蜘蛛源",
+      "type": 3,
+      "api": "csp_Doll",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 0,
+      "changeable": 1,
+      "playUrl": "",
+      "ext": "",
+      "jar": "",
+      "timeout": 15
+    },
+    {
+      "key": "js_demo",
+      "name": "示例 JS 蜘蛛源",
+      "type": 3,
+      "api": "https://your-spider.example.com/tvbox/spider.js",
+      "searchable": 1,
+      "quickSearch": 1,
+      "filterable": 1,
+      "changeable": 1,
+      "playUrl": "",
+      "ext": "",
+      "jar": "",
+      "timeout": 15
+    }
+  ],
+  "lives": [
+    {
+      "name": "示例直播",
+      "type": "0",
+      "url": "https://your-live.example.com/live.m3u",
+      "epg": "",
+      "playerType": "",
+      "timeout": 15
+    }
+  ]
+}

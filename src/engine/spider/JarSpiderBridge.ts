@@ -1,0 +1,776 @@
+// src/engine/spider/JarSpiderBridge.ts
+// ★ 等效 DexClassLoader 的 JVM 桥（Windows）。
+// 流程：jar(dex) URL → 下载 → 提取 classes.dex → dex2jar 转换 → JVM 子进程 SpiderRunner 反射调用。
+// 运行时资产（resources/jvm/）：jre/（jlink 裁剪）、d2j/（dex2jar 20M）、stubs/（安卓 stub + Spider 基类 + SpiderRunner）、libs/（okhttp/gson/jsoup）。
+// 引擎层契约：所有宿主能力经 EngineHost 注入；本文件只做进程编排，不 import electron。
+import { spawn } from 'node:child_process';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { join, basename } from 'node:path';
+import type { EngineHost } from '../ports';
+import { md5Hex } from '../util/md5';
+import { NullLogger } from '../util/logger';
+import { buildZip, listZipEntries, looksLikeZip, readZipEntries, type ZipEntryData } from '../util/syncZip';
+
+export interface JarBridgeOptions {
+  /** resources/jvm 目录（含 jre/d2j/stubs/libs） */
+  jvmDir: string;
+  /** 转换后的 jar 缓存目录 */
+  cacheDir: string;
+  /** 单次调用超时 ms */
+  callTimeoutMs?: number;
+  /**
+   * shell-shim（方案 A 影子类）的真实实现路径：一份含真实 Spider 的 jar/目录。
+   * 非空即启用 shell-shim（把 shell-shim.jar 插到子进程 classpath 最前，
+   * 并透传 -Dtvbox.shellShimClasses）—— 见第十八轮结论。
+   * 默认 undefined / 空 = 关闭，普通源行为完全不变。
+   * 优先级高于环境变量 TVBOX_SHELL_SHIM_CLASSES（两者与 Java 影子类自身约定一致）。
+   */
+  shellShimClasses?: string;
+}
+
+
+export class JarSpiderBridge {
+  private readonly jvmDir: string;
+  private readonly cacheDir: string;
+  private readonly callTimeoutMs: number;
+  private readonly shellShimClasses?: string;
+  /** jar URL → 转换后 jar 本地路径（进程内缓存） */
+  private converted = new Map<string, string>();
+  private convertLocks = new Map<string, Promise<string>>();
+  /** 全局 spider jar（配置顶层 spider 字段），site.jar 优先 */
+  private globalJar = '';
+  /**
+   * 最近一次 call() 中，蜘蛛自身打印的失败原因（来自子进程 stderr 的 SpiderLog 行）。
+   * 上层在结果为空时可读取它，把「蜘蛛返回空结果」细化为「源站连接超时 / 解析失败」等。
+   * 成功或无线索时为空串。
+   */
+  private lastSpiderReason = '';
+  /** 当前存活的 JVM 子进程（退出时统一终止，防止残留） */
+  private activeChildren = new Set<import('node:child_process').ChildProcess>();
+
+  constructor(opts: JarBridgeOptions, private host?: EngineHost) {
+    this.jvmDir = opts.jvmDir;
+    this.cacheDir = opts.cacheDir;
+    this.callTimeoutMs = opts.callTimeoutMs ?? 20000;
+    this.shellShimClasses = opts.shellShimClasses;
+    mkdirSync(this.cacheDir, { recursive: true });
+    // ★ 老版本留下的转换产物可能缺 assets（v1 格式）→ 必须作废重转，否则本轮修复不生效
+    this.ensureCacheVersion();
+  }
+
+  get defaultJar(): string {
+    return this.globalJar;
+  }
+
+  /** .py 蜘蛛本地脚本缓存目录（<spiderCache>/py），与转换产物(converted)同级兄弟。 */
+  get pyCacheDir(): string {
+    return join(this.cacheDir, '..', 'py');
+  }
+
+  /**
+   * 最近一次调用的"蜘蛛端原因"（可为空）。仅在结果为空时用于细化错误提示。
+   * 典型值：`Connect timed out`（源站不可达）/ `bound must be positive`（蜘蛛内部参数异常）
+   * / `A JSONObject text must begin with '{'`（接口返回非 JSON，多为源站已改版/停服）。
+   */
+  get lastReason(): string {
+    return this.lastSpiderReason;
+  }
+
+  /** 导入配置后由宿主设置全局 spider jar URL */
+  setDefaultJar(url: string): void {
+    this.globalJar = (url || '').trim();
+  }
+
+  private javaExe(): string {
+    const p = join(this.jvmDir, 'jre', 'bin', 'java.exe');
+    if (!existsSync(p)) {
+      // 附带 jvmDir 实况，便于区分「资源目录定位错」与「资源真的没打进去」
+      let probe = '';
+      try {
+        const fs = require('node:fs') as typeof import('node:fs');
+        const parent = join(this.jvmDir, '..');
+        const siblings = fs.existsSync(parent) ? fs.readdirSync(parent).slice(0, 20).join(', ') : '(不存在)';
+        const jvmEntries = fs.existsSync(this.jvmDir) ? fs.readdirSync(this.jvmDir).join(', ') : '(目录不存在)';
+        probe = `\n  资源目录: ${this.jvmDir}\n  同级条目: ${siblings}\n  jvm 内: ${jvmEntries}`;
+      } catch { /* ignore */ }
+      throw new Error(`JRE 缺失: ${p}${probe}`);
+    }
+    return p;
+  }
+
+  private classpathJars(): string {
+    return [join(this.jvmDir, 'stubs', 'stubs.jar'), ...this.libJars()].join(';');
+  }
+
+  private libJars(): string[] {
+    const libDir = join(this.jvmDir, 'libs');
+    const out: string[] = [];
+    try {
+      const fs = require('node:fs') as typeof import('node:fs');
+      for (const f of fs.readdirSync(libDir)) if (f.endsWith('.jar')) out.push(join(libDir, f));
+    } catch { /* ignore */ }
+    return out;
+  }
+
+  /**
+   * 下载 + 转换 jar（去重并发），返回转换后 jar 的本地路径。
+   *
+   * ★ 入口统一规范化 URL：配置里 jar 常写成 `URL;md5;xxxx` 形态。
+   *   上游 TVBox 的 `jar` 字段以分号分隔，只有第一段是真正 URL，`;md5;` 是校验后缀。
+   *   历史 bug：`SpiderHost.setSpiderJar()` 把**带后缀的完整串**传进 warmup，
+   *   而 `JarSpider.jarUrls()` 在调用时已 `.split(';')[0]` 剥掉后缀 ——
+   *   两条路径得到不同的 URL，于是预热下载到的是 404 页面（9KB），
+   *   转换产物为空 → `dex2jar 转换产物为空` → 源"无法加载"。
+   *   在此处集中剥离，保证所有调用方（warmup / JarSpider / 未来新增）行为一致。
+   */
+  async ensureConverted(jarUrl: string): Promise<string> {
+    const url = normalizeJarUrl(jarUrl);
+    if (!url) throw new Error(`jar URL 为空: ${jarUrl}`);
+    const cached = this.converted.get(url);
+    if (cached) return cached;
+    let lock = this.convertLocks.get(url);
+    if (!lock) {
+      lock = this.doConvert(url).finally(() => this.convertLocks.delete(url));
+      this.convertLocks.set(url, lock);
+    }
+    return lock;
+  }
+
+  /**
+   * 确保转换缓存目录存在。
+   *
+   * 构造函数已 mkdirSync 一次，但缓存目录可能在此后被外部因素删除
+   * （用户清理、杀软、崩溃残留、旧版本升级等），届时 writeFileSync 会抛
+   * `ENOENT: no such file or directory, open '...raw.jar'` —— 这个错误信息
+   * 有极强的误导性（看起来像 jar 下载失败，实际是目录缺失）。
+   * 上游 ApiConfig.downloadJarAsync 同样在写入前 `cacheDir.mkdirs()`（ApiConfig.java:450）。
+   * 因此每次写入前兜底重建，把「目录消失」这类环境问题自动抹平。
+   */
+  private ensureCacheDir(): void {
+    if (existsSync(this.cacheDir)) return;
+    mkdirSync(this.cacheDir, { recursive: true });
+    this.host?.logger.w(`jvm-bridge 缓存目录缺失，已重建: ${this.cacheDir}`);
+  }
+
+  /**
+   * ★ 转换产物格式版本 —— 改变了「产物内容」就必须 +1。
+   *
+   * 历史：
+   * - v1：只写 dex2jar 输出（**丢掉了 assets/**，加固壳因此全废，第十二轮修复）
+   * - v2：补齐 raw jar 的非 dex 资源（assets/**、META-INF/** 等）
+   *
+   * 为什么必须有版本号：老用户机器上 `<cache>/spider/converted/<md5>.jar` 是 v1 产物，
+   * 命中缓存就直接用了 —— 新代码的 assets 补齐逻辑**永远不会执行**，
+   * 修复形同虚设。这里在缓存目录里放一个版本戳，版本不符就把转换产物整体作废重转
+   * （只删 `.jar`，不动别的；raw jar 一并删掉以保证重新下载最新内容）。
+   */
+  private static readonly CACHE_VERSION = 2;
+  private static readonly CACHE_STAMP = '.converted-version';
+
+  /** 版本不符时清空转换产物，强制重转。失败只警告，不影响主流程。 */
+  private ensureCacheVersion(): void {
+    if (!existsSync(this.cacheDir)) return;
+    const stamp = join(this.cacheDir, JarSpiderBridge.CACHE_STAMP);
+    try {
+      const cur = existsSync(stamp) ? readFileSync(stamp, 'utf8').trim() : '';
+      if (cur === String(JarSpiderBridge.CACHE_VERSION)) return;
+      const fs = require('node:fs') as typeof import('node:fs');
+      let removed = 0;
+      for (const f of fs.readdirSync(this.cacheDir)) {
+        if (f.endsWith('.jar')) {
+          try { fs.rmSync(join(this.cacheDir, f), { force: true }); removed += 1; } catch { /* ignore */ }
+        }
+      }
+      writeFileSync(stamp, String(JarSpiderBridge.CACHE_VERSION));
+      if (removed > 0) {
+        this.host?.logger.i(
+          `jvm-bridge 转换产物格式升级（v${cur || '1'} → v${JarSpiderBridge.CACHE_VERSION}），已作废 ${removed} 个旧产物并重新转换`,
+        );
+      }
+    } catch (e) {
+      this.host?.logger.w(`jvm-bridge 缓存版本检查失败: ${(e as Error).message}`);
+    }
+  }
+
+  private async doConvert(jarUrl: string): Promise<string> {
+    const key = md5Hex(jarUrl);
+    const target = join(this.cacheDir, `${key}.jar`);
+    if (existsSync(target) && statSync(target).size > 0) {
+      this.converted.set(jarUrl, target);
+      return target;
+    }
+    if (!this.host) throw new Error('JarSpiderBridge 需要 EngineHost 才能下载 jar');
+    // ★ 写盘前确保目录存在（对齐上游 downloadJarAsync 的 cacheDir.mkdirs()）
+    this.ensureCacheDir();
+    // 1) 下载 jar（含 classes.dex 的 zip）
+    const res = await this.host.http.request({ url: jarUrl, method: 'get', timeoutMs: 60000, buffer: 2 });
+    const jarBytes = Buffer.from(Array.isArray(res.content) ? res.content : Buffer.from(String(res.content), 'base64'));
+    if (jarBytes.length < 100) throw new Error(`jar 下载失败: ${jarUrl} (${res.status})`);
+    // 下载是异步的，期间目录仍可能被外部删除 → 再次兜底
+    this.ensureCacheDir();
+    const rawJar = join(this.cacheDir, `${key}.raw.jar`);
+    writeFileSync(rawJar, jarBytes);
+    // 2) dex2jar 转换（dex2jar 可直接读含 classes.dex 的 jar/apk/zip，无需先解压）
+    //
+    //    ★★ 必须显式限定堆参数 —— 这是「多数 JAR 源无法显示」的头号原因 ★★
+    //
+    //    现象：部分 jar（实测 HCCX.jar / c.jar / P4.jar，约 400~800KB）转换时
+    //    JVM 直接**崩溃**并留下 hs_err_pid*.log：
+    //        There is insufficient memory for the Java Runtime Environment to continue.
+    //        Native memory allocation (mmap) failed to map 274726912 bytes. Error detail: G1 virtual space
+    //
+    //    根因：JRE17 的默认 GC 是 G1，它会按「机器物理内存」推导堆上限。本机 8GB
+    //    物理内存 + 低可用内存场景下，G1 预留 274MB 的虚拟空间失败 → 转换进程
+    //    非零退出 → 上层只看到「转换失败」，与 jar 本身质量无关。
+    //    （同一个 jar 在安卓 ART 上完全正常 —— ART 没有这个堆推导逻辑。）
+    //
+    //    修法：-Xmx256m 给一个**明确的、小容量**的堆上限（dex2jar 处理 1MB 级 dex
+    //    绰绰有余），-XX:+UseSerialGC 换掉 G1（Serial 不预留大块虚拟空间，
+    //    启动更快、内存足迹更小）。实测三个崩溃 jar 全部恢复正常。
+    //    -XX:TieredStopAtLevel=1 进一步压低 JIT 线程/代码缓存开销（一次性转换任务，
+    //    不需要 C2 的峰值性能）。
+    const { execFileSync } = await import('node:child_process');
+    const jdk = this.javaExe();
+    const d2jDir = join(this.jvmDir, 'd2j');
+    const d2jCp = this.dirJars(d2jDir).join(';');
+    const d2jJvmArgs = [
+      '-Xmx256m',
+      '-XX:+UseSerialGC',
+      '-XX:TieredStopAtLevel=1',
+      '-XX:ReservedCodeCacheSize=32m',
+      '-Dfile.encoding=UTF-8',
+    ];
+    execFileSync(
+      jdk,
+      [...d2jJvmArgs, '-cp', d2jCp, 'com.googlecode.dex2jar.tools.Dex2jarCmd', rawJar, '-o', target, '--force'],
+      { timeout: 300000 },
+    );
+    if (!existsSync(target) || statSync(target).size === 0) throw new Error('dex2jar 转换产物为空');
+    // ★★ 把 raw jar 里 dex2jar「不认」的资源原样搬回转换产物 —— 加固/壳类蜘蛛的生死线 ★★
+    //   见 copyJarResources 的详细说明（缺 assets/*.so 会让 DexNative.<clinit> 直接 NPE）。
+    copyJarResources(rawJar, target, this.host);
+    this.converted.set(jarUrl, target);
+    return target;
+  }
+
+  private dirJars(dir: string): string[] {
+    const out: string[] = [];
+    try {
+      const fs = require('node:fs') as typeof import('node:fs');
+      for (const f of fs.readdirSync(dir)) if (f.endsWith('.jar')) out.push(join(dir, f));
+    } catch { /* ignore */ }
+    return out;
+  }
+
+  /**
+   * URL → 已转换的本地 jar 路径（须先 ensureConverted）。传入值同样规范化，避免键不匹配。
+   *
+   * ★ 只返回**磁盘上真实存在**的路径。
+   *   原因：缓存目录可能被外部清理（杀软/磁盘清理/用户手动），此时内存里的
+   *   converted 映射就变成了**失效条目**。若原样交给 SpiderRunner，它会拿到一个
+   *   指向不存在文件的 jar 参数 → 所有蜘蛛类都报
+   *   `ClassNotFoundException: com.github.catvod.spider.Xxx`，
+   *   而这类报错极易被误读成"桌面版缺接口"（实测整套配置 95 个源集体报这句）。
+   *   这里顺手把失效条目清掉，下次调用会重新下载转换，即自动恢复。
+   */
+  resolvePaths(urls: string[]): string[] {
+    const out: string[] = [];
+    for (const u of urls) {
+      const key = normalizeJarUrl(u);
+      const p = this.converted.get(key);
+      if (!p) continue;
+      if (existsSync(p)) {
+        out.push(p);
+      } else {
+        this.converted.delete(key);
+        this.host?.logger.w(`jvm-bridge 转换产物已失效，已清除缓存条目: ${p}`);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * shell-shim（方案 A 影子类）真实实现路径；非空 = 启用，空串 = 默认关闭。
+   * 优先级：构造参数 shellShimClasses > 环境变量 TVBOX_SHELL_SHIM_CLASSES。
+   * Java 侧 DexNative 影子类自身也认这个环境变量（见 stubs-src/shell-shim/DexNative.java），
+   * 这里与之对齐，形成单一控制点 —— 只有拿到"真实实现"路径时才打断普通 classpath 顺序。
+   */
+  private shellShimClassesPath(): string {
+    const fromOpt = (this.shellShimClasses ?? '').trim();
+    if (fromOpt) return fromOpt;
+    return (process.env['TVBOX_SHELL_SHIM_CLASSES'] ?? '').trim();
+  }
+
+  private shellShimJarPath(): string {
+    return join(this.jvmDir, 'stubs', 'shell-shim.jar');
+  }
+
+  /** 识别壳 jar：返回 `assets/<X>.guard` 的壳名（如 ftyshinidie），非壳返回 null。 */
+  private detectShellGuard(jarPath: string): string | null {
+    try {
+      const buf = readFileSync(jarPath);
+      if (!looksLikeZip(buf)) return null;
+      for (const name of listZipEntries(buf)) {
+        const m = /^assets\/([^/]+)\.guard$/i.exec(name);
+        if (m) return m[1];
+      }
+    } catch { /* 非 zip / 读不到 → 不是壳 */ }
+    return null;
+  }
+
+  /** 壳名 → 内置真实实现 jar 的路径（`resources/jvm/shell-shim/real/<壳名>.jar`）。 */
+  private shellShimRealPath(guard: string): string {
+    return join(this.jvmDir, 'shell-shim', 'real', `${guard}.jar`);
+  }
+
+  /**
+   * 自动适配：遍历本次要加载的 jar，识别壳并返回对应的内置真实实现路径。
+   * - 命中且有内置真实实现 → 返回其路径（启用 shell-shim）；
+   * - 命中但无内置真实实现 → 记一条警告并返回空串（维持原「壳源无法运行」提示）；
+   * - 非壳 jar → 返回空串（普通源不受影响）。
+   * 这是「壳名 → 真实实现」可插拔映射的落地：未来解出新壳，只需把 dex2jar 产物
+   * 按壳名放进 `shell-shim/real/` 目录即可，无需改代码。
+   */
+  private autoShellShim(jarPaths: string[]): string {
+    for (const p of jarPaths) {
+      const guard = this.detectShellGuard(p);
+      if (!guard) continue;
+      const real = this.shellShimRealPath(guard);
+      if (existsSync(real)) return real;
+      this.host?.logger.w(`jvm-bridge 检测到壳 jar（guard=${guard}），但无内置真实实现: ${real}`);
+    }
+    return '';
+  }
+
+  /**
+   * ★ 2026-09-16 按蜘蛛类分派额外真实实现（foni-spider.jar 优先加载）。
+   *
+   *   背景：饭太硬官方版内置的 `spider.jar`（转成 `foni-spider.jar`）是**完整构建**
+   *   （short[] 数组齐全，AppSx/AppTT/AppSK 自带 blob ext 解密 tX.i），而历史抢收的
+   *   `ftyshinidie.jar` 是残缺构建（Rc short[] 越界）。但两套构建的混淆类**同名不同
+   *   结构**（Windows 大小写不敏感下 `rC`/`Rc` 甚至无法合并进同一 jar），全局混载会
+   *   互相遮蔽导致大量源退化（实测 46 源仅 19 OK）。
+   *
+   *   对策：只对 **AppSx/AppTT/AppSK**（blob ext 源：咕咕/播客/剧圈/神车/热播/港迷等）
+   *   追加 foni-spider.jar 并排在最前，让完整构建的解密/数组生效；其余源保持
+   *   ftyshinidie.jar 单实现，行为完全不变。
+   */
+  private shimWithFoni(className: string, baseShim: string): string {
+    if (!baseShim) return baseShim;
+    if (!/AppSx|AppTT|AppSK/.test(className)) return baseShim;
+    const foni = join(this.jvmDir, 'shell-shim', 'real', 'foni-spider.jar');
+    if (!existsSync(foni)) return baseShim;
+    return `${foni};${baseShim}`;
+  }
+
+  /** 调用蜘蛛方法。jarPaths 为转换后的本地 jar 路径。className 形如 com.github.catvod.spider.Doll */
+  async call(
+    jarPaths: string[],
+    className: string,
+    method: string,
+    args: string[],
+    timeoutMs?: number,
+  ): Promise<string> {
+    // ★ shell-shim（方案 A 影子类，见 stubs-src/shell-shim/DexNative.java）——
+    //   遇到加固/壳 jar（内含 native 版 DexNative）时，把 shell-shim.jar 排在
+    //   classpath **最前**，靠类加载顺序覆盖壳里那个 native 版本，从而绕过
+    //   ARM .so 加载（第十八轮结论 §六的应用侧接入）。
+    //   默认关闭：只有拿到"真实实现 jar"路径（shellShimClasses 参数或
+    //   TVBOX_SHELL_SHIM_CLASSES 环境变量）时才启用，普通源行为完全不变。
+    const shimClasses0 = this.shellShimClassesPath() || this.autoShellShim(jarPaths);
+    // ★ AppSx/AppTT/AppSK 系追加完整构建 foni-spider.jar（优先加载，见 shimWithFoni 注释）
+    const shimClasses = this.shimWithFoni(className, shimClasses0);
+    const shimJar = this.shellShimJarPath();
+    const cpParts = [this.classpathJars(), ...jarPaths];
+    if (shimClasses && existsSync(shimJar)) cpParts.unshift(shimJar);
+    else if (shimClasses) {
+      this.host?.logger.w(`jvm-bridge 已启用 shell-shim（${shimClasses}），但未找到 shell-shim.jar: ${shimJar}，影子类不会生效`);
+    }
+    const cp = cpParts.join(';');
+    const argv = [
+      ...this.jvmPrefix(cp),
+      // ★ shell-shim 启用时，把"真实实现路径"透传给子进程（Java 影子类
+      //   DexNative 优先读系统属性 tvbox.shellShimClasses，其次环境变量）。
+      //   仅在 shimClasses 非空时追加，默认关闭下 argv 形态与历史完全一致。
+      ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []),
+      'SpiderRunner', jarPaths.join(';'), className, method, ...args,
+    ];
+    return this.runJvm(argv, className, method, timeoutMs);
+  }
+
+  /**
+   * ★ 新增：.py 蜘蛛（Jython）调用入口。
+   * spawn PythonRunner 在 JVM 内用 Jython(Py2.7) 执行 .py。
+   * argv 语义与 SpiderRunner 对齐：<pyPath> <className> <method> [ext] [args...]
+   * classpath = stubs（含 PythonRunner）+ libs（含 jython-standalone），无需蜘蛛 jar。
+   */
+  async callPython(pyPath: string, clsName: string, method: string, args: string[], timeoutMs?: number): Promise<string> {
+    const argv = [
+      ...this.jvmPrefix(this.classpathJars()),
+      'PythonRunner', pyPath, clsName, method, ...args,
+    ];
+    return this.runJvm(argv, clsName, method, timeoutMs ?? 30000);
+  }
+
+  /** 生成 JVM 子进程的公共前置参数（旗标 + classpath），jar/python 模式共用。 */
+  private jvmPrefix(cp: string): string[] {
+    // ★ 蜘蛛数据沙箱：与 converted 同级的兄弟目录。
+    //   蜘蛛的清理/写临时文件都限制在这里，绝不会碰到 converted 里的转换产物。
+    const sandboxDir = join(this.cacheDir, '..', 'sandbox');
+    try {
+      if (!existsSync(sandboxDir)) mkdirSync(sandboxDir, { recursive: true });
+    } catch {
+      /* 建不了就交给 runner 用默认目录 */
+    }
+    return [
+      // ★ 关闭字节码校验（-noverify）。原因：jar(dex) 经 dex2jar 转换后，
+      //   分支处的 StackMapTable 帧往往不完整；Android 的 ART 不依赖这些帧，
+      //   但桌面 HotSpot 在 Java7+ 会做类型校验并抛
+      //   `VerifyError: Expecting a stackmap frame at branch target N`，
+      //   表现为蜘蛛整体不可用。桌面桥只做「可信配置下的反射调用」，
+      //   关闭校验的收益（可用性）远大于风险。JDK13+ 会打印一条 deprecation
+      //   warning，属预期噪声（下面在 stderr 处理里过滤）。
+      '-noverify',
+      // ★ 限定堆上限，理由同 doConvert()：JRE17 默认 G1 会按物理内存推导堆，
+      //   在低可用内存机器上直接 mmap 失败 → JVM 崩溃（hs_err_pid*.log）、
+      //   蜘蛛表现为「空结果」。蜘蛛本身是轻量反射调用（实测单次约 590ms，
+      //   常驻内存 <100MB），256m 足够且远离崩溃边界。
+      '-Xmx256m',
+      '-XX:+UseSerialGC',
+      // ★ 指定蜘蛛数据沙箱（见上方 sandboxDir 说明）：把蜘蛛可见的
+      //   getCacheDir/getFilesDir 全部收进这个目录，避免其清理逻辑误伤
+      //   converted 下的 jar 转换产物。
+      `-Dtvbox.spiderCacheDir=${sandboxDir}`,
+      '-Dfile.encoding=UTF-8',
+      '-Dsun.stdout.encoding=UTF-8',
+      '-Dsun.stderr.encoding=UTF-8',
+      '-cp', cp,
+    ];
+  }
+
+  /** 统一 spawn + 收 stdout/stderr + 超时/退出码/lastReason 判定；call / callPython 共用。 */
+  private runJvm(argv: string[], className: string, method: string, timeoutMs?: number): Promise<string> {
+    const jdk = this.javaExe();
+    return new Promise<string>((resolve) => {
+      const child = spawn(jdk, argv, {
+        windowsHide: true,
+        timeout: timeoutMs ?? this.callTimeoutMs,
+      });
+      let out = '';
+      let err = '';
+      let timedOut = false;
+      this.activeChildren.add(child);
+      child.on('exit', () => this.activeChildren.delete(child));
+      child.stdout.on('data', (d) => (out += d));
+      child.stderr.on('data', (d) => (err += d));
+      child.on('error', (e) => {
+        this.host?.logger.e(`jvm-bridge spawn 失败: ${e.message}`);
+        this.lastSpiderReason = `JVM 进程启动失败：${e.message}`;
+        resolve('');
+      });
+      // spawn 的 timeout 是 SIGTERM；用 killed/timedOut 标出，便于给出"超时"而非"空结果"
+      child.on('exit', (_code, signal) => {
+        if (signal === 'SIGTERM') timedOut = true;
+      });
+      child.on('close', (code) => {
+        // ★ 记录本次调用的"失败原因"，供上层在结果为空时给出精确提示。
+        //   优先级：进程级问题（超时/非零退出）> 蜘蛛自身日志（SpiderLog）> 空输出。
+        //   蜘蛛的 catch 分支会把真实原因打到日志（如 "Connect timed out" / "JSONObject
+        //   text must begin with..."），但默认只在 logger 里、UI 看不到 —— 用户因此只看到
+        //   笼统的「蜘蛛返回空结果」，无法判断是源站挂了、超时了，还是缺 ext。
+        const spiderLog = extractSpiderReason(err);
+        const runnerErr = err.match(/\[SpiderRunner\.ERROR\][^\n]*/)?.[0]?.trim() ?? '';
+        const outEmpty = !out.trim();
+        if (timedOut) {
+          this.lastSpiderReason = `蜘蛛调用超时（>${Math.round((timeoutMs ?? this.callTimeoutMs) / 1000)}s），源站可能无响应`;
+        } else if (!outEmpty) {
+          this.lastSpiderReason = ''; // 有正常输出，不算失败
+        } else if (spiderLog) {
+          this.lastSpiderReason = translateSpiderLog(spiderLog);
+        } else if (runnerErr) {
+          // ★ 运行器异常同样要过一遍"说人话"翻译：这里的报错常是
+          //   UnsatisfiedLinkError / ExceptionInInitializerError / dalvik 相关类缺失 ——
+          //   全是"这个源在桌面端不成立"的信号，原样抛出用户完全看不懂。（也用同款
+          //   标签承接 PythonRunner 的 .py 错误 —— SyntaxError / ImportError 等。）
+          const raw = runnerErr.replace('[SpiderRunner.ERROR]', '').trim();
+          const abiMismatch = /Can't load this \.dll|machine code=0x[0-9a-f]+|wrong ELF class|not a valid Win32 application/i.test(err);
+          const androidShell = /DexNative|UnsatisfiedLinkError|dalvik[\/.]system[\/.]/.test(err);
+          this.lastSpiderReason = abiMismatch
+            ? '该源依赖 ARM 原生库（.so），与桌面 x64 架构不兼容，JVM 无法加载 —— 请更换其他配置源'
+            : androidShell
+              ? '该源为安卓加固/壳实现（代码加密 + 依赖原生库），桌面版无法运行 —— 请更换其他配置源'
+              : `蜘蛛运行器异常：${translateSpiderLog(raw)}`;
+        } else if (code !== 0) {
+          const nativeCrash =
+            /insufficient memory|Native memory allocation|Out of Memory Error/i.test(err) ||
+            /hs_err_pid/i.test(err) ||
+            (code !== 0 && /SIGSEGV|EXCEPTION_ACCESS_VIOLATION/i.test(err));
+          this.lastSpiderReason = nativeCrash
+            ? '桌面 JVM 运行时内存不足（该源需要更大的转换内存），请反馈此源'
+            : `JVM 进程异常退出（code=${code}）`;
+        } else {
+          this.lastSpiderReason = '';
+        }
+
+        if (err) {
+          // 过滤 JVM 级噪声（-noverify 弃用警告等），只保留有诊断价值的行。
+          const cleaned = stripJvmNoise(err);
+          // 提取运行器错误：ERROR 行 + 前 3 帧，便于诊断缺哪个 stub / 脚本问题
+          const m = runnerErr;
+          const frames = m ? err.slice(err.indexOf(m)).split('\n').slice(1, 4).join(' | ') : '';
+          const line = m
+            ? `${m}${frames ? '  ↳ ' + frames : ''}`
+            : cleaned.split('\n')[0].slice(0, 120);
+          if (code !== 0) this.host?.logger.w(`jvm-bridge ${className}.${method}: ${line}`);
+          else if (m) this.host?.logger.w(`jvm-bridge ${className}.${method} (退出0但有日志): ${line}`);
+        }
+        if (this.lastSpiderReason) {
+          this.host?.logger.i(`jvm-bridge ${className}.${method} 失败原因: ${this.lastSpiderReason}`);
+        }
+        resolve(out.trim());
+      });
+    });
+  }
+
+  /** 预热：下载+转换（导入配置后后台跑，避免首次点开卡住） */
+  async warmup(jarUrl: string): Promise<void> {
+    try {
+      await this.ensureConverted(jarUrl);
+    } catch (e) {
+      this.host?.logger.w(`jvm-bridge warmup 失败 ${jarUrl}: ${(e as Error).message}`);
+    }
+  }
+
+  /** 终止所有存活 JVM 子进程（应用退出时调用，确保无残留进程） */
+  dispose(): void {
+    for (const child of this.activeChildren) {
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.activeChildren.clear();
+  }
+}
+
+/**
+ * 把 **raw jar 里的非 dex 资源**（assets/**、lib/**、META-INF/** 等）搬进 dex2jar 的转换产物。
+ *
+ * ★★ 为什么必须有这一步（第十二轮定位到的真实根因）★★
+ *
+ * 加固/壳型 jar 的形态是：
+ * ```
+ * classes.dex                  ← 只是壳
+ * assets/wexguard_v7.so        ← ARM 原生库（密钥在里面）
+ * assets/wexshinidie.guard     ← 加密的真正代码（930KB）
+ * ```
+ * 壳的 `DexNative.<clinit>` 是这样取原生库的：
+ * ```java
+ * File so = new File(Init.context().getCacheDir(), ".wexfnw" + random());
+ * InputStream in = Init.classLoader().getResourceAsStream("assets/" + name); // name = wexguard_v7.so
+ * // 把 in 拷进 so，然后 System.load(so.getAbsolutePath())
+ * ```
+ * `Init.classLoader()` 是**加载 `Init` 的那个 ClassLoader**，也就是我们为这只 jar 建的
+ * URLClassLoader —— 所以 `assets/wexguard_v7.so` 必须在**这只 jar 里**才读得到。
+ *
+ * **而 dex2jar 只输出 `.class`，会把 `assets/`、`classes.dex` 统统丢掉。**
+ * 于是 `getResourceAsStream()` 返回 null → 紧接着 `in.read(buf)` 抛
+ * ```
+ * NullPointerException: Cannot invoke "java.io.InputStream.read(byte[])" because "<local4>" is null
+ *     at com.github.catvod.spider.DexNative.<clinit>
+ *     at com.github.catvod.spider.Init.init
+ * ```
+ * `DexNative` 的类初始化一旦失败就被 JVM 标记为 erroneous → **该 jar 全部源同时报废**
+ * （实测一套配置 95 个源同一报错）。
+ *
+ * 第十一轮曾把这类报错定性为「安卓加固/壳，架构限制，无解」—— **那个定性是错的**：
+ * 连"读 assets"这一步都没走到，报的 NPE 与 ARM/x86 架构毫无关系。
+ * 真正的原因是移植侧把资源丢了。补齐资源后同一条链的报错变成
+ * `UnsatisfiedLinkError: Can't load this .dll (machine code=0x34) on a AMD 64-bit platform`
+ * —— 到这一步才是真正的架构问题，且它是**下一步要解决的对象**，不是"无解"。
+ *
+ * 实现要点：
+ * - 直接读 **raw jar**（不用转换产物做源），避免"把已合并的产物再三重复合并"；
+ * - 只搬运 dex2jar **不会产出**的条目（`*.dex` 与 dex2jar 的输出根目录下的 `.class` 跳过），
+ *   其余一律原样字节搬运 —— `getResourceAsStream` 只认字节，不做任何解释；
+ * - 目录条目按需补建，避免 zip 里出现"有文件无目录"的写法（部分解析器不认）；
+ * - 失败只记警告、绝不抛出：合并是**增强**，不该让一个能转换的 jar 变成"转换失败"。
+ *
+ * 兼容 `jar uf` 的等价做法（本函数就是它的进程内实现，省掉一次 JVM 启动 + 磁盘中转）。
+ */
+export function copyJarResources(rawJar: string, convertedJar: string, host?: EngineHost): void {
+  try {
+    const fs = require('node:fs') as typeof import('node:fs');
+    const raw = fs.readFileSync(rawJar);
+    if (!looksLikeZip(raw)) return;
+    const converted = fs.readFileSync(convertedJar);
+
+    const existing = new Set(listZipEntries(converted));
+    const carried: ZipEntryData[] = [];
+    for (const e of readZipEntries(raw)) {
+      // dex2jar 只输出 .class；`classes*.dex` 是壳的 dalvik 字节码，搬过去对 JVM 没意义
+      if (/\.dex$/i.test(e.name)) continue;
+      if (existing.has(e.name)) continue;
+      carried.push(e);
+    }
+    if (carried.length === 0) return;
+
+    // 为新增文件的父目录补目录条目（保持与 `jar` 工具一致的布局）
+    const dirs: ZipEntryData[] = [];
+    const seenDir = new Set<string>();
+    for (const e of carried) {
+      const parts = e.name.split('/');
+      for (let i = 1; i < parts.length; i++) {
+        const d = parts.slice(0, i).join('/') + '/';
+        if (!existing.has(d) && !seenDir.has(d)) {
+          seenDir.add(d);
+          dirs.push({ name: d, bytes: Buffer.alloc(0) });
+        }
+      }
+    }
+
+    const merged = buildZip([...readZipEntries(converted), ...dirs, ...carried]);
+    fs.writeFileSync(convertedJar, merged);
+    host?.logger.i(`jvm-bridge 已补齐转换产物中的非 dex 资源 ${carried.length} 项（加固壳必需）`);
+  } catch (e) {
+    // 资源合并属于增强步骤：失败不能让一个"已成功转换"的 jar 变成"转换失败"
+    host?.logger.w(`jvm-bridge 资源合并失败（不影响普通 jar）: ${(e as Error).message}`);
+  }
+}
+
+
+/**
+ * 把蜘蛛自己抛出的行话翻译成用户能懂的中文。
+ *
+ * 蜘蛛日志是给写蜘蛛的人看的（`Connect timed out` / `A JSONObject text must begin with '{'`），
+ * 直接展示给普通用户等于没提示。这里做一层"人话映射"，命中不了则原样返回（不臆造）。
+ */
+export function translateSpiderLog(log: string): string {
+  const s = (log || '').trim();
+  if (!s) return '';
+  const rules: Array<[RegExp, string]> = [
+    [/Connect timed out/i, '连接源站超时，站点可能已停服或网络不通'],
+    [/SocketTimeoutException|Read timed out|timeout/i, '请求源站超时，站点响应过慢或不可达'],
+    [/UnknownHostException/i, '源站域名无法解析，站点可能已更换网址'],
+    [/Connection refused/i, '源站拒绝连接，服务可能已下线'],
+    [/JSONObject text must begin|JSONArray text must start/i,
+      '源站返回的不是预期数据（多为站点已改版或停服，原接口已失效）'],
+    [/bound must be positive/i, '蜘蛛内部参数异常，通常需要为该源补充 ext 配置'],
+    [/Index \d+ out of bounds/i, '源站返回的数据结构与蜘蛛预期不符（站点可能已改版）'],
+    [/SSLHandshake|PKIX|certificate/i, '与源站建立安全连接失败（证书问题或站点异常）'],
+    // ---- ★ .py 蜘蛛（Jython）专属：Python3-only 语法在 Jython(Py2.7) 下必然失败 ----
+    [/SyntaxError|invalid syntax|NameError|print[ (]|f-string|f['"]|EOL while scanning/i,
+      '该蜘蛛可能为 Python3 语法，Jython 仅支持 Python2.7，桌面版无法 1:1 运行（需端口或脚本兼容 Py2）'],
+    [/ImportError|No module named/i,
+      '该 Python 蜘蛛依赖第三方库（如 requests/lxml），Jython 内置库有限，桌面版无法加载该依赖'],
+    // ---- 桌面端架构性不兼容（对齐安卓原生能力缺失）----
+    // 这一类必须排在通用的 ClassNotFound/NoSuchField 规则之前，否则会被后者吞掉，
+    // 用户拿到的是一句"依赖缺失请反馈"，看不出「这个源在桌面端根本不成立」。
+    //
+    // ★ 第十二轮校正：加固壳的真实报错**不是**"找不到原生库"，而是
+    //   `UnsatisfiedLinkError: <path>: Can't load this .dll (machine code=0x34) on a AMD 64-bit platform`
+    //   —— 资源已经找对了（见 copyJarResources 补齐 assets 的说明），卡在 CPU 架构上。
+    //   所以「原生库 ABI 不匹配」必须自成一条，且排在「找不到原生库」之前。
+    [/Can't load this \.dll|machine code=0x[0-9a-f]+|wrong ELF class|not a valid Win32 application/i,
+      '该源依赖 ARM 原生库（.so），与桌面 x64 架构不兼容，JVM 无法加载 —— 请更换其他配置源'],
+    [/UnsatisfiedLinkError|native method .* not found|no .* in java\.library\.path/i,
+      '该源依赖安卓原生库（.so），桌面版无法加载（架构限制，非移植缺陷）'],
+    [/dalvik[./]system[./]|DexClassLoader|NoClassDefFoundError: dalvik/i,
+      '该源使用安卓动态 dex 加载（加固/壳），桌面版无法运行（架构限制，非移植缺陷）'],
+    // DEX 头部魔数：加载器把 dex 当类文件读时会给出这个字节序列
+    [/dex\n?035|invalid dex|DexFile/i,
+      '该源携带 dalvik 字节码（dex），桌面 JVM 无法执行（架构限制）'],
+    // ---- ★ 蜘蛛"自身类"找不到 ≠ 桌面版缺接口 ----
+    //   `com.github.catvod.spider.Xxx` 是蜘蛛 jar 里的类，找不到它只可能是
+    //   "这只 jar 没加载成功"（缓存丢失/下载失败/配置里的 jar 与 api 不匹配），
+    //   跟"桌面版缺 android.* 接口"完全是两回事。这条必须排在通用的
+    //   ClassNotFound 规则之前，否则用户会被误导成"兼容性问题请反馈"，
+    //   进而反复反馈一个根本不用修的问题（实测：缓存目录被外部清理后，
+    //   95 个源全部报这一句）。
+    [/ClassNotFoundException: ?com\.github\.catvod\.spider\./i,
+      '蜘蛛类未找到：该源指向的 jar 没有加载成功（配置与 jar 不匹配，或 jar 资源已失效）'],
+    [/ClassNotFoundException|NoSuchMethodError|NoSuchFieldError/i,
+      '蜘蛛依赖的接口在桌面版缺失（属兼容性问题，请反馈）'],
+    [/ExceptionInInitializerError/i,
+      '蜘蛛静态初始化失败（内部依赖在桌面版缺失，请反馈此源）'],
+  ];
+  for (const [re, human] of rules) if (re.test(s)) return human;
+  return s.slice(0, 120);
+}
+
+/**
+ * 规范化 jar URL：剥离 `;md5;xxxx` 等后缀，只保留真正的 URL 段。
+ *
+ * 上游 TVBox 约定 `jar` / `spider` 字段可写成 `URL;md5;校验值` 或 `URL1|URL2`（多备选）。
+ * 下载/转换只应针对 URL 段，`md5` 是完整性校验元数据、不是 URL 的一部分。
+ *
+ * 对照：`JarSpider.jarUrls()` 早就做了 `.split(';')[0]`，但 `warmup` 路径曾直接
+ * 传入原始串 —— 两条路径不一致会让同一个 jar 产生两个不同缓存键，其中一个
+ * 下载到的是错误页。此处收敛为唯一实现，任何入口都得到同一结果。
+ */
+export function normalizeJarUrl(raw: string): string {
+  const v = (raw || '').trim();
+  if (!v) return '';
+  // 多备选 URL 用 `|` 分隔，取第一个（与 JarSpider.jarUrls 的语义一致）
+  const first = v.split('|')[0].trim();
+  // 取分号前的主 URL 段；`;md5;xxx`、`;timeout;xxx` 等后缀一律丢弃
+  return first.split(';')[0].trim();
+}
+
+/**
+ * 从子进程 stderr 中提取"蜘蛛自身报告的原因"。
+ *
+ * 蜘蛛在 catch 分支里通常用 `SpiderLog.e(msg, throwable)` 打印，桌面端由
+ * `android.util.Log` stub 落到 stderr（形如 `[android.Log.D] SpiderLog: <原因> :: <异常>`）。
+ * 这里取**最后一条** SpiderLog（越靠后越接近真实出口），并压成一行短文本。
+ * 找不到返回空串（不臆造原因）。
+ */
+export function extractSpiderReason(stderr: string): string {
+  if (!stderr) return '';
+  const lines = stderr.split(/\r?\n/);
+  // 从后往前找 SpiderLog 行（蜘蛛的失败原因通常最后打印）
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    const idx = line.indexOf('SpiderLog:');
+    if (idx < 0) continue;
+    let msg = line.slice(idx + 'SpiderLog:'.length).trim();
+    // 去掉 " :: <异常类>: <详细>" 尾巴，只留人可读的前半句
+    const sep = msg.indexOf(' :: ');
+    if (sep > 0) msg = msg.slice(0, sep).trim();
+    // ★ 只保留「真正的失败原因」。以下日志前缀属蜘蛛成功路径/启动路径的提示，不是失败：
+    //   - `自定义爬虫代码加载成功`（简/繁两种写法都有，繁体曾漏过滤导致 28 条假失败）
+    //   - `获取到源码--> ...`（蜘蛛已成功取到源站正文，随后解析，属成功日志）
+    if (msg && !/^(自定义爬虫代码加载成功|自定義爬蟲代碼載入成功|获取到源码-->)/.test(msg)) return msg.slice(0, 120);
+  }
+  return '';
+}
+
+/**
+ * 过滤 JVM 级噪声，只留下有诊断价值的 stderr 行。
+ *
+ * 已知噪声（不代表蜘蛛失败）：
+ * - `-noverify` / `-Xverify:none` 在 JDK13+ 的 deprecation warning
+ * - 混淆蜘蛛内部的反射探测噪声（`NoSuchMethodException` / `NoSuchFieldException`），
+ *   它们被蜘蛛自己的 try/catch 吞掉，属于"探测能力存在与否"的正常流程
+ * - `Picked up JAVA_TOOL_OPTIONS` 之类的环境提示
+ *
+ * 注意：**不要**过滤 `[SpiderRunner.ERROR]`，那是真实失败信号。
+ */
+export function stripJvmNoise(stderr: string): string {
+  if (!stderr) return '';
+  return stderr
+    .split(/\r?\n/)
+    .filter((l) => {
+      const t = l.trim();
+      if (!t) return false;
+      if (/were deprecated in JDK 13 and will likely be removed/.test(t)) return false;
+      if (/^java\.lang\.NoSuchMethodException:/.test(t)) return false;
+      if (/^java\.lang\.NoSuchFieldException:/.test(t)) return false;
+      if (/^Picked up .*OPTIONS/.test(t)) return false;
+      if (/^at (java\.base\/)?java\.lang\.Class\.(getMethod|getDeclaredMethod|getField|getDeclaredField)\b/.test(t)) return false;
+      if (/^at (java\.base\/)?jdk\.internal\.reflect\./.test(t)) return false;
+      return true;
+    })
+    .join('\n');
+}

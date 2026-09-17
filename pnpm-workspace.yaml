@@ -1,0 +1,8 @@
+allowBuilds:
+  electron: set this to true or false
+  esbuild: set this to true or false
+# pnpm 11 的设置（package.json 的 "pnpm" 字段不再被读取）
+# 允许 electron/esbuild 执行 postinstall（下载二进制，打包必需）
+onlyBuiltDependencies:
+  - electron
+  - esbuild
