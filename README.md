@@ -1,6 +1,7 @@
 # TVBox Win
 
 安卓 TVBox（CatVod 引擎）的 Windows 桌面移植 —— Electron + React + TypeScript + Vite。
+纯Vibe coding，本人0代码基础，包括开源至Github均由AI完成
 
 > 本项目是**个人学习/研究性质的复刻实现**，与安卓版及任何第三方站点无隶属关系。
 > 仓库仅包含**核心源码**，不含任何第三方私有蜘蛛 jar、JVM 运行时、逆向壳或专有产物。
