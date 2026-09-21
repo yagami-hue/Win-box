@@ -10,16 +10,21 @@ const here = dirname(fileURLToPath(import.meta.url));
 const fx = join(here, 'fixtures');
 const read = (f: string) => readFileSync(join(fx, f), 'utf-8');
 
-describe('m3u — 频道名取最后一个逗号之后', () => {
-  it('NAME_PATTERN = .*,(.+?)$ → 逗号后的全部', () => {
+describe('m3u — 频道名提取（★2026-09-20 用户授权修复：含逗号频道名不再截断）', () => {
+  it('普通 EXTINF 行 → 逗号后的频道名', () => {
     const m3u = '#EXTM3U\n#EXTINF:-1 tvg-id="1" tvg-name="CCTV1" group-title="央视",CCTV1\nhttp://a/1\n';
     const g = parseToJsonArray(m3u);
     expect(g[0].channels[0].name).toBe('CCTV1');
   });
-  it('频道名含逗号 → 取最后一个', () => {
+  it('频道名含逗号 → 完整保留（上游取最后逗号会截断为末段）', () => {
     const m3u = '#EXTM3U\n#EXTINF:-1 group-title="G",a,b,channel\nhttp://a\n';
     const g = parseToJsonArray(m3u);
-    expect(g[0].channels[0].name).toBe('channel');
+    expect(g[0].channels[0].name).toBe('a,b,channel');
+  });
+  it('属性值含逗号（group-title="央视,综合"）→ 引号内不误切', () => {
+    const m3u = '#EXTM3U\n#EXTINF:-1 group-title="央视,综合",CCTV1\nhttp://a\n';
+    const g = parseToJsonArray(m3u);
+    expect(g[0].channels[0].name).toBe('CCTV1');
   });
 });
 

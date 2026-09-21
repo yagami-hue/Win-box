@@ -195,6 +195,17 @@ export interface PlayResult {
   message?: string;
   /** 蜘蛛解析标记：生态里可能是 0/1，也可能是解析站 URL → 透传不加工 */
   jx?: number | string;
+  /** ★ 播放地址属于「cookie 型」网盘且该 provider 未绑定 → 渲染层提示去配置页绑定（值为网盘 provider，如 quark/uc/baidu/115） */
+  needDriveCookieBind?: string;
+}
+
+// ---------- TMDB 元数据补全（源缺封面/缺简介时的兜底，主进程侧查询） ----------
+export interface MetaHit {
+  title: string;
+  year: number | '';
+  poster: string; // 完整可引用 URL（https://image.tmdb.org/t/p/w342/...）
+  overview: string;
+  type: 'movie' | 'tv';
 }
 
 // ---------- 导入诊断 ----------
@@ -342,6 +353,12 @@ export interface KVStore {
   get(k: string): string;
   set(k: string, v: string): void;
   delete(k: string): void;
+}
+
+/** 老板键设置（全局快捷键隐藏/恢复全部窗口） */
+export interface BossKeySettings {
+  enabled: boolean;
+  accel: string; // Electron accelerator，如 'CommandOrControl+Shift+B'
 }
 
 export interface Logger {

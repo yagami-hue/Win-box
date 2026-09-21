@@ -80,7 +80,16 @@ export class PySpider extends Spider {
       // A1：脚本下载/缓存失败不再静默返回空串，直接抛错上屏
       throw new SourceProblemError('SPIDER_ERROR', this.loadError, { sourceKey: this.siteKey });
     }
-    return this.bridge.callPython(this.pyPath, this.clsName, method, [this.enrichedExt(), ...args]);
+    try {
+      return await this.bridge.callPython(this.pyPath, this.clsName, method, [this.enrichedExt(), ...args]);
+    } catch (e) {
+      // ★ release76：Jython 运行时缺失/按需下载失败 → 明确提示（不静默空结果）
+      throw new SourceProblemError(
+        'PY_UNSUPPORTED',
+        e instanceof Error ? e.message : String(e),
+        { sourceKey: this.siteKey },
+      );
+    }
   }
 
   /** init(Context, ext) 的 ext：把宿主网盘 token 实时并入 ext 顶层（与 JarSpider 一致）。 */

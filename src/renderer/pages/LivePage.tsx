@@ -5,6 +5,20 @@ import type { LiveGroup, LiveBean } from '../../shared/types';
 import VideoPlayer from '../components/VideoPlayer';
 import { splitLine } from '../../engine/live/LiveUtils';
 
+// ---- 频道选择记忆：切走再返回直播页时恢复上次浏览的分组/频道/线路（本地持久化）----
+const LIVE_MEM_KEY = 'winbox-live-mem';
+interface LiveMem { liveIdx?: number; groupName?: string; channelName?: string; lineIdx?: number }
+function loadLiveMem(): LiveMem {
+  try {
+    return JSON.parse(localStorage.getItem(LIVE_MEM_KEY) || '{}') as LiveMem;
+  } catch {
+    return {};
+  }
+}
+function saveLiveMem(m: LiveMem): void {
+  try { localStorage.setItem(LIVE_MEM_KEY, JSON.stringify(m)); } catch { /* ignore */ }
+}
+
 export default function LivePage() {
   const [lives, setLives] = useState<LiveBean[]>([]);
   const [liveIdx, setLiveIdx] = useState(0);
@@ -57,9 +71,17 @@ export default function LivePage() {
       const r = await client.loadLive(index);
       setGroups(r.groups);
       if (r.groups.length) {
-        setGroupName(r.groups[0].group);
-        if (r.groups[0].channels.length) {
-          pickChannel(r.groups[0], r.groups[0].channels[0].name, 0, r.groups);
+        // 恢复上次浏览的分组/频道/线路（仅当记忆与当前线路对应且组/频道仍存在）
+        const mem = loadLiveMem();
+        const fromMem = mem.liveIdx === index;
+        const g = fromMem && mem.groupName ? r.groups.find((x) => x.group === mem.groupName) : undefined;
+        const group = g || r.groups[0];
+        setGroupName(group.group);
+        const ch = fromMem && mem.channelName && group.channels.some((c) => c.name === mem.channelName)
+          ? group.channels.find((c) => c.name === mem.channelName)!
+          : group.channels[0];
+        if (group.channels.length && ch) {
+          pickChannel(group, ch.name, fromMem ? (mem.lineIdx || 0) : 0, r.groups);
         }
       }
     } catch (e) {
@@ -73,6 +95,7 @@ export default function LivePage() {
     setGroupName(g.group);
     setChannelName(name);
     setLineIdx(li);
+    saveLiveMem({ liveIdx, groupName: g.group, channelName: name, lineIdx: li });
     const ch = g.channels.find((c) => c.name === name);
     if (ch && ch.urls.length) {
       const line = splitLine(ch.urls[li] || ch.urls[0], li + 1);
@@ -118,7 +141,7 @@ export default function LivePage() {
                 <div className="row" style={{ marginBottom: 8 }}>
                   <span className="muted">线路：</span>
                   {lines.map((l) => (
-                    <span key={l.index} className={`tag ${l.index - 1 === lineIdx ? 'active' : ''}`} onClick={() => { setLineIdx(l.index - 1); setPlayUrl(l.url); }}>
+                    <span key={l.index} className={`tag ${l.index - 1 === lineIdx ? 'active' : ''}`} onClick={() => { setLineIdx(l.index - 1); setPlayUrl(l.url); saveLiveMem({ liveIdx, groupName, channelName, lineIdx: l.index - 1 }); }}>
                       {l.name}
                     </span>
                   ))}

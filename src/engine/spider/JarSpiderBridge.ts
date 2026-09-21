@@ -26,6 +26,13 @@ export interface JarBridgeOptions {
    * 优先级高于环境变量 TVBOX_SHELL_SHIM_CLASSES（两者与 Java 影子类自身约定一致）。
    */
   shellShimClasses?: string;
+  /**
+   * ★ jython（.py 蜘蛛运行时）按需下载落盘目录（需可写；安装版建议 userData）。
+   * release76 起 jython-standalone(45MB) 不再打进安装包 —— 瘦身最大单项；
+   * 首次遇到 .py 源时从内置镜像下载到此目录，联网即可用、离线优雅降级。
+   * 缺省 = 随 jvmDir/libs 存在则用 libs，否则 .py 源降级。
+   */
+  pyRuntimeDir?: string;
 }
 
 
@@ -34,6 +41,7 @@ export class JarSpiderBridge {
   private readonly cacheDir: string;
   private readonly callTimeoutMs: number;
   private readonly shellShimClasses?: string;
+  private readonly pyRuntimeDir?: string;
   /** jar URL → 转换后 jar 本地路径（进程内缓存） */
   private converted = new Map<string, string>();
   private convertLocks = new Map<string, Promise<string>>();
@@ -53,6 +61,7 @@ export class JarSpiderBridge {
     this.cacheDir = opts.cacheDir;
     this.callTimeoutMs = opts.callTimeoutMs ?? 20000;
     this.shellShimClasses = opts.shellShimClasses;
+    this.pyRuntimeDir = opts.pyRuntimeDir;
     mkdirSync(this.cacheDir, { recursive: true });
     // ★ 老版本留下的转换产物可能缺 assets（v1 格式）→ 必须作废重转，否则本轮修复不生效
     this.ensureCacheVersion();
@@ -402,14 +411,61 @@ export class JarSpiderBridge {
    * ★ 新增：.py 蜘蛛（Jython）调用入口。
    * spawn PythonRunner 在 JVM 内用 Jython(Py2.7) 执行 .py。
    * argv 语义与 SpiderRunner 对齐：<pyPath> <className> <method> [ext] [args...]
-   * classpath = stubs（含 PythonRunner）+ libs（含 jython-standalone），无需蜘蛛 jar。
+   * classpath = stubs（含 PythonRunner）+ libs + jython（见 ensurePythonRuntime）。
    */
   async callPython(pyPath: string, clsName: string, method: string, args: string[], timeoutMs?: number): Promise<string> {
+    // ★ release76：jython-standalone（45MB）不再打包内置 → 按需下载；失败抛错由上层
+    //   （PySpider）转成 SourceProblemError 上屏，不静默返回空。
+    const pyJar = await this.ensurePythonRuntime();
+    const base = this.classpathJars();
+    const cp = pyJar && !pyJar.startsWith(join(this.jvmDir, 'libs')) ? `${base};${pyJar}` : base;
     const argv = [
-      ...this.jvmPrefix(this.classpathJars()),
+      ...this.jvmPrefix(cp),
       'PythonRunner', pyPath, clsName, method, ...args,
     ];
     return this.runJvm(argv, clsName, method, timeoutMs ?? 30000);
+  }
+
+  /** jython 本地 jar 名（与 Maven Central 产物名一致） */
+  private static readonly PYTHON_JAR = 'jython-standalone-2.7.3.jar';
+  /** 下载源：Maven Central 官方 + 华为云镜像（国内可达性更稳），依次尝试 */
+  private static readonly PYTHON_URLS = [
+    'https://repo1.maven.org/maven2/org/python/jython-standalone/2.7.3/jython-standalone-2.7.3.jar',
+    'https://mirrors.huaweicloud.com/repository/maven/org/python/jython-standalone/2.7.3/jython-standalone-2.7.3.jar',
+  ];
+
+  /**
+   * 确保 Jython 运行时可用，返回 jython jar 的绝对路径；失败抛错（含可执行提示）。
+   * 优先级：随包 libs（旧安装/开发机仍内置）→ pyRuntimeDir 已下载 → 按需下载。
+   */
+  private async ensurePythonRuntime(): Promise<string> {
+    const bundled = join(this.jvmDir, 'libs', JarSpiderBridge.PYTHON_JAR);
+    if (existsSync(bundled)) return bundled;
+    if (!this.pyRuntimeDir) throw new Error('python 源需要 Jython 运行时，但未配置下载目录');
+    const target = join(this.pyRuntimeDir, JarSpiderBridge.PYTHON_JAR);
+    if (existsSync(target) && statSync(target).size > 1024 * 1024) return target;
+    const logger = this.host?.logger;
+    // 下载 45MB 大文件，超时放宽容；buffer:2 拿 base64（宿主 HttpClient）
+    let lastErr = '';
+    for (const url of JarSpiderBridge.PYTHON_URLS) {
+      try {
+        logger?.i?.('jython: 首次使用 .py 源，正在下载 Python 运行时（约 45MB）…');
+        const res = await this.host!.http.request({ url, method: 'get', timeoutMs: 180000, buffer: 2 });
+        const buf = Buffer.from(Array.isArray(res.content) ? res.content as unknown as number[] : Buffer.from(String(res.content), 'base64'));
+        if (buf.length > 1024 * 1024) {
+          mkdirSync(this.pyRuntimeDir!, { recursive: true });
+          writeFileSync(target, buf);
+          logger?.i?.('jython: Python 运行时已下载到 ' + target);
+          return target;
+        }
+        lastErr = `下载内容过小(${buf.length}B)`;
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : String(e);
+      }
+    }
+    throw new Error(
+      `python 源需要 Jython 运行时，自动下载失败（${lastErr}）。可手动将 jython-standalone-2.7.3.jar 放入 ${this.pyRuntimeDir} 后重试`,
+    );
   }
 
   /** 生成 JVM 子进程的公共前置参数（旗标 + classpath），jar/python 模式共用。 */

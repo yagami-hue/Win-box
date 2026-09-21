@@ -17,8 +17,11 @@ import type {
   UserProfile,
   AuditItem,
   FilterGroup,
+  BossKeySettings,
 } from '../../shared/types';
 import type { SubtitleCandidate, SubtitleSettings } from '../../shared/subtitle';
+import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
+import type { MetaHit } from '../../shared/types';
 
 interface HomeResult {
   sortClasses: { id: string; name: string; flag?: string; filters?: FilterGroup[] }[];
@@ -63,6 +66,8 @@ declare global {
         vodDebug: (key: string) => Promise<IpcResult<SourceDebugReport>>;
         audit: () => Promise<IpcResult<AuditItem[]>>;
         cacheClear: () => Promise<IpcResult<{ freedBytes: number; cleared: string[]; failed: string[] }>>;
+        gotoAccount: () => Promise<IpcResult<void>>;
+        onNavCfgAccount: (cb: () => void) => () => void;
       };
       vod: {
         home: (key: string) => Promise<IpcResult<HomeResult>>;
@@ -81,6 +86,16 @@ declare global {
         set: (patch: Partial<SubtitleSettings>) => Promise<IpcResult<SubtitleSettings>>;
         search: (name: string) => Promise<IpcResult<SubtitleCandidate[]>>;
         fetch: (cand: SubtitleCandidate) => Promise<IpcResult<string>>;
+      };
+      danmaku: {
+        get: () => Promise<IpcResult<DanmakuSettingsView>>;
+        set: (patch: Partial<DanmakuSettings>) => Promise<IpcResult<DanmakuSettingsView>>;
+        search: (name: string) => Promise<IpcResult<DanmakuAnime[]>>;
+        episodes: (bangumiId: number, animeTitle?: string) => Promise<IpcResult<DanmakuCandidate[]>>;
+        fetch: (episodeId: number) => Promise<IpcResult<string>>;
+      };
+      meta: {
+        search: (name: string, year?: string) => Promise<IpcResult<MetaHit | null>>;
       };
       drives: {
         get: () => Promise<IpcResult<Record<string, string>>>;
@@ -101,17 +116,32 @@ declare global {
         close: () => Promise<IpcResult<void>>;
         isMaximized: () => Promise<IpcResult<boolean>>;
       };
+      net: {
+        onSpeed: (cb: (kbs: number) => void) => () => void;
+      };
       player: {
         open: (init: unknown) => Promise<IpcResult<void>>;
         switchEp: (epIndex: number) => Promise<IpcResult<void>>;
         isOpen: () => Promise<IpcResult<{ open: boolean }>>;
         close: () => Promise<IpcResult<void>>;
+        setMini: (isMini: boolean) => Promise<IpcResult<{ mini: boolean }>>;
+        isMini: () => Promise<IpcResult<{ mini: boolean }>>;
         onInit: (cb: (init: unknown) => void) => () => void;
         onSwitchEp: (cb: (epIndex: number) => void) => () => void;
+        onMini: (cb: (mini: boolean) => void) => () => void;
+      };
+      boss: {
+        get: () => Promise<IpcResult<BossKeySettings>>;
+        set: (patch: Partial<BossKeySettings>) => Promise<IpcResult<{ settings: BossKeySettings; registered: boolean }>>;
+        onEnter: (cb: () => void) => () => void;
+        onExit: (cb: () => void) => () => void;
       };
       merge: {
         export: (ids: string[]) => Promise<IpcResult<{ content: string; summary: { name: string; kept: number; duplicated: number; total: number; error?: string }[] }>>;
         save: (a: { content: string; defaultName?: string }) => Promise<IpcResult<{ saved: boolean; path: string }>>;
+      };
+      quark: {
+        cleanup: () => Promise<IpcResult<void>>;
       };
     };
   }
@@ -147,6 +177,9 @@ export const client = {
   vodDebug: (key: string) => unwrap(window.api.config.vodDebug(key)),
   audit: () => unwrap(window.api.config.audit()),
   cacheClear: () => unwrap(window.api.config.cacheClear()),
+  // ★ 播放网盘资源未绑定 cookie → 让主窗口跳到「配置 → 账号与凭据」tab（播放器窗口也走此路径）
+  gotoCfgAccount: () => unwrap(window.api.config.gotoAccount()),
+  onNavCfgAccount: (cb: () => void) => window.api.config.onNavCfgAccount(cb),
   winMinimize: () => unwrap(window.api.win.minimize()),
   winMaximize: () => unwrap(window.api.win.maximize()),
   winClose: () => unwrap(window.api.win.close()),
@@ -158,8 +191,17 @@ export const client = {
   playerClose: () => unwrap(window.api.player.close()),
   playerOnInit: (cb: (init: unknown) => void) => window.api.player.onInit(cb),
   playerOnSwitchEp: (cb: (epIndex: number) => void) => window.api.player.onSwitchEp(cb),
+  playerSetMini: (isMini: boolean) => unwrap(window.api.player.setMini(isMini)),
+  playerIsMini: () => unwrap(window.api.player.isMini()),
+  playerOnMini: (cb: (mini: boolean) => void) => window.api.player.onMini(cb),
+  bossGet: () => unwrap(window.api.boss.get()),
+  bossSet: (patch: Partial<BossKeySettings>) => unwrap(window.api.boss.set(patch)),
+  bossOnEnter: (cb: () => void) => window.api.boss.onEnter(cb),
+  bossOnExit: (cb: () => void) => window.api.boss.onExit(cb),
   mergeExport: (ids: string[]) => unwrap(window.api.merge.export(ids)),
   mergeSave: (a: { content: string; defaultName?: string }) => unwrap(window.api.merge.save(a)),
+  // 夸克落盘文件清理（播放页/播放器页卸载、窗口关闭时触发）
+  quarkCleanup: () => unwrap(window.api.quark.cleanup()),
   driveGet: () => unwrap(window.api.drives.get()),
   driveSet: (provider: string, token: string) => unwrap(window.api.drives.set({ provider, token })),
   driveRemove: (provider: string) => unwrap(window.api.drives.remove(provider)),
@@ -178,6 +220,14 @@ export const client = {
   subtitleSet: (patch: Partial<SubtitleSettings>) => unwrap(window.api.subtitle.set(patch)),
   subtitleSearch: (name: string) => unwrap(window.api.subtitle.search(name)),
   subtitleFetch: (cand: SubtitleCandidate) => unwrap(window.api.subtitle.fetch(cand)),
+  danmakuGet: () => unwrap(window.api.danmaku.get()),
+  danmakuSet: (patch: Partial<DanmakuSettings>) => unwrap(window.api.danmaku.set(patch)),
+  danmakuSearch: (name: string) => unwrap(window.api.danmaku.search(name)),
+  danmakuEpisodes: (bangumiId: number, animeTitle?: string) => unwrap(window.api.danmaku.episodes(bangumiId, animeTitle)),
+  danmakuFetch: (episodeId: number) => unwrap(window.api.danmaku.fetch(episodeId)),
+  // TMDB 元数据补全（缺封面/缺简介兜底，凭据内置密文）
+  metaSearch: (name: string, year?: string) => unwrap(window.api.meta.search(name, year)),
+  netSpeed: (cb: (kbs: number) => void) => window.api.net.onSpeed(cb),
 };
 
 export type { HomeResult, ImportReturn };

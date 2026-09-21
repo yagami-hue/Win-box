@@ -5,9 +5,10 @@ import { UserConfigManager } from '../store/UserConfigManager';
 import { DriveStore } from '../store/DriveStore';
 import { getAdapter } from '../net/qr';
 import { runDriveWebLogin } from '../net/webLogin';
-import { quarkTransfer, isQuarkSharePlay } from '../net/quarkTransfer';
+import { quarkTransfer, isQuarkSharePlay, quarkFileDelete } from '../net/quarkTransfer';
 import { fileLogger } from '../util/logger';
 import { parseSiteConfig, parseSiteConfigWithBase, type ParseResult } from '../../engine/config/ApiConfigParser';
+import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName, type MultiRepo } from '../../engine/config/multiRepo';
 import { SourceViewModel } from '../../engine/vod/SourceViewModel';
 import { parseToJsonArray, toLiveGroups } from '../../engine/live/TxtSubscribe';
 import type {
@@ -40,6 +41,13 @@ import { SubtitleStore } from '../subtitle/SubtitleStore';
 import { assrtSearch, assrtFetch, assrtSearchMulti } from '../subtitle/assrtProvider';
 import { buildSearchQuery, normalizeTitle, normalizeSubtitleQuery, titleVariants } from '../../engine/subtitle/normalizeQuery';
 import type { SubtitleCandidate, SubtitleSettings } from '../../shared/subtitle';
+import { DanmakuStore } from '../danmaku/DanmakuStore';
+import { dandanplaySearch, dandanplayBangumi, dandanplayComment } from '../danmaku/dandanplayProvider';
+import { getDanmakuCredentials } from '../danmaku/credentials';
+import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
+import type { MetaHit } from '../../shared/types';
+import { MetaStore } from '../meta/MetaStore';
+import { tmdbSearchTitle } from '../meta/tmdbProvider';
 
 export interface LiveLoadResult {
   groups: LiveGroup[];
@@ -55,6 +63,15 @@ export class SpiderHost {
   private manager: UserConfigManager;
   private drives: DriveStore;
   private subtitles: SubtitleStore;
+  private danmakuStore: DanmakuStore;
+  private danmakuCache = new Map<number, string>();
+  /** TMDB 元数据补全（配置+缓存；缺封面/缺简介时兜底查询） */
+  private metaStore: MetaStore;
+  /** ★ 夸克已落盘待清理队列（关闭播放/窗口/退出时删除，进度仍保留在本地历史；持久化防重启丢失） */
+  private pendingQuarkDeletes: Array<{ cookie: string; pdirFid: string; fid: string; dirFid?: string; at: number }> = [];
+  private pendingQuarkStore: JsonStore;
+  /** 自动订阅刷新计时（<userData>/auto-refresh.json 记录上次成功时间） */
+  private autoRefreshStore: JsonStore;
   private config: SiteConfig | null = null;
   private report: ImportReport | null = null;
   private sourceMap = new Map<string, SourceBean>();
@@ -79,6 +96,8 @@ export class SpiderHost {
         jvmDir: join(resourcesDir(), 'jvm'),
         cacheDir: join(spiderCacheDir(), 'converted'),
         callTimeoutMs: 20000,
+        // ★ jython 按需下载落盘（userData 可写；安装版不放 resources）
+        pyRuntimeDir: join(userDataDir(), 'cache', 'jython'),
       },
       host,
     );
@@ -87,6 +106,16 @@ export class SpiderHost {
     this.manager = new UserConfigManager(new JsonStore(join(userDataDir(), 'user-config.json')), this.logger);
     this.drives = new DriveStore(new JsonStore(join(userDataDir(), 'drive-tokens.json')), this.logger, safeStorageDriveCodec());
     this.subtitles = new SubtitleStore(join(userDataDir(), 'subtitle.json'), this.logger);
+    this.danmakuStore = new DanmakuStore(join(userDataDir(), 'danmaku.json'), this.logger);
+    this.metaStore = new MetaStore(new JsonStore(join(userDataDir(), 'meta.json')));
+    this.autoRefreshStore = new JsonStore(join(userDataDir(), 'auto-refresh.json'));
+    this.pendingQuarkStore = new JsonStore(join(userDataDir(), 'pending-quark-delete.json'));
+    const pendingRaw = this.pendingQuarkStore.getObject<Array<{ cookie?: string; pdirFid?: string; fid?: string; dirFid?: string; at?: number }> | null>('list', null);
+    if (Array.isArray(pendingRaw)) {
+      this.pendingQuarkDeletes = pendingRaw
+        .filter((x) => x && typeof x.cookie === 'string' && typeof x.fid === 'string' && x.cookie && x.fid)
+        .map((x) => ({ cookie: x.cookie as string, pdirFid: (x.pdirFid || '') as string, fid: x.fid as string, dirFid: x.dirFid || undefined, at: typeof x.at === 'number' ? x.at : Date.now() }));
+    }
     this.manager.setOnChange((snap) => this.onUserConfigChange(snap));
     if (this.manager.load()) {
       this.onUserConfigChange(this.manager.snapshot());
@@ -282,7 +311,15 @@ export class SpiderHost {
       const list = await assrtSearchMulti(token, kws, { originalTitle: title, concurrency: 3 });
       return list || [];
     } catch (e) {
-      throw new Error('assrt 检索失败：' + (e instanceof Error ? e.message : String(e)));
+      const msg = e instanceof Error ? e.message : String(e);
+      // 服务端常见拒绝透出可执行指引（token 失效 / 词过短），不再显示笼统的"失败"
+      if (/token/i.test(msg)) {
+        throw new Error('assrt token 无效或已过期，请到「配置 → 外挂字幕」重新填写后重试');
+      }
+      if (/词|长度|keyword|101/i.test(msg)) {
+        throw new Error('assrt 要求搜索词至少 3 个字符，当前剧名过短，可手动补充剧集/全名再搜');
+      }
+      throw new Error('assrt 检索失败：' + msg);
     }
   }
   async subtitleFetch(candidate: SubtitleCandidate): Promise<string> {
@@ -291,16 +328,114 @@ export class SpiderHost {
     return assrtFetch(token, candidate);
   }
 
+  // ---- 弹幕（弹弹play 内置加密凭据；偏好见 DanmakuStore） ----
+  /** 内置弹弹play 凭据是否已启用（AppId/AppSecret 内置加密，用户不可见、不可配） */
+  private danmakuCreds(): { appId: string; appSecret: string } | null {
+    return getDanmakuCredentials();
+  }
+  danmakuGetSettings(): DanmakuSettingsView {
+    const cred = this.danmakuCreds();
+    return { ...this.danmakuStore.settings, appSecretSet: !!(cred && cred.appId && cred.appSecret) };
+  }
+  danmakuSetSettings(patch: Partial<DanmakuSettings>): DanmakuSettingsView {
+    this.danmakuStore.update(patch || {});
+    const cred = this.danmakuCreds();
+    return { ...this.danmakuStore.settings, appSecretSet: !!(cred && cred.appId && cred.appSecret) };
+  }
+  /** 按作品名搜索弹弹play 番剧候选；凭据未内置或失败 → []。 */
+  async danmakuSearch(keyword: string): Promise<DanmakuAnime[]> {
+    const cred = this.danmakuCreds();
+    if (!cred) return [];
+    const kw = (keyword || '').trim();
+    if (!kw) return [];
+    try {
+      return (await dandanplaySearch(cred.appId, cred.appSecret, kw)) || [];
+    } catch (e) {
+      this.logger.e('danmaku:search/anime 失败', e);
+      return [];
+    }
+  }
+  /** 取某番剧的剧集列表（候选 episodeId 供 danmakuFetch 使用）；失败 → []。 */
+  async danmakuEpisodes(bangumiId: number, animeTitle?: string): Promise<DanmakuCandidate[]> {
+    const cred = this.danmakuCreds();
+    if (!cred || !bangumiId) return [];
+    try {
+      return (await dandanplayBangumi(cred.appId, cred.appSecret, Number(bangumiId), animeTitle)) || [];
+    } catch (e) {
+      this.logger.e('danmaku:bangumi 失败', e);
+      return [];
+    }
+  }
+  /** 按剧集 id 拉弹幕 XML（内存缓存防重复请求）；失败 → ''。 */
+  async danmakuFetch(episodeId: number): Promise<string> {
+    const cred = this.danmakuCreds();
+    if (!cred || !episodeId) return '';
+    const hit = this.danmakuCache.get(episodeId);
+    if (hit !== undefined) return hit;
+    try {
+      const xml = await dandanplayComment(cred.appId, cred.appSecret, episodeId);
+      this.danmakuCache.set(episodeId, xml);
+      return xml;
+    } catch (e) {
+      this.logger.e('danmaku:comment 失败', e);
+      return '';
+    }
+  }
+
+  // ---- TMDB 元数据补全（源缺封面/缺简介时的兜底；凭据为内置密文，用户无需配置） ----
+  /** 按名称查询 TMDB（失败/无内置凭据/无命中 → null，绝不抛错；命中与 miss 都会缓存） */
+  async metaSearch(name: string, year?: string): Promise<MetaHit | null> {
+    const n = (name || '').trim();
+    if (!n) return null;
+    try {
+      return await tmdbSearchTitle(this.metaStore, this.logger, n, year || undefined);
+    } catch (e) {
+      this.logger.e('meta:TMDB 搜索失败', e);
+      return null;
+    }
+  }
+
+  /** ★ 执行待清理的夸克落盘文件删除（关闭播放/窗口/退出/启动时触发；删成功即出队，失败保留下次重试） */
+  async quarkDeletePending(): Promise<void> {
+    if (this.pendingQuarkDeletes.length === 0) return;
+    const remain: typeof this.pendingQuarkDeletes = [];
+    for (const item of this.pendingQuarkDeletes) {
+      try {
+        // ★ 优先「整会话子目录删除」：子目录（tr_xxx）内只有本次转存文件，删目录 = 删文件 + 清目录；
+        //   目录删除不支持/失败时回退单文件删除（旧记录无 dirFid 也走单文件）。
+        let ok = false;
+        if (item.dirFid) ok = await quarkFileDelete(item.cookie, item.dirFid, item.dirFid, this.logger);
+        if (!ok) ok = await quarkFileDelete(item.cookie, item.pdirFid, item.fid, this.logger);
+        if (ok) {
+          this.logger.i(`quark 已删除落盘文件 fid=${item.fid.slice(0, 8)}...` + (item.dirFid ? ` dir=${item.dirFid.slice(0, 8)}...` : ''));
+        } else if (Date.now() - item.at < 24 * 3600 * 1000) {
+          remain.push(item); // 失败保留 ≤24h 再试
+        } else {
+          this.logger.w(`quark 落盘文件删除放弃（>24h）fid=${item.fid.slice(0, 8)}...`);
+        }
+      } catch {
+        remain.push(item);
+      }
+    }
+    this.pendingQuarkDeletes = remain;
+    this.persistPendingQuark();
+  }
+
+  /** 待清理队列落盘（防重启丢失：删除在启动时/窗口关闭等任意时机重试） */
+  private persistPendingQuark(): void {
+    try {
+      this.pendingQuarkStore.setObject('list', this.pendingQuarkDeletes);
+      this.pendingQuarkStore.flush();
+    } catch {
+      /* 落盘失败不影响播放 */
+    }
+  }
+
   // ---- 网盘扫码登录（provider 适配层：ali/alipan 走 easy-token；quark/uc 走 CAS） ----
   driveQrCreate(provider = 'ali') {
     return getAdapter(provider).qrCreate(this.http, this.logger);
   }
   driveQrPoll(provider: string, sid: string) {
-    // 兼容旧调用 driveQrPoll(sid)：单参时视为 (provider='ali', sid)
-    if (sid === undefined) {
-      sid = provider;
-      provider = 'ali';
-    }
     return getAdapter(provider || 'ali').qrPoll(this.http, this.logger, sid);
   }
 
@@ -390,12 +525,19 @@ export class SpiderHost {
     );
   }
 
-  /** 导入配置：apiUrl（http）或本地 JSON 文本 → 解析成功即全量替换持久化配置 */
-  async importConfig(source: { url?: string; json?: string }): Promise<ParseResult> {
+  /** 导入配置：apiUrl（http）或本地 JSON 文本 → 解析成功即全量替换持久化配置。
+   *  opts.snapshot（默认 true）= 导入前先把旧订阅快照为新档案（新增订阅不丢旧订阅）；自动刷新传 false。 */
+  async importConfig(source: { url?: string; json?: string }, opts: { snapshot?: boolean } = {}): Promise<ParseResult> {
+    const snapshot = opts.snapshot !== false;
     let text = source.json || '';
     if (source.url) {
       const res = await this.http.request({ url: source.url, method: 'get', timeoutMs: 30000 });
       text = Array.isArray(res.content) ? Buffer.from(res.content).toString('utf-8') : res.content;
+    }
+    // ★ 多仓（{urls:[{url,name},...]}）导入：影视仓/多仓盒子订阅格式，逐个子仓取首个可用
+    const multi = parseMultiRepo(text);
+    if (multi) {
+      return this.importMultiRepo(multi, snapshot);
     }
     // ★ 从 URL 导入时传基准地址：配置内 `./xxx.jar` 等相对路径需按订阅目录展开
     //   （对齐上游 ApiConfig.fixContentPath）。粘贴 JSON（无 url）保持原样。
@@ -403,9 +545,86 @@ export class SpiderHost {
     this.report = result.report;
     this.config = result.config;
     this.applyConfig(result.config);
+    if (snapshot) {
+      // ★ 新增订阅：导入前把当前生效内容快照为新档案（保留旧订阅，可随时切回）；同地址刷新/空状态不建
+      const snap = this.manager.snapshot();
+      const hasOld = snap.sources.length > 0 || snap.lives.length > 0;
+      const sameRemote = !!source.url && snap.apiUrl === source.url;
+      if (hasOld && !sameRemote) {
+        const stamp = new Date().toISOString().slice(5, 16).replace('T', ' ');
+        this.manager.appendProfileSnapshot(`旧订阅 ${stamp}`);
+      }
+    }
     // 导入 = 全量替换（apiUrl 记录订阅地址；粘贴 JSON 传空 = 手动管理）
     this.manager.replaceFromImport(result.config, source.url || '');
     return result;
+  }
+
+  /**
+   * ★ 多仓导入：对每个子仓按序拉取解析，取第一个可成功解析的作为当前配置落地；
+   *   clan:// 等本地协议仓与失败仓跳过并在提示中说明（影视仓的本地目录仓桌面版无载体）。
+   */
+  private async importMultiRepo(multi: MultiRepo, snapshot: boolean): Promise<ParseResult> {
+    const skipped: string[] = [];
+    const total = multi.items.length;
+    for (const item of multi.items) {
+      const label = repoDisplayName(item.url, item.name);
+      if (!isFetchedRepoUrl(item.url)) {
+        const why = /^clan:/i.test(item.url) ? '本地目录仓（clan://）桌面版不可用' : '不支持的协议';
+        skipped.push(`「${label}」${why}`);
+        continue;
+      }
+      try {
+        const res = await this.http.request({ url: item.url, method: 'get', timeoutMs: 30000 });
+        const text = Array.isArray(res.content) ? Buffer.from(res.content).toString('utf-8') : res.content;
+        const result = parseSiteConfigWithBase(text, item.url);
+        if (!result.config.sites.length && !result.config.lives.length) {
+          skipped.push(`「${label}」内容为空/非订阅配置`);
+          continue;
+        }
+        // 落地（与 importConfig 单仓路径一致：快照旧配置后替换）
+        this.report = result.report;
+        this.config = result.config;
+        this.applyConfig(result.config);
+        if (snapshot) {
+          const snap = this.manager.snapshot();
+          const hasOld = snap.sources.length > 0 || snap.lives.length > 0;
+          const sameRemote = snap.apiUrl === item.url;
+          if (hasOld && !sameRemote) {
+            const stamp = new Date().toISOString().slice(5, 16).replace('T', ' ');
+            this.manager.appendProfileSnapshot(`旧订阅 ${stamp}`);
+          }
+        }
+        this.manager.replaceFromImport(result.config, item.url);
+        const note = `多仓共 ${total} 项，已导入首个可用子仓「${label}」${total > 1 ? `；其余 ${total - 1} 项：${skipped.join('；') || '均可用（可另行单独导入）'}` : ''}`;
+        this.logger.i('multi-repo: ' + note);
+        return { ...result, warnings: [...(result.warnings || []), note] };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        skipped.push(`「${label}」${msg}`);
+      }
+    }
+    throw new Error(`多仓订阅 ${total} 个子仓均不可用：${skipped.join('；') || '无有效子仓'}`);
+  }
+
+  /** ★ 启动时自动订阅刷新：当前订阅来自 URL 且距上次成功刷新 ≥7 天 → 重新拉取（不建档案、不打扰用户）。 */
+  async maybeAutoRefreshSubscriptions(): Promise<boolean> {
+    try {
+      const snap = this.manager.snapshot();
+      const url = (snap.apiUrl || '').trim();
+      if (!/^https?:\/\//i.test(url)) return false; // 无 URL 订阅（手动管理）不自动刷新
+      const lastAt = Number(this.autoRefreshStore.getObject<number>('lastAt', 0) || 0);
+      const DAY_MS = 7 * 24 * 60 * 60 * 1000;
+      if (lastAt && Date.now() - lastAt < DAY_MS) return false; // 7 天内刷新过
+      const r = await this.importConfig({ url }, { snapshot: false });
+      this.autoRefreshStore.setObject('lastAt', Date.now());
+      this.autoRefreshStore.flush();
+      this.logger.i(`自动订阅刷新完成：${url}（${r.report.ok} 源 OK / 跳过 ${r.report.skipped} / 降级 ${r.report.degraded}）`);
+      return true;
+    } catch (e) {
+      this.logger.w('自动订阅刷新失败：' + (e instanceof Error ? e.message : String(e)));
+      return false;
+    }
   }
 
   get siteConfig(): SiteConfig | null {
@@ -508,9 +727,15 @@ export class SpiderHost {
         if (pwdId) {
           try {
             const innerFid = (/"fid":\s*"([^"]+)"/.exec(id) || [])[1];
-            const t = await quarkTransfer(pwdId, quarkCookie, { innerFid, fileDirName: 'tvbox', logger: fileLogger });
+            const t = await quarkTransfer(pwdId, quarkCookie, { innerFid, logger: fileLogger });
             if (t.ok && t.url) {
               fileLogger.i(`quarkTransfer 直链 ok: ${t.url.slice(0, 90)}...`);
+              // ★ 记录待清理：关闭播放窗口/播放页时删除本次落盘文件（进度留在本地历史）
+              if (t.fid) {
+                this.pendingQuarkDeletes.push({ cookie: quarkCookie, pdirFid: t.pdirFid || '', dirFid: t.pdirFid || '', fid: t.fid, at: Date.now() });
+                if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift(); // 防无限增长
+                this.persistPendingQuark();
+              }
               // ★ 必须经 /play 中继注入直链的 header（Referer/UA），否则播放器直连
               //   dl-pc-zb.drive.quark.cn 会被 CDN 按来源拒绝（与下方 vm.play 的 header 注入一致）。
               //   注意 wrapPlayUrlWithHeaders 只提取 cookie/ua/referer 三个键；
@@ -542,7 +767,12 @@ export class SpiderHost {
       }
       // 2) 否则按网盘域名注入对应 provider 的绑定 Cookie
       const prov = matchDriveCookieProvider(r.url);
-      if (prov) r.url = wrapPlayUrl(r.url, prov);
+      if (prov) {
+        r.url = wrapPlayUrl(r.url, prov);
+        // ★ 该「cookie 型」网盘未绑定 → 标记给渲染层，提示去配置页绑定（无 Cookie 取流必失败）
+        const tokens = this.driveList() as Record<string, string>;
+        if (!tokens[prov]) r.needDriveCookieBind = prov;
+      }
       return r;
     });
   }

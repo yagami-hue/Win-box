@@ -229,6 +229,12 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .vp-big:hover { background: rgba(0,0,0,.62); transform: translate(-50%,-50%) scale(1.06); }
 .vp-err { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 14px;
   align-items: center; justify-content: center; color: #fff; background: rgba(0,0,0,.72); font-size: 14px; padding: 20px; text-align: center; }
+/* ★ 网盘资源未绑定 cookie 提示卡片：覆盖于加载/错误之上（z-index 最高，优先可操作） */
+.vp-drive-bind { position: absolute; inset: 0; z-index: 7; display: flex; flex-direction: column; gap: 16px;
+  align-items: center; justify-content: center; color: #fff; background: rgba(0,0,0,.78);
+  font-size: 14px; line-height: 1.7; padding: 24px; text-align: center; }
+.vp-load-text { display: inline-flex; align-items: center; gap: 2px; }
+.vp-load-speed { color: #8fd0ff; font-variant-numeric: tabular-nums; font-weight: 600; }
 .vp-next { position: absolute; left: 50%; bottom: 20%; transform: translateX(-50%); z-index: 6; display: flex;
   align-items: center; gap: 12px; color: #fff; font-size: 14px; padding: 10px 16px; border-radius: 8px;
   background: rgba(0,0,0,.72); box-shadow: 0 2px 10px rgba(0,0,0,.35); }
@@ -243,6 +249,9 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .vp-thumb { position: absolute; top: 50%; transform: translateY(-50%); width: 12px; height: 12px; border-radius: 50%;
   background: #fff; box-shadow: 0 0 6px rgba(0,0,0,.5); }
 .vp-bar { display: flex; align-items: center; gap: 10px; color: #fff; }
+/* 小窗口模式：控制条只保留 上/下集 + 播放暂停，居中 */
+.vplayer.vp-mini .vp-bar { justify-content: center; }
+.vplayer.vp-mini .vp-controls { padding: 18px 10px 6px; }
 .vp-ctl { all: unset; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
   width: 26px; height: 26px; color: #eee; border-radius: 5px; }
 .vp-ctl:hover { color: #fff; background: rgba(255,255,255,.14); }
@@ -299,6 +308,7 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .vsp-btn { all: unset; cursor: pointer; font-size: 12px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 6px;
   color: var(--text); background: var(--bg-elev); }
 .vsp-btn:hover { border-color: var(--accent); }
+.vsp-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .vsp-btn.primary { background: linear-gradient(135deg,#4f86ff,#6a5cff); color: #fff; border-color: transparent; padding: 3px 12px; }
 .vsp-btn:disabled { opacity: .45; cursor: not-allowed; }
 .vsp-hint { font-size: 11px; color: #ffb454; margin-top: 4px; }

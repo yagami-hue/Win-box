@@ -5,7 +5,6 @@ import { useLocation } from 'react-router-dom';
 import ConfigPage from './pages/ConfigPage';
 import HomePage from './pages/HomePage';
 import DetailPage from './pages/DetailPage';
-import PlayPage from './pages/PlayPage';
 import PlayerPage from './pages/PlayerPage';
 import LivePage from './pages/LivePage';
 import HistoryPage from './pages/HistoryPage';
@@ -82,8 +81,35 @@ export default function App() {
     };
   }, []);
 
+  // ★ 播放网盘资源未绑定 cookie → 播放器/内嵌播放窗口发起「去配置页绑定」：
+  //   主窗口收到后打开「配置 → 账号与凭据」tab（tab 记忆 localStorage，ConfigPage 初始化时读取）。
+  //   播放器窗口不注册（主进程只把该事件发给主窗口）。
+  useEffect(() => {
+    if (loc.pathname === '/player') return;
+    return client.onNavCfgAccount(() => {
+      try {
+        localStorage.setItem('winbox-cfg-tab', 'account');
+      } catch { /* ignore */ }
+      nav('/config');
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loc.pathname]);
+
   // 独立播放器窗口：#/player 时渲染无侧栏的播放界面（独立 BrowserWindow 使用）
   const isPlayerWin = loc.pathname === '/player';
+
+  // ★ 2026-09-20 修复「历史续播位置过期」：独立播放器窗口关闭 → 主窗口重新获得焦点，
+  //   此时重载 localStorage 历史（播放器窗口关窗时把最新进度写入了 localStorage），
+  //   并广播刷新事件让历史页进度/列表即时同步（此前须切走再切回历史页才刷新）。
+  useEffect(() => {
+    if (isPlayerWin) return;
+    const onFocus = () => {
+      loadUiMemory();
+      window.dispatchEvent(new Event('winbox:history-refresh'));
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [isPlayerWin]);
 
   // 用户同意免责声明 → 记录标记，下次启动不再弹出
   const agreeDisclaim = () => {
@@ -215,7 +241,6 @@ export default function App() {
           <Route path="/" element={<HomePage onOpenDetail={(k, id, pic) => nav(`/detail/${encodeURIComponent(k)}/${encodeURIComponent(id)}${pic ? `?pic=${encodeURIComponent(pic)}` : ''}`)} />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/detail/:key/:id" element={<DetailPage onPlay={onDetailPlay} />} />
-          <Route path="/play" element={<PlayPage />} />
           <Route path="/live" element={<LivePage />} />
           <Route path="/config" element={<ConfigPage />} />
         </Routes>

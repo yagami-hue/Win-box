@@ -33,6 +33,45 @@ export function wrapPlayUrl(url: string, provider: string): string {
   return `http://127.0.0.1:9978/play?url=${encodeURIComponent(url)}&ck=${encodeURIComponent(provider)}`;
 }
 
+/** provider → 中文展示名（提示「去配置页绑定」文案用）；未收录回退原 provider 名 */
+export const DRIVE_PROVIDER_LABELS: Record<string, string> = {
+  quark: '夸克',
+  uc: 'UC',
+  baidu: '百度',
+  pan: '百度',
+  pansou: '百度',
+  '115': '115',
+  ali: '阿里云盘',
+  alipan: '阿里云盘',
+};
+
+/** provider 的中文名（未收录则原样返回） */
+export function driveProviderLabel(provider: string): string {
+  return DRIVE_PROVIDER_LABELS[provider.toLowerCase()] || provider;
+}
+
+/**
+ * 从播放器拿到的 URL 反推「cookie 型」网盘 provider：
+ * - 主进程 play 已包装的 `/play?ck=<provider>` 中继 → 解析 ck 参数；
+ * - 原始网盘域名直链 → matchDriveCookieProvider；
+ * - 其它 → null。
+ * 渲染层兜底用（历史页直连等未经过 play 解析的路径）。
+ */
+export function driveProviderFromUrl(url: string): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    if (u.hostname === '127.0.0.1' || u.hostname === 'localhost') {
+      const ck = u.searchParams.get('ck');
+      if (ck) return ck.toLowerCase();
+      return null;
+    }
+  } catch {
+    /* 非法 URL 交给 matchDriveCookieProvider 兜底（也会返回 null） */
+  }
+  return matchDriveCookieProvider(url);
+}
+
 /** 大小写不敏感地从播放 header 里取指定键 */
 function headerOf(headers: Record<string, string>, name: string): string {
   const n = name.toLowerCase();

@@ -7,7 +7,8 @@
 // 单条移除后可**撤销**（无损还原，含原进度与时间），因为它是不可逆的数据丢失操作。
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { recentWatch, clearUiMemory, deleteWatch, restoreWatch, loadUiMemory, type WatchHistory } from '../lib/uiMemory';
+import { recentWatch, clearUiMemory, deleteWatch, restoreWatch, loadUiMemory, loadLatestWatch, type WatchHistory } from '../lib/uiMemory';
+import { client } from '../api/client';
 
 function fmtTime(sec: number): string {
   if (!Number.isFinite(sec) || sec <= 0) return '';
@@ -37,24 +38,45 @@ export default function HistoryPage() {
     //   挂载历史页时强制重载一次，确保播放器窗口刚记的历史能显示出来。
     loadUiMemory();
     refresh();
+    // ★ 2026-09-20 修复：播放器窗口关闭 → 主窗口 focus → App 广播刷新事件，
+    //   历史页进度/列表即时同步（此前须切走再切回历史页才刷新）。
+    const onRefresh = () => refresh();
+    window.addEventListener('winbox:history-refresh', onRefresh);
+    return () => window.removeEventListener('winbox:history-refresh', onRefresh);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const play = (it: WatchHistory) => {
-    nav('/play', {
-      state: {
-        url: it.url,
-        name: it.name,
-        pic: it.pic,
-        remarks: it.remarks,
-        sourceName: it.sourceName,
-        sourceKey: it.sourceKey,
-        vodId: it.vodId,
-        fromKey: it.sourceKey,
-        id: it.vodId,
-      },
-    });
-  };
+  // ★★ 历史续播 = 复用「详情页 → 独立播放器窗口」链路（该路径已验证可用）：
+  //   构造单集 PlayerInit（原始 episode url + flag），播放器窗口内重新 client.play
+  //   → 夸克源会**重新转存拿新直链** → startTime 自动 seek 到上次进度。
+  //   不再走主窗口内嵌 PlayPage（依赖 nav state/直链，release78 实测不稳）。
+  // ★ 2026-09-20 修复：本页 items 是挂载时的内存快照 —— 播放器窗口关闭时刚把最新进度
+  //   写入 localStorage，若直接用 it 续播会回到**上次打开位置**而非快进后的位置。
+  //   故点开前重读该 url 的最新记录（updatedAt 最新），拿不到才回退快照。
+  const latest = loadLatestWatch(it.url) || it;
+  const base = (latest.name || '').split(' - ')[0] || latest.name || '';
+  void client.playerOpen({
+    key: latest.sourceKey || '',
+    flag: latest.flag || '',
+    episodes: [{ name: latest.remarks || '播放', url: latest.rawUrl || latest.url }],
+    epIndex: 0,
+    vipFlags: undefined,
+    title: base,
+    subtitleTitle: base,
+    lastUrl: '', // 不直接用旧直链，交给播放器窗口重新解析/转存
+    lastName: latest.name || '播放',
+    startTime: latest.time,
+    meta: {
+      pic: latest.pic,
+      remarks: latest.remarks,
+      sourceName: latest.sourceName,
+      vodId: latest.vodId,
+      fromKey: latest.sourceKey,
+      id: latest.vodId,
+    },
+  });
+};
 
   const openDetail = (it: WatchHistory) => {
     if (it.sourceKey && it.vodId) nav(`/detail/${encodeURIComponent(it.sourceKey)}/${encodeURIComponent(it.vodId)}`);

@@ -3,11 +3,24 @@
 //   同一渲染进程内页面卸载再挂载时共享，覆盖"播放进度/资源列表定位"。
 //   与 Electron 系统级返回（Alt+← / 浏览器返回）天然协同：popstate 触发路由切换，
 //   页面重挂载时从此处恢复状态。
+// 聚合搜索结果记忆（搜索 → 详情 → 返回时恢复搜索结果界面）
+export interface HomeSearchMem {
+  wd: string;
+  aggMode: boolean;
+  aggScope: 'current' | 'all';
+  searchAllSources: boolean;
+  /** 搜索结果（SearchAllReport 可 JSON 序列化） */
+  agg: { items: unknown[]; perSource: unknown[]; hitSources: number; failedSources: number; totalRaw: number } | null;
+}
 export interface HomeMem {
   key: string;
   tid: string;
   pg: number;
   scrollTop: number;
+  /** 当前分类已选中的筛选（gkey → value），与 tid/pg 同存（进详情返回时恢复筛选状态） */
+  filters?: Record<string, string>;
+  /** 上次搜索态；搜索 → 详情 → 返回时由 HomePage 恢复（exitSearch 清除） */
+  search?: HomeSearchMem | null;
 }
 export interface DetailMem {
   flag: string;
@@ -18,7 +31,15 @@ export interface DetailMem {
 export interface WatchHistory {
   /** 资源展示名（如"狂飙 第12集"）；无名称时回退为 url */
   name: string;
+  /**
+   * ★ 历史条目的主键/回退地址。原则上保存**原始 episode url**（可重新走 client.play 转存/解析），
+   *   不要存已过期的直链 —— 否则夸克这类"转存直链临时有效、播放完即删"的资源从历史续播必然失败。
+   */
   url: string;
+  /** ★ 原始 episode url（与 url 同值；显式字段便于历史页点开时重新转存/解析） */
+  rawUrl?: string;
+  /** ★ 播放源 flag（client.play 需要 key+flag 才能重新解析/转存） */
+  flag?: string;
   /** 封面图（详情/搜索结果携带的 pic；缺失时卡片占位） */
   pic?: string;
   /** 集数/备注角标（如"第12集"、"HD"） */
@@ -47,7 +68,7 @@ export interface UiMemory {
 }
 
 export const uiMem: UiMemory = {
-  home: { key: '', tid: '', pg: 1, scrollTop: 0 },
+  home: { key: '', tid: '', pg: 1, scrollTop: 0, filters: {}, search: null },
   detail: new Map(),
   playTime: new Map(),
   playSource: null,
@@ -57,6 +78,8 @@ export const uiMem: UiMemory = {
 export interface RecordWatchInput {
   name?: string;
   url: string;
+  rawUrl?: string;
+  flag?: string;
   pic?: string;
   remarks?: string;
   sourceName?: string;
@@ -73,6 +96,8 @@ export function recordWatch(meta: RecordWatchInput): void {
   uiMem.history.set(url, {
     name: meta.name || prev?.name || url,
     url,
+    rawUrl: meta.rawUrl ?? prev?.rawUrl,
+    flag: meta.flag ?? prev?.flag,
     pic: meta.pic ?? prev?.pic,
     remarks: meta.remarks ?? prev?.remarks,
     sourceName: meta.sourceName ?? prev?.sourceName,
@@ -156,6 +181,8 @@ export function saveUiMemory() {
         map.set(k, {
           name: typeof ex.name === 'string' ? ex.name : k,
           url: k,
+          rawUrl: ex.rawUrl,
+          flag: ex.flag,
           pic: ex.pic,
           remarks: ex.remarks,
           sourceName: ex.sourceName,
@@ -194,7 +221,14 @@ export function loadUiMemory() {
   if (!raw) return;
   try {
     const data = JSON.parse(raw);
-    uiMem.home = data.home || { key: '', tid: '', pg: 1, scrollTop: 0 };
+    uiMem.home = {
+      key: data.home?.key || '',
+      tid: data.home?.tid || '',
+      pg: data.home?.pg || 1,
+      scrollTop: data.home?.scrollTop || 0,
+      filters: data.home?.filters || {},
+      search: data.home?.search || null,
+    };
     uiMem.detail = new Map(data.detail || []);
     uiMem.playTime = new Map(data.playTime || []);
     const h: Array<[string, unknown]> = data.history || [];
@@ -216,7 +250,7 @@ export function loadUiMemory() {
 
 // 清除历史记录与浏览状态（可选功能）
 export function clearUiMemory() {
-  uiMem.home = { key: '', tid: '', pg: 1, scrollTop: 0 };
+  uiMem.home = { key: '', tid: '', pg: 1, scrollTop: 0, filters: {}, search: null };
   uiMem.detail.clear();
   uiMem.playTime.clear();
   uiMem.playSource = null;
@@ -232,4 +266,46 @@ export function clearUiMemory() {
 export function setPlayTime(url: string, sec: number): void {
   uiMem.playTime.set(url, sec);
   schedulePersist();
+}
+
+/**
+ * ★ 2026-09-20 修复「历史续播位置过期」：
+ * 从「历史数组（[url, 记录] 对）」中取指定 url **updatedAt 最新**的一条。
+ * 纯函数（可单测）：播放器窗口可能把更新的进度写进 localStorage，主窗口内存快照过期，
+ * 续播前应以此为准。
+ */
+export function latestOf(entries: Array<[string, unknown]> | null | undefined, url: string): WatchHistory | null {
+  if (!entries) return null;
+  let best: WatchHistory | null = null;
+  for (const [k, v] of entries) {
+    if (k !== url || !v || typeof v !== 'object') continue;
+    const it = v as Partial<WatchHistory>;
+    const rec: WatchHistory = {
+      name: typeof it.name === 'string' ? it.name : url,
+      url,
+      rawUrl: it.rawUrl,
+      flag: it.flag,
+      pic: it.pic,
+      remarks: it.remarks,
+      sourceName: it.sourceName,
+      sourceKey: it.sourceKey,
+      vodId: it.vodId,
+      time: Number(it.time) || 0,
+      updatedAt: Number(it.updatedAt) || 0,
+    };
+    if (!best || rec.updatedAt > best.updatedAt) best = rec;
+  }
+  return best;
+}
+
+/** ★ 从 localStorage 读指定 url 的最新历史（无/异常返回 null，调用方回退内存快照）。 */
+export function loadLatestWatch(url: string): WatchHistory | null {
+  try {
+    const raw = localStorage.getItem('tvboxUiMemory');
+    if (!raw) return null;
+    const d = JSON.parse(raw) as { history?: Array<[string, unknown]> } | null;
+    return latestOf(d?.history, url);
+  } catch {
+    return null;
+  }
 }

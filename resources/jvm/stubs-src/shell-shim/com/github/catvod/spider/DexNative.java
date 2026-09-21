@@ -105,16 +105,19 @@ public class DexNative {
      * 而 InitOrigin.i 是饭太硬主程序注入的私有类、桌面版无法提供 → 恒 NPE 返回空串。
      * 这里把 merge.cn.yq 置为 true，让 Rc 改走 HideUtils 分支（我们 stub 里的占位实现）。
      *
-     * 仅供「验证占位 stub 影响」的实验开关：设 -Dtvbox.shellShim.forceHideUtils=true 才生效。
-     * 占位 HideUtils（原串/标准 MD5）未必等价饭太硬私有算法，但至少比 NPE 空串更接近。
+     * ★ 2026-09-18 默认启用（对照实验：yq=true 后全部 InitOrigin.i NPE 消失，
+     *   瓜子 homeVideoContent 回退链正常出内容、荐片分类正常；与 release53 经验
+     *   「yq=true 使 Rc 依赖的 fty 源不更差且多数恢复」一致）。
+     *   显式设 -Dtvbox.shellShim.forceHideUtils=false 可关闭（对照实验用）。
+     *   占位 HideUtils（原串/标准 MD5）未必等价饭太硬私有算法，但至少比 NPE 空串更接近。
      */
     private static void forceHideUtils() {
-        if (!"true".equalsIgnoreCase(System.getProperty("tvbox.shellShim.forceHideUtils", "false"))) return;
+        if ("false".equalsIgnoreCase(System.getProperty("tvbox.shellShim.forceHideUtils", "true"))) return;
         try {
             Class<?> cn = Class.forName("com.github.catvod.spider.merge.cn", true, loader);
             java.lang.reflect.Field f = cn.getField("yq");
             f.setBoolean(null, true);
-            log("已强制 merge.cn.yq=true（走 HideUtils 分支）");
+            log("已强制 merge.cn.yq=true（走 HideUtils 分支，默认启用）");
         } catch (Throwable t) {
             log("强制 cn.yq 失败: " + t);
         }

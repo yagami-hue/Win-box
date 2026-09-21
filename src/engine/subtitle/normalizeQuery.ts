@@ -84,3 +84,15 @@ export function buildSearchQuery(name: string): string {
   const kw = title + (ep ? ' ' + ep : '');
   return kw.trim();
 }
+
+/**
+ * 统一取「剧名副名」供弹幕/字幕检索（播放页/详情页都能带出 detail.name，但
+ * 历史记录直连等入口可能缺失）：优先 knownTitle（详情页副名），为空则从资源名
+ * 截取第一段（形如「剧名副名 - 集名」/「剧名副名-001」）。弹幕、字幕共用。
+ */
+export function animeTitleForQuery(resourceName: string, knownTitle?: string): string {
+  const t = (knownTitle || '').trim();
+  if (t) return t;
+  const seg = (resourceName || '').split(/[-—–~]/)[0].trim();
+  return seg || (resourceName || '').trim();
+}

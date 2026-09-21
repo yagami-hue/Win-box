@@ -206,6 +206,26 @@ export class UserConfigManager {
     return { ...p };
   }
 
+  /** 追加档案（不切换当前、不改源列表）：用于导入新订阅前快照旧订阅，保留可切回。 */
+  appendProfileSnapshot(name: string): UserProfile {
+    const parsed = {
+      sites: this.snap.sources,
+      lives: this.snap.lives,
+      spider: this.snap.global.spider,
+      flags: this.snap.global.flags,
+    };
+    const p: UserProfile = {
+      id: slug(name) + '-' + Date.now().toString(36).slice(-4),
+      name: name.trim() || '未命名配置',
+      apiUrl: this.snap.apiUrl || '',
+      json: serializeImport(parsed as SiteConfig),
+      sourceCount: parsed.sites.length,
+      importedAt: new Date().toISOString(),
+    };
+    this.apply({ ...this.snap, profiles: [...this.snap.profiles, p] });
+    return { ...p };
+  }
+
   /** 切换档案：解析其 json 全量恢复 sources/lives/global。json 为空/解析失败抛中文错。 */
   activateProfile(id: string): void {
     const p = this.snap.profiles.find((x) => x.id === id);

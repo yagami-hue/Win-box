@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { client } from '../api/client';
 import type { SourceBean, VodItem, SearchAllReport, AggVodItem, FilterGroup } from '../../shared/types';
 import { sourceAvailability } from '../../engine/vod/sourceAvailability';
@@ -32,6 +32,129 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const [aggScope, setAggScope] = useState<'current' | 'all'>('current');
   const keyRef = useRef('');
   const contentRef = useRef<HTMLDivElement>(null);
+  const filtersRef = useRef<Record<string, string>>({});
+  /** 挂载恢复：数据就绪后回滚一次滚动位置（loadCategory 异步，须等 items 渲染） */
+  const memRestoreRef = useRef(false);
+  // ---- TMDB 封面补全（★ 2026-09-19 重新理解用户意图：所有封面一律先走 TMDB）----
+  //   原因：源自带大量「能加载但内容是坏的」图（防盗链占位/错图），此前只补
+  //   「缺图/加载失败(onError)」的项 → 坏图仍被当做好图展示、感知为 TMDB 没生效。
+  //   新策略：**未补齐过的一律查 TMDB**，命中即回写覆盖（源图仅作查完前的占位/TMDB miss 兜底）。
+  //   控制手段：按 归一化片名(+年份) 去重 —— 一个分类页重复的同名条目（如整季列表）
+  //   只打一次 TMDB；每页最多查 30 个唯一片名；命中一次覆盖整组，防翻页打爆 API。
+  const [picOver, setPicOver] = useState<Record<string, string>>({});
+  const metaBusyRef = useRef(false);
+  /** ★ 聚合搜索结果同样走 TMDB 补全（release76：搜索结果显示大量"无图/坏图"→ 缺封面的主入口） */
+  const [aggPicOver, setAggPicOver] = useState<Record<string, string>>({});
+  const aggBusyRef = useRef(false);
+  /** ★ 源自带图已证明是坏图（onError）→ 交回 TMDB 再补（坏图不残留界面） */
+  const [badPics, setBadPics] = useState<Record<string, boolean>>({});
+  const tmdbTitleOf = (it: VodItem) => (it.name || '').split(' - ')[0]?.trim() || '';
+  const tmdbYearOf = (it: VodItem) => /((?:19|20)\d{2})/.exec(`${it.name} ${it.remarks || ''}`)?.[1];
+  useEffect(() => {
+    const MAX_UNIQUE_QUERY = 30; // 单页最多查 30 个唯一片名，防翻页打爆 API
+    if (metaBusyRef.current) return;
+    const missing = items.filter((it) => !picOver[it.id] && tmdbTitleOf(it));
+    if (missing.length === 0) return;
+    // 按 归一化片名|年份 分组：同标题的重复条目只查一次 TMDB，命中覆盖整组
+    const groups = new Map<string, { name: string; year?: string; ids: string[] }>();
+    for (const it of missing) {
+      const name = tmdbTitleOf(it).toLowerCase();
+      const y = tmdbYearOf(it) || '';
+      const k = `${name}\u0000${y}`;
+      const g = groups.get(k);
+      if (g) g.ids.push(it.id);
+      else groups.set(k, { name: tmdbTitleOf(it), year: y || undefined, ids: [it.id] });
+    }
+    const uniq = [...groups.values()].slice(0, MAX_UNIQUE_QUERY);
+    metaBusyRef.current = true;
+    void (async () => {
+      const next: Record<string, string> = {};
+      // 分波查询（每波 ≤6 个唯一片名），避免 30 个并发瞬间超出 TMDB 限流 → 反被当失败
+      const CHUNK = 6;
+      for (let i = 0; i < uniq.length; i += CHUNK) {
+        const wave = uniq.slice(i, i + CHUNK);
+        await Promise.all(wave.map(async (g) => {
+          try {
+            const hit = await client.metaSearch(g.name, g.year);
+            if (hit && hit.poster) for (const id of g.ids) next[id] = hit.poster;
+          } catch { /* 缺 key/网络失败静默，维持源图占位 */ }
+        }));
+      }
+      metaBusyRef.current = false;
+      if (Object.keys(next).length) setPicOver((prev) => ({ ...prev, ...next }));
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items]);
+  // 封面取值：TMDB 补全优先，源自带 pic 只作占位/兜底
+  const picOf = (it: VodItem) => picOver[it.id] || it.pic;
+  const picErr = (it: VodItem) => (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const el = e.target as HTMLImageElement;
+    const src = el.currentSrc || el.src || '';
+    if (/\/img\?/.test(src)) {
+      // 失败的是 TMDB 补图（/img 中继 4xx/超时）→ 移除覆盖（不当作获取成功）
+      if (picOver[it.id] !== undefined) {
+        setPicOver((prev) => {
+          if (prev[it.id] === undefined) return prev;
+          const n = { ...prev };
+          delete n[it.id];
+          return n;
+        });
+      }
+    } else {
+      setBadPics((prev) => (prev[it.id] ? prev : { ...prev, [it.id]: true }));
+    }
+    el.style.opacity = '0.15';
+  };
+  // ★★ 聚合搜索结果 TMDB 补全（release76 新接入）：与浏览态同机制 —— 未补过的一律查，
+  //   按归一化片名去重（每页 ≤30 唯一名、6 并发分波），命中覆盖整组；补图失败移除覆盖。
+  const aggKeyOf = (it: AggVodItem) => `${it.sourceKey}\u0000${it.id}`;
+  useEffect(() => {
+    if (!aggMode || !agg || agg.items.length === 0 || aggBusyRef.current) return;
+    const missing = agg.items.filter((it) => !aggPicOver[aggKeyOf(it)]);
+    if (missing.length === 0) return;
+    const groups = new Map<string, { name: string; year?: string; keys: string[] }>();
+    for (const it of missing) {
+      const name = (it.name || '').split(' - ')[0]?.trim() || '';
+      if (!name) continue;
+      const y = /((?:19|20)\d{2})/.exec(`${it.name} ${it.remarks || ''}`)?.[1] || '';
+      const k = `${name.toLowerCase()}\u0000${y}`;
+      const g = groups.get(k);
+      if (g) g.keys.push(aggKeyOf(it));
+      else groups.set(k, { name, year: y || undefined, keys: [aggKeyOf(it)] });
+    }
+    const uniq = [...groups.values()].slice(0, 30);
+    aggBusyRef.current = true;
+    void (async () => {
+      const next: Record<string, string> = {};
+      const CHUNK = 6;
+      for (let i = 0; i < uniq.length; i += CHUNK) {
+        const wave = uniq.slice(i, i + CHUNK);
+        await Promise.all(wave.map(async (g) => {
+          try {
+            const hit = await client.metaSearch(g.name, g.year);
+            if (hit && hit.poster) for (const k of g.keys) next[k] = hit.poster;
+          } catch { /* 静默，维持源图占位 */ }
+        }));
+      }
+      aggBusyRef.current = false;
+      if (Object.keys(next).length) setAggPicOver((prev) => ({ ...prev, ...next }));
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agg, aggMode]);
+  const aggPicOf = (it: AggVodItem) => aggPicOver[aggKeyOf(it)] || it.pic;
+  const aggPicErr = (it: AggVodItem) => (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const el = e.target as HTMLImageElement;
+    if (/\/img\?/.test(el.currentSrc || el.src || '')) {
+      setAggPicOver((prev) => {
+        const k = aggKeyOf(it);
+        if (prev[k] === undefined) return prev;
+        const n = { ...prev };
+        delete n[k];
+        return n;
+      });
+    }
+    el.style.opacity = '0.15';
+  };
   // 滚动/浏览状态记忆：卸载(返回)时存档，回来恢复列表定位
   useEffect(() => {
     const el = contentRef.current;
@@ -51,10 +174,19 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       uiMem.home.key = keyRef.current;
       uiMem.home.tid = tidRef.current;
       uiMem.home.pg = pgRef.current;
+      uiMem.home.filters = filtersRef.current;
       schedulePersist();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 数据就绪后恢复滚动位置（仅恢复一次）
+  useLayoutEffect(() => {
+    if (!memRestoreRef.current || !contentRef.current) return;
+    const top = uiMem.home.scrollTop;
+    if (top > 0) contentRef.current.scrollTop = top;
+    memRestoreRef.current = false;
+  }, [items, loading]);
 
   const tidRef = useRef('');
   const pgRef = useRef(1);
@@ -62,6 +194,9 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     tidRef.current = tid;
     pgRef.current = pg;
   }, [tid, pg]);
+  useEffect(() => {
+    filtersRef.current = filtersActive;
+  }, [filtersActive]);
 
   async function loadHome(k: string) {
     setAggMode(false);
@@ -97,6 +232,19 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         if (cancelled) return;
         const s = cfg.sources;
         setSites(s);
+        // ★ 搜索 → 详情 → 返回：恢复上次搜索结果界面（不重新浏览首页）
+        const memSearch = uiMem.home.search;
+        if (memSearch && memSearch.aggMode) {
+          setWd(memSearch.wd);
+          setAgg(memSearch.agg as SearchAllReport | null);
+          setAggMode(true);
+          setAggScope(memSearch.aggScope);
+          setSearchAllSources(memSearch.searchAllSources);
+          requestAnimationFrame(() => {
+            if (contentRef.current && uiMem.home.scrollTop) contentRef.current.scrollTop = uiMem.home.scrollTop;
+          });
+          return;
+        }
         if (s.length === 0) {
           setErr('尚未导入站源，请先到「配置」页导入');
           return;
@@ -119,16 +267,21 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           const mem = uiMem.home;
           const useMem = mem.key === pick && (mem.tid !== '' || mem.pg > 1);
           if (useMem && mem.tid) {
+            // ★ 恢复到"刚看到封面的分类页"：分类 tab + 分类 + 页码 + 筛选 全部恢复
+            keyRef.current = pick; // loadCategory 依赖 keyRef，先前为空导致恢复分支不加载
+            memRestoreRef.current = true;
+            // 分类列表独立拉取（恢复分类页时不被 loadHome 清空 tid）
+            client
+              .home(pick)
+              .then((h) => { if (!cancelled) { setClasses(h.sortClasses); setFallback(!!h.homeFallback); } })
+              .catch(() => undefined);
             setTid(mem.tid);
+            setFiltersActive(mem.filters || {});
             setPg(mem.pg || 1);
-            void loadCategory(mem.tid, mem.pg || 1);
+            void loadCategory(mem.tid, mem.pg || 1, mem.filters || {});
           } else {
             void loadHome(pick);
           }
-          // 数据到齐后恢复滚动定位
-          requestAnimationFrame(() => {
-            if (contentRef.current && uiMem.home.scrollTop) contentRef.current.scrollTop = uiMem.home.scrollTop;
-          });
         }
       })
       .catch((e) => {
@@ -212,6 +365,12 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    *   `filter__home` 模式一致（切换源即切换搜索范围）。
    * - 勾选「全源搜索」：遍历全部可搜索源并发检索（≤4），慢，适合找不到片时扩大范围。
    */
+  /** 保存搜索态到 uiMem（搜索 → 详情 → 返回时恢复搜索结果界面） */
+  function saveSearchMem(term: string, agg: SearchAllReport | null, scope: 'current' | 'all') {
+    uiMem.home.search = { wd: term, aggMode: true, aggScope: scope, searchAllSources, agg };
+    schedulePersist();
+  }
+
   async function doSearch() {
     const term = wd.trim();
     if (!term) return;
@@ -226,6 +385,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       try {
         const r = await client.searchAll(term);
         setAgg(r);
+        saveSearchMem(term, r, 'all');
       } catch (e) {
         setErr(`聚合搜索失败：${(e as Error).message}`);
       } finally {
@@ -248,24 +408,24 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     const t0 = Date.now();
     try {
       const items = await client.search({ key: k, wd: term });
-      setAgg(
-        mergeSearchResults([
-          {
-            key: k,
-            name: site?.name || k,
-            status: items.length > 0 ? 'ok' : 'empty',
-            items,
-            ms: Date.now() - t0,
-          },
-        ]),
-      );
+      const merged = mergeSearchResults([
+        {
+          key: k,
+          name: site?.name || k,
+          status: items.length > 0 ? 'ok' : 'empty',
+          items,
+          ms: Date.now() - t0,
+        },
+      ]);
+      setAgg(merged);
+      saveSearchMem(term, merged, 'current');
     } catch (e) {
       const msg = (e as Error).message;
       // 不写 err（否则顶部大错误块会盖住下面更有用的「出错源」清单），
       // 让 perSource.status='error' 走统一的异常列表渲染。
-      setAgg(
-        mergeSearchResults([{ key: k, name: site?.name || k, status: 'error', error: msg, ms: Date.now() - t0 }]),
-      );
+      const merged = mergeSearchResults([{ key: k, name: site?.name || k, status: 'error', error: msg, ms: Date.now() - t0 }]);
+      setAgg(merged);
+      saveSearchMem(term, merged, 'current');
     } finally {
       setLoading(false);
     }
@@ -275,6 +435,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     setWd('');
     setAggMode(false);
     setAgg(null);
+    uiMem.home.search = null;
+    schedulePersist();
     const k = keyRef.current;
     if (k) void loadHome(k);
   }
@@ -348,7 +510,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
               <div className="banner" style={{ borderLeftColor: agg.items.length ? 'var(--accent-2)' : 'var(--warn)' }}>
                 {aggScope === 'all' ? (
                   <>
-                    「{wd}」共搜 {sites.length} 个源：命中 {agg.hitSources} 个 · {agg.items.length} 条（去重，汇总前 {agg.totalRaw} 条）
+                    「{wd}」共搜 {sites.length} 个源：命中 {agg.hitSources} 个 · 共 {agg.items.length} 条（各源分别列出，不合并）
                     {agg.failedSources > 0 ? ` · ⚠ ${agg.failedSources} 个源出错（见下）` : ''}
                   </>
                 ) : (
@@ -365,7 +527,13 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 <>
                   <div className="grid">
                     {agg.items.map((it) => (
-                      <AggCard key={`${it.sourceKey}-${it.id}`} it={it} onOpen={() => onOpenDetail(it.sourceKey, it.id, it.pic)} />
+                      <AggCard
+                        key={`${it.sourceKey}-${it.id}`}
+                        it={it}
+                        pic={aggPicOf(it)}
+                        onErr={aggPicErr(it)}
+                        onOpen={() => onOpenDetail(it.sourceKey, it.id, aggPicOf(it))}
+                      />
                     ))}
                   </div>
                 </>
@@ -479,8 +647,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 {listStyle ? (
                   <div className="list">
                     {items.map((it) => (
-                      <div key={it.id} className="list-item" onClick={() => onOpenDetail(key, it.id, it.pic)}>
-                        <img src={it.pic} onError={(e) => ((e.target as HTMLImageElement).style.opacity = '0.35')} loading="lazy" />
+                      <div key={it.id} className="list-item" onClick={() => onOpenDetail(key, it.id, picOf(it))}>
+                        <img src={picOf(it)} onError={picErr(it)} loading="lazy" />
                         <span className="li-name" title={it.name}>{it.name}</span>
                         {it.remarks && <span className="badge">{it.remarks}</span>}
                       </div>
@@ -489,10 +657,10 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 ) : (
                 <div className="grid">
                   {items.map((it) => (
-                    <div key={it.id} className="card-media" onClick={() => onOpenDetail(key, it.id, it.pic)}>
+                    <div key={it.id} className="card-media" onClick={() => onOpenDetail(key, it.id, picOf(it))}>
                       <div className="card">
                         <div style={{ position: 'relative' }}>
-                          <img src={it.pic} onError={(e) => ((e.target as HTMLImageElement).style.opacity = '0.15')} loading="lazy" />
+                          <img src={picOf(it)} onError={picErr(it)} loading="lazy" />
                           {it.remarks && <span className="badge">{it.remarks}</span>}
                         </div>
                         <div className="meta">
@@ -519,13 +687,13 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   );
 }
 
-/** 聚合结果卡：带来源徽标；同片多源提示；点击进对应源详情 */
-function AggCard({ it, onOpen }: { it: AggVodItem; onOpen: () => void }) {
+/** 聚合结果卡：带来源徽标；同片多源提示；点击进对应源详情（pic 由外部注入 = TMDB 补全优先） */
+function AggCard({ it, pic, onOpen, onErr }: { it: AggVodItem; pic: string; onOpen: () => void; onErr: (e: React.SyntheticEvent<HTMLImageElement>) => void }) {
   return (
     <div className="card-media" onClick={onOpen}>
       <div className="card">
         <div style={{ position: 'relative' }}>
-          <img src={it.pic} onError={(e) => ((e.target as HTMLImageElement).style.opacity = '0.15')} loading="lazy" />
+          <img src={pic} onError={onErr} loading="lazy" />
           {it.remarks && <span className="badge">{it.remarks}</span>}
           <span
             style={{
@@ -539,7 +707,6 @@ function AggCard({ it, onOpen }: { it: AggVodItem; onOpen: () => void }) {
         </div>
         <div className="meta">
           <div className="name" title={it.name}>{it.name}</div>
-          {!!it.sameFromOtherSources && <div className="muted" style={{ fontSize: 10, color: 'var(--accent-2)' }}>另有 {it.sameFromOtherSources} 个源可播</div>}
         </div>
       </div>
     </div>

@@ -1,21 +1,34 @@
 // src/main/net/quarkTransfer.ts — 原生复刻夸克「分享→转存→直链」，用于夸克网盘源播放。
 // 所有端点都在 drive-pc.quark.cn（未被 cert-pinning），仅需 cookie + 特定 UA + Referer。
-// 六步：token → 分享文件列表 → 建目录 → save(转存) → 轮询 own 盘 → download 直链。
+// 六步：token → 分享文件列表(含 share_fid_token) → 专用落盘目录 → save(to_pdir_fid)
+//       → GET /1/clouddrive/task 轮询「服务器返回的 fid」 → download 直链。
+//
+// ★★ 2026-09-19 修复（用户实测：①自删无效 ②反而无法播放 ③误删网盘内其它资源）——
+// 对齐两个真实活跃实现（Cp0204/quark-auto-save、CYQawa/YunX，均实测可用的权威链路）：
+//   · 「转存结果 fid」必须用 **服务器明确返回** 的 `save_as.save_as_top_fids`（GET /1/clouddrive/task），
+//     不再靠「共享目录枚举差集 / updated_at 猜测」——旧法在转存失败/并发/目录含用户文件时
+//     会取错 fid → 删除时误删他人资源、真正转存文件却没被记录（自删无效）。
+//   · 落盘用 **应用专用目录**（to_pdir_fid），与用户自有文件物理隔离；
+//   · save 带 fid_token_list + scene=link（YunX 实测：缺了会 400 Bad Parameter）。
+//   · 删除 = 异步任务（响应 data.task_id）；提交成功判定 = code==0 且 task_id 非空。
+//   · quarkTransfer 全局串行（互斥锁），防并发转存相互污染。
 import type { Logger } from '../../shared/types';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch';
 const REF = 'https://pan.quark.cn/';
 const BASE = 'https://drive-pc.quark.cn/1/clouddrive';
-// 依据 capture/_xfer.txt 抓包：
-//  - share/token、share/detail、share/save 才带 __dt/__t
-//  - file(建目录)、file/download 只带基本 query（带 __dt/__t 会 400）
+// 依据 capture/_xfer.txt 抓包 + 权威实现：
+//  - share/token、share/detail、share/save 才带 __dt/__t（Cp0204 生成随机值；空值亦可工作）
+//  - file(建目录)、file/download、task(任务查询)、file/delete 只带基本 query（带 __dt/__t 会 400）
 const Q = '?pr=ucpro&fr=pc&uc_param_str=&__dt=&__t='; // share 系
-const QF = '?pr=ucpro&fr=pc&uc_param_str=';            // file 系
+const QF = '?pr=ucpro&fr=pc&uc_param_str=';            // file 系 / task / delete
+/** 应用专用落盘目录名（用户可见、可自行清理；与用户自有文件隔离，杜绝误删） */
+export const QUARK_CACHE_DIR_NAME = 'Win-Box缓存';
 
-async function jpost(url: string, cookie: string | null, body: unknown): Promise<{ status: number; json: any; text: string; setCookie?: string }> {
+async function jpost(url: string, cookie: string | null, body: unknown, extraHeaders: Record<string, string> = {}): Promise<{ status: number; json: any; text: string; setCookie?: string }> {
   const r = await globalThis.fetch(url, {
     method: 'POST',
-    headers: { 'User-Agent': UA, 'Referer': REF, 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+    headers: { 'User-Agent': UA, 'Referer': REF, 'Content-Type': 'application/json', Origin: REF.replace(/\/$/, ''), ...(cookie ? { Cookie: cookie } : {}), ...extraHeaders },
     body: JSON.stringify(body),
   });
   const text = await r.text();
@@ -24,25 +37,60 @@ async function jpost(url: string, cookie: string | null, body: unknown): Promise
   // ★ 捕获响应 Set-Cookie → 新版 __puus，供取流时使用（实测 download 会下发新 __puus）
   return { status: r.status, json, text, setCookie: r.headers.get('set-cookie') || undefined };
 }
-async function jget(url: string, cookie: string): Promise<{ status: number; json: any }> {
-  const r = await globalThis.fetch(url, { method: 'GET', headers: { 'User-Agent': UA, 'Referer': REF, 'Cookie': cookie } });
+async function jget(url: string, cookie: string, extraHeaders: Record<string, string> = {}): Promise<{ status: number; json: any }> {
+  const r = await globalThis.fetch(url, {
+    method: 'GET',
+    // ★ 分享列表接口必须带 Origin/Referer，否则 400（YunX 抓包注释）
+    headers: { 'User-Agent': UA, 'Referer': REF, Origin: REF.replace(/\/$/, ''), 'Cookie': cookie, ...extraHeaders },
+  });
   let json: any = {};
   try { json = JSON.parse(await r.text()); } catch { /* ignore */ }
   return { status: r.status, json };
 }
 
-export interface QuarkTransferResult { url: string; header: Record<string, string>; ok: boolean; reason?: string }
+export interface QuarkTransferResult {
+  url: string;
+  header: Record<string, string>;
+  ok: boolean;
+  reason?: string;
+  /** ★ 本次转存落盘的本人盘文件 fid / 所在目录 fid（供「关播放窗口即删」清理用） */
+  fid?: string;
+  pdirFid?: string;
+}
+
+/** 分享内层文件的精确标识（fid + 服务器签发的 token + 文件名），供 save/护栏匹配 */
+export interface QuarkShareFile {
+  fid: string;
+  token: string;
+  name: string;
+  size: number;
+}
+
+/** ★ 全局串行锁：夸克转存是"分享目录 + 服务器任务"的共享状态机，
+ *  并发跑会互相污染 fid 判定（甲的 save 落盘被乙误识别）→ 同一时刻只允许一个转存。 */
+let transferChain: Promise<unknown> = Promise.resolve();
 
 /**
- * 执行夸克 分享→转存→直链。
- * @param pwdId 分享 ID（pan.quark.cn/s/<pwdId> 或 episode JSON 里的 sId）
+ * 执行夸克 分享→转存→直链（全局互斥，串行执行）。
+ * @param pwdId  分享 ID（pan.quark.cn/s/<pwdId> 或 episode JSON 里的 sId）
  * @param cookie 绑定夸克的完整 cookie（driveList()['quark'] / Cloud-drive 的 quarkCookie）
- * @param opts.innerFid 可选：已解析出的分享内层文件 fid（跳过第 2 步）
+ * @param opts.innerFid 可选：已解析出的分享内层文件 fid（跳过列表首文件选择，但仍去列表取 token/name）
  */
-export async function quarkTransfer(
+export function quarkTransfer(
   pwdId: string,
   cookie: string,
-  opts: { innerFid?: string; stoken?: string; fileDirName?: string; logger?: Logger } = {},
+  opts: { innerFid?: string; stoken?: string; logger?: Logger } = {},
+): Promise<QuarkTransferResult> {
+  const run = transferChain.then(() => quarkTransferInner(pwdId, cookie, opts));
+  // 无论成败都让后续转存可以继续；错误只归本次调用方
+  transferChain = run.catch(() => undefined);
+  return run;
+}
+
+async function quarkTransferInner(
+  pwdId: string,
+  cookie: string,
+  opts: { innerFid?: string; stoken?: string; logger?: Logger } = {},
 ): Promise<QuarkTransferResult> {
   const log = opts.logger ?? { i: () => {}, w: () => {}, e: () => {} } as Logger;
   const base = BASE + Q;
@@ -56,105 +104,332 @@ export async function quarkTransfer(
   }
   if (!stoken) return { url: '', header: {}, ok: false, reason: '获取 stoken 失败' };
 
-  // 2) 分享文件列表 → 内层 fid（若传入枚 直接用它；否则取文件列表第一个真实文件）
-  let innerFid = opts.innerFid;
-  if (!innerFid) {
-    const d = await jget(`${BASE}/share/sharepage/detail${Q}&stoken=${encodeURIComponent(stoken)}&pwd_id=${encodeURIComponent(pwdId)}&size=20&offset=0`, cookie);
-    const list = d.json?.data?.list;
-    if (d.status !== 200 || !Array.isArray(list) || !list[0]) return { url: '', header: {}, ok: false, reason: `分享列表失败 ${d.status}` };
-    // 外层可能是个目录(整季)，需下钻到内层真实视频文件再转存
-    const outer = list[0];
-    if (isDirNode(outer)) {
-      const inner = await jget(`${BASE}/share/sharepage/detail${Q}&stoken=${encodeURIComponent(stoken)}&pwd_id=${encodeURIComponent(pwdId)}&pdir_fid=${outer.fid}&size=50&offset=0`, cookie);
-      const innerList = inner.json?.data?.list;
-      const videoFid = (Array.isArray(innerList) ? innerList : []).find((f: any) => isRealFileNode(f))?.fid;
-      if (videoFid) { innerFid = videoFid; }
-      else if (Array.isArray(innerList) && innerList[0]) innerFid = innerList[0].fid;
-    } else {
-      innerFid = outer.fid;
-    }
-    if (!innerFid) return { url: '', header: {}, ok: false, reason: '未从分享解析到可转存文件' };
-  }
+  // 2) 分享文件列表，定位内层真实视频文件并取 fid + share_fid_token + file_name（save 与护栏都靠它）
+  const shareFile = await pickShareFile(stoken, pwdId, cookie, opts.innerFid, log);
+  if (!shareFile) return { url: '', header: {}, ok: false, reason: '未从分享解析到可转存文件' };
+  const innerFid = shareFile.fid;
+  const innerName = shareFile.name;
 
-  // 3) 定位本人盘「来自：分享」目录（转存的固定落盘位置）。
-  //    实测：save 用空 pdir_fid 会转存到 root 下名为「来自：分享」的目录，
-  //    而非我们建的自定义目录 —— 所以不建 tvtmp，直接枚举该目录。
-  const shareDirFid = await findShareDirFid(cookie, log);
+  // 3) ★ 定位/创建「应用专用落盘基础目录」（root 下固定名，fid 弱指纹缓存 10 分钟），
+  //    并在其下为本次播放创建**唯一会话子目录** `tr_<ts>_<rand>`（对齐 YunX TEMP_SUBDIR_PREFIX）：
+  //    · 每次转存落不同目录 → 即使上一次的文件因删除任务未完成仍残留，也不会产生同名冲突
+  //      （否则"第一次能播、第二次转存同名 save 失败 → 无法播放"）；
+  //    · 子目录内只有本次转存文件 → 护栏/清理目标精确，绝不触碰用户文件。
+  const baseDirFid = await findOrCreateCacheDir(cookie, log);
+  const cacheDirFid = await createSessionDir(cookie, baseDirFid, log);
+  log.i(`quarkTransfer: 会话落盘目录 fid=${cacheDirFid.slice(0, 8)}... (base=${baseDirFid.slice(0, 8)}...)`);
 
-  // 4) 转存 save（share 系，带 __dt/__t）；pdir_fid 传空 → 落到「来自：分享」
-  const sv = await jpost(`${BASE}/share/sharepage/save${Q}`, cookie, { pwd_id: pwdId, stoken, fid_list: [innerFid], pdir_fid: '', share_pwd: '', size: 1 });
+  // 3.5) before 快照（仅用于"task 查询失败"时的回退护栏；子目录刚建，before 应为空）
+  const beforeFids = new Set<string>();
+  try {
+    const before = await listDirFiles(cookie, cacheDirFid);
+    for (const f of before) if (f?.fid) beforeFids.add(String(f.fid));
+  } catch { /* 快照失败不阻塞主链路 */ }
+
+  // 4) 转存 save：★ 对齐 Cp0204/YunX —— to_pdir_fid（专用目录）+ fid_token_list + scene=link + pdir_fid='0'。
+  //    （不传 share_pwd/size 等非权威字段，避免被服务器作为转存参数误读；缺 scene 会 400。）
+  const sv = await jpost(`${BASE}/share/sharepage/save${Q}`, cookie, {
+    pwd_id: pwdId,
+    stoken,
+    fid_list: [innerFid],
+    fid_token_list: [shareFile.token],
+    to_pdir_fid: cacheDirFid,
+    pdir_fid: '0',
+    scene: 'link',
+  });
   const taskId = sv.json?.data?.task_id;
-  if (sv.status !== 200 || sv.json?.code !== 0 || !taskId) return { url: '', header: {}, ok: false, reason: `转存save失败 ${sv.status}/${sv.text.slice(0,140)}` };
-
-  // 5) 轮询「来自：分享」目录，等待本次转存的新文件出现并取其 fid。
-  //    落盘处于/即时：快则 <20s，大文件(2GB)可达 2 分钟级，需耐心轮询。
-  //    用「转存前已有文件名的集合」做差集，精准锁定本次新增的那个
-  //    （同集已存在时夸克会重命名为 `04(1).mp4`，不能只按文件名找）。
-  let ownFid = '';
-  const before = await shareDirFiles(cookie, shareDirFid);
-  const beforeNames = new Set(before.filter((f: any) => f.file_name).map((f: any) => String(f.file_name)));
-  for (let i = 0; i < 26 && !ownFid; i++) {
-    await new Promise((r) => setTimeout(r, 2500));
-    try {
-      const files = await shareDirFiles(cookie, shareDirFid);
-      // 优先：非转存前就存在的新节点（含同集重命名 04(1).mp4、01.mp4 等）
-      const added = files.filter((f: any) => {
-        const n = f.file_name;
-        if (!n) return false;
-        if (!beforeNames.has(String(n))) return true;              // 全新文件名
-        const stripped = (String(n) as string).replace(/(\(\d+\))?\.mp4$/i, '.mp4');
-        return !beforeNames.has(stripped);                          // 同集去 (1) 后缀后若也没见过 → 新
-      });
-      const realAdded = added.filter((f: any) => isRealFileNode(f));
-      if (realAdded.length > 0) {
-        ownFid = realAdded[0].fid;   // 本次转存的是单个分享文件，差集命中的即它
-        break;
-      }
-      // 兜底：差集没识别到(极端)则退而取目录里任一个真实文件
-      const anyFile = files.find((f: any) => isRealFileNode(f));
-      if (anyFile && i >= 6) { ownFid = anyFile.fid; break; }
-    } catch { /* 等下一轮 */ }
+  if (sv.status !== 200 || sv.json?.code !== 0 || !taskId) {
+    log.w(`quarkTransfer: save 失败（无 task_id）: ${sv.status}/${String(sv.text).slice(0,200)}`);
+    return { url: '', header: {}, ok: false, reason: `转存save失败 ${sv.status}/${String(sv.text).slice(0,160)}` };
   }
-  if (!ownFid) return { url: '', header: {}, ok: false, reason: '转存超时：未在「来自：分享」目录找到本次转存文件（请检查夸克 cookie 是否有效）' };
+
+  // 5) ★ 转存 fid 以「服务器返回」为准：轮询 GET /1/clouddrive/task 直到完成，
+  //    取 data.save_as.save_as_top_fids[0]（Cp0204/YunX 均用此 fid 直接 download）。
+  //    task 查询失败（超时/异常）→ 回退「专用目录内 差集+文件名护栏」识别；
+  //    护栏命中才继续，未命中 → 判失败（宁可拿不到，也绝不猜 fid → 绝不误删用户资源）。
+  let ownFid = await pollSaveTask(taskId, cookie, log);
+  if (!ownFid) {
+    log.w('quarkTransfer: task 轮询未返回 fid，回退专用目录护栏识别');
+    ownFid = await matchTransferredInDir(cookie, cacheDirFid, innerName, beforeFids, log);
+  }
+  if (!ownFid) return { url: '', header: {}, ok: false, reason: '转存未确认落盘 fid（请检查夸克 cookie 是否有效）' };
 
   // 6) 出流：★ 用「download 响应下发的 __puus」取直链（真机验证：可 206，见 capture/mitm_capture.jsonl）。
   //    ★ 优先走「加速节点」（对齐影视仓）：先 acquire_dl_token 拿 token，再带 speedup_session+token
-  //      请求 download —— 实测普通节点 dl-pc-zb 仅 ~0.2MB/s，加速节点 dl-c-zb-u 快 ~7 倍，卡顿多源自普通节点限速。
+  //      请求 download —— 实测普通节点 dl-pc-zb 仅 ~0.2MB/s，加速节点 dl-c-zb-u 快 ~7 倍。
   //      加速失败（接口异常/token 拿不到）自动回退普通 download，不影响可用性。
-  //    转码接口（play/project）多返 plf_invalid 且非必需，仅作后备。
   let url = '';
   let playCookie = cookie;
-  const token = await acquireDlToken(cookie);
+  const token = await acquireDlToken(cookie, log);
   if (token) {
     const sd = await jpost(`${BASE}/file/download${QF}`, cookie, { fids: [ownFid], speedup_session: '', token });
     url = sd.json?.data?.[0]?.download_url || '';
-    // 取流 cookie 优先用加速 download 响应下发的 __puus
     const sdPuus = pickSetCookie(sd.setCookie, '__puus');
     if (sdPuus) playCookie = applyCookie(cookie, '__puus', sdPuus);
   }
   if (!url) {
     const dl = await jpost(`${BASE}/file/download${QF}`, cookie, { fids: [ownFid] });
     url = dl.json?.data?.[0]?.download_url || '';
-    if (dl.status !== 200 || !url) return { url: '', header: {}, ok: false, reason: `下载直链失败 ${dl.status}/${dl.text.slice(0,140)}` };
-    // 从 download 响应 Set-Cookie 取最新 __puus，覆盖原 cookie 中的旧值（auth_key 绑定该会话）
+    if (dl.status !== 200 || !url) return { url: '', header: {}, ok: false, reason: `下载直链失败 ${dl.status}/${String(dl.text).slice(0,140)}` };
     const puus = pickSetCookie(dl.setCookie, '__puus');
     playCookie = puus ? applyCookie(cookie, '__puus', puus) : cookie;
   }
-  return { url, header: { Referer: REF, 'User-Agent': UA, Cookie: playCookie }, ok: true };
+  return { url, header: { Referer: REF, 'User-Agent': UA, Cookie: playCookie }, ok: true, fid: ownFid, pdirFid: cacheDirFid };
+}
+
+/** 分享列表 → 定位内层真实视频文件，返回 fid + token + name。
+ *  优先使用调用方传入的 innerFid（episode JSON 里常有）；否则取列表第一个真实文件。
+ *  分享下钻：外层可能是整季目录（dir=true）→ 进一层找视频。 */
+async function pickShareFile(
+  stoken: string,
+  pwdId: string,
+  cookie: string,
+  preferFid: string | undefined,
+  log: Logger,
+): Promise<QuarkShareFile | null> {
+  const toFile = (item: any): QuarkShareFile | null => {
+    if (!item || typeof item !== 'object' || !item.fid) return null;
+    return {
+      fid: String(item.fid),
+      // 官方分享列表 token 字段（抓包）：share_fid_token；兼容旧字段名
+      token: String(item.share_fid_token || item.fid_token || item.token || ''),
+      name: String(item.file_name || item.fname || ''),
+      size: Number(item.size) || 0,
+    };
+  };
+  const fetchList = async (pdirFid: string): Promise<any[]> => {
+    const d = await jget(`${BASE}/share/sharepage/detail${Q}&stoken=${encodeURIComponent(stoken)}&pwd_id=${encodeURIComponent(pwdId)}&pdir_fid=${pdirFid}&size=50&offset=0`, cookie);
+    const list = d.json?.data?.list;
+    return Array.isArray(list) ? list : [];
+  };
+
+  const outerList = await fetchList('0');
+  if (outerList.length === 0) { log.w('quarkTransfer: 分享列表为空'); return null; }
+  // ★ 首选调用方指定的内层 fid（episode JSON 给的是**内层文件** fid，可能不在外层列表里）。
+  //   精确匹配优先级：外层列表 → 下钻所有整季目录的一层子列表 → 取第一个真实文件。
+  //   修复"播某集却转存了目录里第一个文件/找不到 fid"导致落盘与播放对象错位的问题。
+  let pick: any = null;
+  if (preferFid) {
+    pick = outerList.find((f: any) => String(f?.fid) === String(preferFid)) ?? null;
+    if (!pick) {
+      // 外层是整季目录 → 下钻其内层列表，按 fid 精确匹配（每集一个 vfid）
+      for (const f of outerList) {
+        if (!isDirNode(f)) continue;
+        const sub = await fetchList(String(f.fid));
+        const m = sub.find((x: any) => String(x?.fid) === String(preferFid));
+        if (m) { pick = m; break; }
+      }
+    }
+  }
+  if (!pick) {
+    pick = outerList.find((f: any) => !isDirNode(f)) ?? null;
+    if (!pick) pick = outerList[0];
+  }
+  const file = toFile(pick);
+  // 外层是目录（整季）且未命中具体集 → 下钻一层，取首个真实视频文件（顺带拿 token/name）
+  if (file && isDirNode(pick)) {
+    const innerList = await fetchList(String(pick.fid));
+    const inner = innerList.find((f: any) => !isDirNode(f)) ?? innerList[0] ?? null;
+    if (inner) return toFile(inner);
+  }
+  if (!file) return null;
+  if (!file.name) log.w(`quarkTransfer: 分享文件缺 file_name（fid=${file.fid.slice(0,8)}），文件名护栏可能失配`);
+  return file;
+}
+
+/** 每次播放的会话子目录前缀（对齐 YunX TEMP_SUBDIR_PREFIX=tr_；用于规避同名转存冲突 + 精确清理） */
+export const SESSION_DIR_PREFIX = 'tr_';
+
+/** 生成唯一会话子目录名（纯函数，供单测）：`tr_<时间戳>_<6位随机>` */
+export function sessionDirName(ts?: number, rand?: string): string {
+  const t = ts ?? Date.now();
+  const r = rand ?? Math.random().toString(36).slice(2, 8);
+  return `${SESSION_DIR_PREFIX}${t}_${r}`;
+}
+
+/**
+ * 在基础目录下创建一次播放的「唯一会话子目录」，返回其 fid。
+ * 失败（重复尝试建了目录但还是拿不到 fid）→ 回退用基础目录本身（仍可工作，只是失去隔离）。
+ */
+async function createSessionDir(cookie: string, baseDirFid: string, log: Logger): Promise<string> {
+  if (!baseDirFid || baseDirFid === '0') return baseDirFid;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const name = sessionDirName();
+      const r = await jpost(`${BASE}/file${QF}`, cookie, { pdir_fid: baseDirFid, file_name: name, dir_path: '', dir_init_lock: false });
+      if (r.json?.code === 0 && r.json?.data?.fid) return String(r.json.data.fid);
+      log.w(`quarkTransfer: 建会话目录失败(attempt ${attempt + 1}): ${String(r.text).slice(0, 120)}`);
+    } catch (e) {
+      log.w(`quarkTransfer: 建会话目录异常(attempt ${attempt + 1}): ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  log.w('quarkTransfer: 会话目录创建失败，回退基础目录落盘');
+  return baseDirFid;
+}
+
+/** 找/建「应用专用落盘目录」fid（root 枚举 + 按名匹配；不存在则创建；弱指纹缓存 10 分钟） */
+async function findOrCreateCacheDir(cookie: string, log: Logger): Promise<string> {
+  const ck = dirCacheKey(cookie);
+  const hit = dirFidCache.get(ck);
+  if (hit && Date.now() - hit.at < DIR_FID_TTL_MS) {
+    if (hit.fid && hit.fid !== '0') return hit.fid;
+  }
+  let fid = '0';
+  try {
+    const root = await listDirFiles(cookie, '0');
+    const match = (root || []).find((f: any) => String(f?.file_name) === QUARK_CACHE_DIR_NAME);
+    if (match?.fid) {
+      fid = String(match.fid);
+    } else {
+      // 建目录：POST /1/clouddrive/file（file 系，不带 __dt/__t）
+      const r = await jpost(`${BASE}/file${QF}`, cookie, { pdir_fid: '0', file_name: QUARK_CACHE_DIR_NAME, dir_path: '', dir_init_lock: false });
+      if (r.json?.code === 0 && r.json?.data?.fid) {
+        fid = String(r.json.data.fid);
+        log.i(`quarkTransfer: 已创建专用落盘目录 ${QUARK_CACHE_DIR_NAME}`);
+      } else {
+        log.w(`quarkTransfer: 创建目录失败，回退 root(${String(r.text).slice(0,100)})`);
+      }
+    }
+  } catch (e) {
+    log.w(`quarkTransfer: 定位专用目录异常: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  dirFidCache.set(ck, { fid, at: Date.now() });
+  return fid;
+}
+
+/**
+ * ★ 轮询异步转存任务（GET /1/clouddrive/task），返回服务器确认的落盘 fid。
+ * 响应结构：{ status:200, data:{ status:2 | task_status:2 | finished_at>0, save_as:{ save_as_top_fids:[fid] } } }
+ * 对齐 Cp0204（query_task 轮询 status==2）与 YunX（pollTask 取 save_as_top_fids[0]）。
+ * ★ 2026-09-19 加固：单轮网络/解析失败**继续重试**而非提前放弃（release76 前 HTTP 抖动即 return ''
+ *   导致大文件转存被误判失败）；完成判定放宽到「save_as 出现即完成」；总轮次 20 → 45（45s，
+ *   覆盖数 GB 大文件的分钟级落盘，之前 20s 就超时被护栏接管 → 落盘未到 → 拿不到直链）。
+ */
+async function pollSaveTask(taskId: string, cookie: string, log: Logger): Promise<string> {
+  const now = Date.now();
+  for (let i = 0; i < 45; i++) {
+    try {
+      // 对齐 Cp0204：task 查询也带 __dt/__t（随机毫秒 + 当前秒），避免个别部署拒绝无该参数的请求
+      const ts = Date.now();
+      const r = await jget(`${BASE}/task${QF}&task_id=${encodeURIComponent(taskId)}&retry_index=${i}&__dt=${ts}&__t=${(ts / 1000).toFixed(0)}`, cookie);
+      if (r.status !== 200 || r.json?.status !== 200) {
+        if (i % 5 === 4) log.w(`quarkTransfer: task 查询 ${i + 1} 次未就绪 status=${r.status}`);
+        continue; // 网络/服务端未就绪 → 继续等（不放弃）
+      }
+      const data = r.json?.data;
+      if (!data) continue;
+      const done =
+        data.status === 2 ||
+        data.task_status === 2 ||
+        Number(data.finished_at || 0) > 0 ||
+        Array.isArray(data.save_as?.save_as_top_fids); // save_as 出现即完成（部分响应没有 status 字段）
+      if (done) {
+        const fids = data.save_as?.save_as_top_fids;
+        const fid = Array.isArray(fids) ? fids[0] : '';
+        if (typeof fid === 'string' && fid) {
+          log.i(`quarkTransfer: task ${i + 1} 轮完成 fid=${fid.slice(0, 8)}... (${Date.now() - now}ms)`);
+          return fid;
+        }
+        log.w('quarkTransfer: task 完成但 save_as_top_fids 为空/缺失');
+        return ''; // 明确完成但无 fid → 交护栏
+      }
+    } catch (e) {
+      log.w(`quarkTransfer: task 轮询异常 ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (i < 44) await new Promise((r) => setTimeout(r, 1000));
+  }
+  log.w('quarkTransfer: task 轮询 45s 超时');
+  return '';
+}
+
+/**
+ * 回退护栏：仅在「应用专用目录」内识别本次转存落地文件。
+ * 判定 = 不在 before 快照（差集） 且 文件名与分享源文件匹配（兼容夸克同名自动加 `(N)` 后缀）。
+ * ★ 安全边界：绝不使用文件更新时间/任意文件猜测 —— 匹配不到就返回空（宁可转存判定失败，
+ *  也不把目录里其它文件（哪怕是本应用历史文件）当成本次目标去删除。
+ */
+export function matchTransferredInDir(
+  cookie: string,
+  dirFid: string,
+  expectName: string,
+  beforeFids: Set<string>,
+  log: Logger,
+): Promise<string> {
+  // 目录在 root 退化时禁止做删除目标识别（不碰用户 root）
+  if (!dirFid || dirFid === '0') return Promise.resolve('');
+  return (async () => {
+    for (let i = 0; i < 20; i++) {
+      try {
+        const files = await listDirFiles(cookie, dirFid);
+        const added = (Array.isArray(files) ? files : []).filter(
+          (f: any) => isRealFileNode(f) && !beforeFids.has(String(f.fid)),
+        );
+        const hit = matchTransferredFile(added, expectName);
+        if (hit) return hit;
+      } catch { /* 等下一轮 */ }
+      if (i < 19) await new Promise((r) => setTimeout(r, 1000));
+    }
+    log.w('quarkTransfer: 回退护栏未匹配到本次转存文件（不删除任何文件）');
+    return '';
+  })();
+}
+
+/** 在候选文件里按「文件名与分享源一致（含 (N) 重命名后缀）」精确匹配目标 fid（纯函数，供单测） */
+export function matchTransferredFile(files: unknown[], expectName: string): string {
+  if (!Array.isArray(files) || files.length === 0 || !expectName) return '';
+  const norm = (n: string): string => String(n || '').trim();
+  const baseNorm = (n: string): string => norm(n).replace(/\s*\(\d+\)(?=\.[^.]+$)/, ''); // 04(1).mp4 → 04.mp4
+  const want = norm(expectName);
+  const wantBase = baseNorm(want);
+  const hit: any = files.find((f: any) => {
+    if (!f || !f.fid || !isRealFileNode(f)) return false;
+    const n = norm(f.file_name || f.fname);
+    if (!n) return false;
+    return n === want || (wantBase !== want && baseNorm(n) === wantBase) || (wantBase === want && baseNorm(n) === want);
+  });
+  return hit && hit.fid ? String(hit.fid) : '';
+}
+
+/**
+ * 删除本人盘文件（「关播放窗口即删」清理用）：POST /1/clouddrive/file/delete（file 系，不带 __dt/__t）。
+ * ★ 2026-09-19 对齐权威实现（Cp0204/quark-auto-save、CYQawa/YunX、xinyue-search）：
+ *   body = { action_type:2, exclude_fids:[], filelist:[fid] }；删除为**异步任务**（返回 data.task_id）。
+ *   提交成功判定：HTTP 200 + code==0 + task_id 非空（有返回）→ 视为已申请删除，出队。
+ * 删除失败返回 false（调用方静默，下次转存同名文件夸克会自动重命名，不影响功能）。
+ */
+export async function quarkFileDelete(cookie: string, pdirFid: string, fid: string, logger?: Logger): Promise<boolean> {
+  const log = logger ?? { i: () => {}, w: () => {}, e: () => {} } as Logger;
+  if (!cookie || !fid) return false;
+  try {
+    const r = await jpost(`${BASE}/file/delete${QF}`, cookie, { action_type: 2, exclude_fids: [], filelist: [fid] });
+    const taskId = r.json?.data?.task_id;
+    const okSubmit = r.status === 200 && r.json?.code === 0 && (typeof taskId !== 'string' || taskId.length > 0);
+    if (!okSubmit) log.w(`quark 删除落盘文件失败 fid=${fid.slice(0,8)}... status=${r.status}/${String(r.text).slice(0,120)}`);
+    return okSubmit;
+  } catch (e) {
+    log.w(`quark 删除落盘文件异常: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
 }
 
 /**
  * 获取夸克下载加速 token（对齐影视仓 drive-social-api acquire_dl_token）。
  * 端点不在被 pin 的 userver.upaas，仅需 cookie；失败返回空串（调用方回退普通 download）。
- * 实测 conversation 参数非关键（可复用抓包值），只需 token 字节用于 download 加速。
+ * ★ 重试 3 次（间隔退避）：token 一次失败若放弃会静默回退普通节点（≈0.2MB/s 卡顿）。
  */
-async function acquireDlToken(cookie: string): Promise<string> {
+async function acquireDlToken(cookie: string, logger?: Logger): Promise<string> {
   const url = 'https://drive-social-api.quark.cn/1/clouddrive/chat/conv/file/acquire_dl_token?pr=ucpro&fr=pc&sys=darwin&ve=3.19';
-  try {
-    const r = await jpost(url, cookie, { conversation_id: '300000238288007742', conversation_type: 3, msg_id: '1789369843892000' });
-    const token = r.json?.data?.token;
-    return typeof token === 'string' && token.length > 0 ? token : '';
-  } catch { /* 接口异常 → 无加速 */ }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await jpost(url, cookie, { conversation_id: '300000238288007742', conversation_type: 3, msg_id: '1789369843892000' });
+      const token = r.json?.data?.token;
+      if (typeof token === 'string' && token.length > 0) return token;
+      logger?.w?.(`acquire_dl_token 第 ${attempt + 1} 次未返回 token: ${r.status}/${String(r.text).slice(0, 100)}`);
+    } catch (e) {
+      logger?.w?.(`acquire_dl_token 第 ${attempt + 1} 次异常: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+  }
   return '';
 }
 
@@ -171,10 +446,7 @@ function applyCookie(cookie: string, key: string, newVal: string): string {
   return cookie.replace(/$/, `;${key}=${newVal}`);
 }
 
-/** 请求夸克转码播放接口，返回可播 m3u8/fmp4 地址；不支持或失败返回空串。
- *  接口 POST /file/v2/play/project，body {fid, resolutions, supports} 返回 data.video_list[].video_info.url。
- *  实测对不支持转码的文件返回 400 `plf_invalid`（Alist 也在此回退 download，见 driver.go）。
- */
+/** 请求夸克转码播放接口，返回可播 m3u8/fmp4 地址；不支持或失败返回空串。 */
 export async function quarkPlayUrl(fid: string, cookie: string): Promise<string> {
   const body = { fid, resolutions: 'low,normal,high,super,2k,4k', supports: 'fmp4,m3u8,mp3,dolby_vision' };
   try {
@@ -195,6 +467,8 @@ export async function quarkPlayUrl(fid: string, cookie: string): Promise<string>
 /** 是否为「目录/文件夹」节点（区别于真实文件） */
 export function isDirNode(f: any): boolean {
   if (!f || typeof f !== 'object') return false;
+  // 分享列表用布尔 dir / 个人盘用 file_type
+  if (typeof f.dir === 'boolean') return f.dir === true;
   if (f.file_type === 0 || f.file_type === 2) return true;
   if (f.file_type === 1 || f.format_type) return false;
   if (typeof f.size === 'number') return f.size === 0;
@@ -203,20 +477,13 @@ export function isDirNode(f: any): boolean {
 /** 是否为真实文件节点 */
 export function isRealFileNode(f: any): boolean {
   if (!f || typeof f !== 'object' || !f.fid) return false;
+  if (typeof f.dir === 'boolean') return f.dir === false;
   if (f.file_type === 1) return true;
   if (f.format_type) return true;
   return typeof f.size === 'number' && f.size > 0;
 }
-/** 在 root 下按名找「来自：分享」目录 fid */
-async function findShareDirFid(cookie: string, log: Logger): Promise<string> {
-  const list = await shareDirFiles(cookie, '0');
-  const match = (Array.isArray(list) ? list : []).find((f: any) => f.file_type !== 1 && f.file_name === '来自：分享');
-  if (match) return String(match.fid);
-  // 找不到时回退：用作根目录枚举本身（某些账号落盘可能直接在 root）
-  return '0';
-}
-/** 枚举某目录下的全部文件节点（去重，防 root 重复返回同一批） */
-async function shareDirFiles(cookie: string, pdirFid: string): Promise<any[]> {
+/** 枚举某目录下的全部文件节点（去重，防 root 重复返回同一批；最多 3 页） */
+async function listDirFiles(cookie: string, pdirFid: string): Promise<any[]> {
   const out: any[] = [];
   const seen = new Set<string>();
   for (let off = 0; off < 3; off++) {
@@ -233,27 +500,16 @@ async function shareDirFiles(cookie: string, pdirFid: string): Promise<any[]> {
   return out;
 }
 
+/** ★ 播放器载入提速：专用目录 fid 在一段时间内不变 → 弱指纹缓存，避免每次播放都枚举/建目录 */
+const dirFidCache = new Map<string, { fid: string; at: number }>();
+const DIR_FID_TTL_MS = 10 * 60 * 1000;
+function dirCacheKey(cookie: string): string {
+  // cookie 含敏感信息，仅用 长度+末尾特征 作弱指纹（足以区分不同账号）
+  return `${String(cookie.length)}:${cookie.slice(-24)}`;
+}
+
 /** 判断某播放 id 是否夸克分享（episode JSON 含 sId 或直达 pan.quark.cn/s/） */
 export function isQuarkSharePlay(id: string): boolean {
   if (!id) return false;
   return /pan\.quark\.cn\/s\//i.test(id) || /"sId":\s*"/i.test(id);
-}
-
-/**
- * 从「目标目录下文件列表」里挑出转存进来的真实文件 fid。
- * 依据（capture/_xfer.txt）：转存结果落点 = 本步建目录 fid；真实文件节点带
- * file_type=1 或 format_type 或具体 size；纯目录占位（file_type 0/2、无 format_type、size 0）被剔除。
- * 供 step5 轮询枚举目录时使用，也为单测封装出稳定的纯函数。
- */
-export function pickTransferredFid(list: unknown): string {
-  if (!Array.isArray(list)) return '';
-  const isRealFile = (f: any) => {
-    if (!f || typeof f !== 'object' || !f.fid) return false;
-    if (f.file_type === 1) return true;          // 明确文件
-    if (f.file_type === 2) return false;         // 目录占位
-    if (f.format_type) return true;              // 带媒体格式 → 是文件
-    return typeof f.size === 'number' && f.size > 0; // 有实际大小 → 是文件
-  };
-  const files = list.filter(isRealFile);
-  return files.length > 0 ? files[0].fid : '';
 }

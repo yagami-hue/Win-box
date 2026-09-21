@@ -1,6 +1,7 @@
 // tests/jarSpiderMerge.spec.ts — 网盘绑定 token 注入蜘蛛 ext（Playhub/catvod 对齐语义）
 import { describe, it, expect } from 'vitest';
-import { JarSpider, mergeDriveTokens } from '../src/engine/spider/JarSpider';
+import { JarSpider } from '../src/engine/spider/JarSpider';
+import { mergeDriveTokens } from '../src/engine/spider/driveExt';
 import type { EngineHost } from '../src/engine/ports';
 import type { JarSpiderBridge } from '../src/engine/spider/JarSpiderBridge';
 import { NullLogger } from '../src/engine/util/logger';

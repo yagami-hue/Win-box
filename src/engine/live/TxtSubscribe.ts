@@ -7,7 +7,7 @@ import {
   DEFAULT_CHANNEL_NAME,
 } from '../../shared/constants';
 import {
-  NAME_PATTERN,
+  extractM3uName,
   GROUP_PATTERN,
   TVG_CHNO_PATTERN,
   TVG_LOGO_PATTERN,
@@ -329,7 +329,8 @@ function parseM3uToJsonArray(str: string): TxtGroup[] {
         groupName = normalizeGroupName(groupName);
         currentGroup = findOrCreateGroup(result, groupName);
         pendingChannel = {};
-        pendingChannel.name = firstGroup(line, NAME_PATTERN); // 最后一个逗号之后
+        // ★ 上游 bug 修复（2026-09-20 用户授权）：频道名改用引号感知提取（含逗号频道名不再被截断）
+        pendingChannel.name = extractM3uName(line);
         pendingChannel = mergeMeta(pendingChannel, buildMeta(line));
         pendingChannel = mergeMeta(pendingChannel, pendingMeta);
         pendingMeta = {};

@@ -4,7 +4,7 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import { client } from '../api/client';
 import BackButton from '../components/BackButton';
 import { uiMem, schedulePersist } from '../lib/uiMemory';
-import type { Episode, VodDetail } from '../../shared/types';
+import type { Episode, MetaHit, VodDetail } from '../../shared/types';
 
 export default function DetailPage({
   onPlay,
@@ -29,6 +29,8 @@ export default function DetailPage({
     const i = decodeURIComponent(id);
     setLoading(true);
     setErr('');
+    setMetaHit(null);
+    setSrcPicBad(false);
     client
       .detail({ key: k, ids: [i] })
       .then((d) => {
@@ -48,6 +50,41 @@ export default function DetailPage({
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, id]);
+
+  // ---- TMDB 元数据补全（★ 2026-09-19：封面一律优先 TMDB —— 源自带图可能是坏图）----
+  //   查询条件不再要求「源封面缺失/坏」：详情一进来就按片名查 TMDB，命中即覆盖封面；
+  //   源封面（detail.pic / fromListPic）只作查询完成前的占位与 TMDB miss 兜底。
+  //   简介缺（<8 字符）时同一次查询直接补 TMDB overview。
+  const [metaHit, setMetaHit] = useState<MetaHit | null>(null);
+  /** ★ 源封面（detail.pic / fromListPic）onError 证明是坏图 → 维持 TMDB 优先 */
+  const [srcPicBad, setSrcPicBad] = useState(false);
+  useEffect(() => {
+    if (!detail) { setMetaHit(null); return; }
+    const name = (detail.name || '').trim().split(' - ')[0]?.trim();
+    if (!name) return;
+    const y = /((?:19|20)\d{2})/.exec(`${detail.name} ${detail.year || ''} ${detail.remarks || ''}`);
+    let alive = true;
+    client
+      .metaSearch(name, y ? y[1] : undefined)
+      .then((h) => { if (alive && h) setMetaHit(h); })
+      .catch(() => undefined);
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail]);
+
+  // ★ 封面加载失败兜底：
+  //   · 失败的是 TMDB 补图（/img 中继 4xx/超时）→ 移除 metaHit；
+  //   · 失败的是源封面 → 标记 srcPicBad，改由 TMDB 补全替换（坏图不残留）。
+  const coverErr = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const el = e.target as HTMLImageElement;
+    const src = el.currentSrc || el.src || '';
+    if (/\/img\?/.test(src)) {
+      if (metaHit) setMetaHit(null);
+    } else {
+      setSrcPicBad(true);
+    }
+    el.style.opacity = '0.2';
+  };
 
   // 滚动位置记忆
   useEffect(() => {
@@ -132,8 +169,9 @@ export default function DetailPage({
         ) : (
           <>
             <div className="row" style={{ alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
-              {detail.pic || fromListPic ? (
-                <img src={detail.pic || fromListPic} style={{ width: 120, aspectRatio: '2/3', objectFit: 'cover', borderRadius: 8, background: 'var(--bg-elev2)' }} onError={(e) => ((e.target as HTMLImageElement).style.opacity = '0.2')} />
+              {/** 封面（★ TMDB 优先）：metaHit.poster(中继图) > 源自带 > 列表带入；TMDB miss 才落到源图 */}
+              {metaHit?.poster || detail.pic || fromListPic ? (
+                <img src={metaHit?.poster || detail.pic || fromListPic || ''} style={{ width: 120, aspectRatio: '2/3', objectFit: 'cover', borderRadius: 8, background: 'var(--bg-elev2)' }} onError={coverErr} />
               ) : (
                 <div style={{
                   width: 120, aspectRatio: '2/3', borderRadius: 8, background: 'var(--bg-elev2)', flex: 'none',
@@ -146,7 +184,13 @@ export default function DetailPage({
                 {detail.director && <div className="muted" style={{ marginBottom: 4 }}>导演：{detail.director}</div>}
                 {detail.actor && <div className="muted" style={{ marginBottom: 4 }}>主演：{detail.actor}</div>}
                 {detail.remarks && <div style={{ color: 'var(--accent-2)', marginBottom: 4 }}>{detail.remarks}</div>}
-                <div className="muted" style={{ fontSize: 12, maxHeight: 80, overflow: 'auto', marginTop: 8 }}>{detail.des}</div>
+                <div className="muted" style={{ fontSize: 12, maxHeight: 80, overflow: 'auto', marginTop: 8 }}>
+                  {(detail.des || '').trim().length >= 8
+                    ? detail.des
+                    : metaHit?.overview
+                      ? <>{metaHit.overview}<span style={{ opacity: .7, fontSize: 10, marginLeft: 6 }}>简介来自 TMDb</span></>
+                      : detail.des || ''}
+                </div>
               </div>
             </div>
             {detail.flags.length > 0 && (

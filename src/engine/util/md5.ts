@@ -5,7 +5,3 @@ import { createHash } from 'node:crypto';
 export function md5Hex(input: string): string {
   return createHash('md5').update(input, 'utf-8').digest('hex');
 }
-
-// 别名，对齐上游命名
-export const string2MD5 = md5Hex;
-export const encode = md5Hex;

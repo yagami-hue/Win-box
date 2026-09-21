@@ -8,8 +8,89 @@ import mpegts from 'mpegts.js';
 import { uiMem, setPlayTime } from '../lib/uiMemory';
 import { client } from '../api/client';
 import { parseSubtitleFile, shiftCues } from '../../engine/subtitle/parseSubtitle';
-import { buildSearchQuery } from '../../engine/subtitle/normalizeQuery';
+import { buildSearchQuery, extractEp, animeTitleForQuery } from '../../engine/subtitle/normalizeQuery';
 import type { SubtitleSettings, SubtitleCandidate } from '../../shared/subtitle';
+import { parseDanmakuResponse } from '../../engine/danmaku/parseDanmakuXml';
+import { danmakuQueryCandidates } from '../../engine/danmaku/normalizeQuery';
+import { driveProviderFromUrl, driveProviderLabel } from '../../shared/driveProvider';
+import {
+  DEFAULT_DANMAKU_SETTINGS,
+  type DanmakuAnime,
+  type DanmakuCandidate,
+  type DanmakuItem,
+  type DanmakuSettingsView,
+} from '../../shared/danmaku';
+import DanmakuOverlay from './DanmakuOverlay';
+
+// ---- 弹幕匹配记忆：资源名常被规避审核改得奇奇怪怪，首次命中后记住 episodeId 与规范名，
+//     下次同资源/同怪名输入直接复用（localStorage，仅渲染层）。----
+interface DmMem { episodeId: number; anime?: string; ep?: string }
+const DM_MEM_KEY = 'winbox-dm-mem';
+function loadDmMem(): Record<string, DmMem> {
+  try {
+    const j = localStorage.getItem(DM_MEM_KEY);
+    return j ? (JSON.parse(j) as Record<string, DmMem>) : {};
+  } catch {
+    return {};
+  }
+}
+function saveDmMem(m: Record<string, DmMem>): void {
+  try { localStorage.setItem(DM_MEM_KEY, JSON.stringify(m)); } catch { /* ignore */ }
+}
+/** 最多展开前 2 部命中番剧的剧集列表（避免多调 bangumi 接口浪费资源） */
+const MAX_ANIME_EXPAND = 2;
+
+/** 剧集标题（第3话/03）是否与目标集号（已去前导零）同集 */
+function episodeMatches(title: string | undefined, targetEp: string): boolean {
+  if (!title || !targetEp) return false;
+  const m = /[^\d]*(\d{1,4})/.exec(title);
+  return !!m && m[1].replace(/^0+/, '') === targetEp;
+}
+
+/**
+ * 弹幕候选搜索（两级：作品名搜番剧 → 展开剧集列表）。
+ * 记忆 > 原文 > 清洗变体逐个试；命中即记忆，返回剧集级候选列表。
+ */
+async function searchDanmakuCandidates(baseName: string): Promise<DanmakuCandidate[]> {
+  if (!baseName) return [];
+  const mem = loadDmMem();
+  const hit = mem[baseName];
+  if (hit) return [{ episodeId: hit.episodeId, title: hit.anime, episodeTitle: hit.ep }];
+  for (const q of danmakuQueryCandidates(baseName)) {
+    let animes: DanmakuAnime[] = [];
+    try { animes = (await client.danmakuSearch(q)) || []; } catch { animes = []; }
+    if (!animes.length) continue;
+    const expanded: DanmakuCandidate[] = [];
+    for (const a of animes.slice(0, MAX_ANIME_EXPAND)) {
+      let list: DanmakuCandidate[] = [];
+      try { list = (await client.danmakuEpisodes(a.bangumiId, a.title)) || []; } catch { list = []; }
+      expanded.push(...list);
+    }
+    if (expanded.length) {
+      const next = loadDmMem();
+      next[baseName] = { episodeId: expanded[0].episodeId, anime: expanded[0].title, ep: expanded[0].episodeTitle };
+      saveDmMem(next);
+      return expanded;
+    }
+  }
+  return [];
+}
+
+// ---- 字幕怪名记忆：资源名被规避审核改得奇奇怪怪时，assrt 按原名检索不到；
+//     用户手动改成常见名/真名并命中后记住（localStorage，仅渲染层），
+//     下次同资源自动用记忆词检索，与弹幕 winbox-dm-mem 对称。----
+const SUB_MEM_KEY = 'winbox-sub-mem';
+function loadSubMem(): Record<string, string> {
+  try {
+    const j = localStorage.getItem(SUB_MEM_KEY);
+    return j ? (JSON.parse(j) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+function saveSubMem(m: Record<string, string>): void {
+  try { localStorage.setItem(SUB_MEM_KEY, JSON.stringify(m)); } catch { /* ignore */ }
+}
 
 function fmt(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) return '--:--';
@@ -18,6 +99,12 @@ function fmt(sec: number): string {
   const s = Math.floor(sec % 60);
   const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
   return `${h > 0 ? h + ':' : ''}${mm}:${String(s).padStart(2, '0')}`;
+}
+
+/** 实时网速格式化（入参 KB/s），统一以 M/S 形式显示 */
+function fmtNet(kbs: number): string {
+  if (!Number.isFinite(kbs) || kbs <= 0) return '';
+  return kbs >= 1024 ? `${(kbs / 1024).toFixed(2).replace(/\.?0+$/, '')} M/S` : `${Math.round(kbs)} K/S`;
 }
 
 // 可选换集导航：由外层（PlayPage）传入当前集可否切换与回调。
@@ -30,14 +117,25 @@ interface VideoPlayerProps {
   onNext?: () => void;
   /** 当前资源名（剧名+集号），用于外挂字幕检索。缺省则不显示字幕搜索。 */
   resourceName?: string;
+  /** 可搜索的剧名副名（用于弹幕匹配）。缺省（如直播/无集数源）则不显示弹幕按钮。 */
+  danmakuTitle?: string;
+  /** 小窗口模式：控制条只保留 上/下集 + 播放暂停；全屏等功能消失 */
+  mini?: boolean;
+  /** ★ 播放地址属于「cookie 型」网盘且未绑定 → 提示去配置页绑定（值为网盘 provider，如 quark/uc/baidu/115） */
+  driveBindProvider?: string | null;
+  /** ★ 续播起始时间（秒）：历史记录点开时由外层传入，优先于 uiMem.playTime 恢复。
+   *   （历史点开会先重新转存拿新直链 → 新 url 与 uiMem.playTime 的旧键不匹配，须显式带进度） */
+  startTime?: number;
 }
 
 export default function VideoPlayer(props: VideoPlayerProps) {
-  const { url, canPrev, canNext, onPrev, onNext, resourceName } = props;
+  const { url, canPrev, canNext, onPrev, onNext, resourceName, danmakuTitle, mini = false, driveBindProvider = null } = props;
   const ref = useRef<HTMLVideoElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 字幕/弹幕设置面板是否打开（面板打开时暂停闲置隐藏，悬停面板保持显示） */
+  const panelOpenRef = useRef(false);
   const volDragRef = useRef(false);
 
   const [paused, setPaused] = useState(true);
@@ -51,6 +149,31 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const [loading, setLoading] = useState(true);
   const [ui, setUi] = useState(true);
   const [isLive, setIsLive] = useState(false);
+  // ---- 实时网速（加载/缓冲时显示；不加载时不显示）----
+  const [netSpeed, setNetSpeed] = useState<number | null>(null);
+  // 中继层真实转发测速（主进程 /play 统计字节推过来，最可靠；普通直连/hls/flv 用 netSpeed）
+  const [relaySpeed, setRelaySpeed] = useState<number | null>(null);
+  useEffect(() => client.netSpeed((v) => setRelaySpeed(v)), []);
+  // ---- 网盘 cookie 未绑定提示：播放网盘资源但配置页未绑定对应网盘凭据 → 提示去配置页绑定 ----
+  const [needBind, setNeedBind] = useState<string | null>(null);
+  const bindDismissedRef = useRef(false); // 本次播放会话内已点「知道了」→ 不再打扰（重新进入播放页会重新检测）
+  useEffect(() => {
+    // provider 来源：主进程 play 检出（首选）→ URL 兜底（历史直连等未走 play 解析的路径，解析 /play?ck=）
+    const prov = (driveBindProvider && String(driveBindProvider).trim()) || driveProviderFromUrl(url) || '';
+    if (!prov) { setNeedBind(null); return; }
+    if (bindDismissedRef.current) return;
+    let alive = true;
+    void client
+      .driveGet()
+      .then((tokens) => {
+        if (alive && !tokens[prov]) setNeedBind(prov); // 未绑定才提示；已绑定不打扰
+      })
+      .catch(() => {
+        if (alive) setNeedBind(prov); // 查询失败也提示（宁可提示也别静默卡死）
+      });
+    return () => { alive = false; };
+  }, [url, driveBindProvider]);
+  const [buffering, setBuffering] = useState(false);
   // 音量：打开态由 CSS :hover（悬停开/移开收）+ 拖拽/键盘闪烁（.open）共同驱动
   const [volFlash, setVolFlash] = useState(false);
   const [volDrag, setVolDrag] = useState(false);
@@ -126,9 +249,122 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   // 可编辑剧名搜索词：点击字幕按钮后自动填入识别的剧名+集号，用户可改
   const [subQuery, setSubQuery] = useState('');
 
-  // 资源名变化时，若用户还没手动改过，自动填入识别的剧名+集号
+  // ---- 弹幕（弹弹play，dandanplay） ----
+  const [dmEnabled, setDmEnabled] = useState(false);
+  const [dmCfg, setDmCfg] = useState<DanmakuSettingsView>({ ...DEFAULT_DANMAKU_SETTINGS, appSecretSet: false });
+  const [dmItems, setDmItems] = useState<DanmakuItem[]>([]);
+  const [dmPanel, setDmPanel] = useState(false);
+  const [dmCands, setDmCands] = useState<DanmakuCandidate[]>([]);
+  const [dmSearching, setDmSearching] = useState(false);
+  const [dmMsg, setDmMsg] = useState('');
+  const [dmActiveEp, setDmActiveEp] = useState<number | null>(null);
+  // ★ 弹幕查询剧名：有剧名时自动填入识别名，用户可手动改写后搜索（无剧名也能手动输入）
+  const [dmQuery, setDmQuery] = useState('');
+  const dmQueryUserRef = useRef(false);
   useEffect(() => {
-    setSubQuery(buildSearchQuery(resourceName || ''));
+    if (!dmQueryUserRef.current) setDmQuery(resourceName || danmakuTitle || '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resourceName, danmakuTitle]);
+  // ref 承载最新弹幕配置，供 url effect 的闭包读取（避免重挂播放 effect）
+  const dmCfgRef = useRef(dmCfg);
+  dmCfgRef.current = dmCfg;
+
+  // 载入弹幕偏好
+  useEffect(() => {
+    client.danmakuGet().then((s: DanmakuSettingsView) => {
+      setDmCfg(s);
+      setDmEnabled(s.enabled);
+    }).catch(() => undefined);
+  }, []);
+
+  // 弹幕设置变化 → 落盘（AppSecret 永不出主进程，仅回传视图）
+  useEffect(() => {
+    const { appSecretSet: _set, ...rest } = dmCfg;
+    void client.danmakuSet({ ...rest, enabled: dmEnabled }).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dmCfg, dmEnabled]);
+
+  // 播放/换集（url 变化）→ 仅清空弹幕状态。
+  // ★ 不自动搜索：弹幕 API 只在用户显式打开开关/点「匹配弹幕」时才调用，避免资源浪费。
+  useEffect(() => {
+    setDmItems([]);
+    setDmActiveEp(null);
+    setDmMsg('');
+    setDmCands([]);
+  }, [url]);
+
+  // 拉取并应用某个候选剧集的弹幕
+  const applyDanmaku = async (c: DanmakuCandidate) => {
+    setDmSearching(true);
+    setDmMsg('');
+    try {
+      const xml = await client.danmakuFetch(c.episodeId);
+      const items = parseDanmakuResponse(xml || '');
+      setDmItems(items);
+      setDmActiveEp(c.episodeId);
+      // 用户在候选列表点选某集 = 明确要看弹幕：同步打开弹幕开关（否则 overlay 不绘制）
+      setDmEnabled(true);
+      const times = items.map((i) => i.time);
+      const tMin = times.length ? Math.min(...times) : 0;
+      const tMax = times.length ? Math.max(...times) : 0;
+      setDmMsg(
+        items.length
+          ? `已加载 ${items.length} 条弹幕（${c.title || ''} ${c.episodeTitle || ''}）${tMax > 0 ? ` · 时段 ${fmt(tMin)}~${fmt(tMax)}` : ''}；不同步可用「时间」±30s 校准`
+          : '该剧集暂无弹幕',
+      );
+    } catch (e) {
+      setDmMsg((e as Error).message || '弹幕加载失败');
+    } finally {
+      setDmSearching(false);
+    }
+  };
+
+  // 匹配并加载弹幕：作品名搜番剧 → 展开剧集候选 → 按集号优选自动加载（点选候选可换集）
+  // query=剧名副名（详情页/兜底截断），epSource=资源名（含当前集，供提取集号）
+  const matchDanmaku = async (query: string, epSource?: string) => {
+    const name = query.trim();
+    if (!name) { setDmMsg('请填写要搜索的剧名'); return; }
+    setDmSearching(true);
+    setDmMsg('');
+    setDmCands([]);
+    try {
+      const list = await searchDanmakuCandidates(name);
+      setDmCands(list || []);
+      if (!list || !list.length) {
+        setDmMsg(
+          dmCfgRef.current.appSecretSet
+            ? '未找到匹配番剧——试试更常见的剧名写法（去掉特殊符号/集号/括号）'
+            : '弹幕未配置：内置弹幕服务未启用',
+        );
+        return;
+      }
+      const targetEp = extractEp(epSource || name);
+      const preferred = targetEp ? list.find((c) => episodeMatches(c.episodeTitle, targetEp)) : undefined;
+      await applyDanmaku(preferred || list[0]);
+    } catch (e) {
+      setDmMsg((e as Error).message || '弹幕匹配失败');
+    } finally {
+      setDmSearching(false);
+    }
+  };
+
+  const toggleDanmaku = () => {
+    setDmPanel(false);
+    const next = !dmEnabled;
+    setDmEnabled(next);
+    if (next) {
+      // 剧名副名：详情页 danmakuTitle 优先，缺则从资源名截断兜底；集号单独取自资源名
+      const anime = animeTitleForQuery(resourceName || danmakuTitle || '', danmakuTitle || '');
+      if (anime) void matchDanmaku(anime, resourceName);
+      else setDmMsg('弹幕已开启：请到弹幕面板输入剧名后点「匹配弹幕」');
+    }
+  };
+
+  // 资源名变化时：自动填入识别的剧名+集号；若该怪名有字幕真名记忆则用记忆词
+  useEffect(() => {
+    const auto = buildSearchQuery(resourceName || '');
+    const mem = loadSubMem();
+    setSubQuery((mem[resourceName || ''] || '').trim() || auto);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resourceName]);
 
@@ -142,10 +378,12 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     }).catch(() => undefined);
   }, []);
 
-  // 切换集时若已配置字幕开关则沿用偏好
+  // 切换集时清空旧字幕与候选（subQuery 由 resourceName effect 重填）
   useEffect(() => {
     setSubCues([]);
     setSubActive('');
+    setSubCands([]);
+    setSubMsg('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
 
@@ -179,8 +417,11 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   }, [subFont, subBottom, subEnabled]);
 
   const toggleSub = () => {
-    setSubEnabled((e) => !e);
     setSubPanel(false);
+    const next = !subEnabled;
+    setSubEnabled(next);
+    // 开启字幕 = 显式要字幕 → 自动用「剧名+集号」检索 assrt（无候选时才发请求，避免浪费）
+    if (next && subQuery.trim() && !subCands.length && !subTokenHint) void doSearch();
   };
 
   const doSearch = async () => {
@@ -192,6 +433,15 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     try {
       const list = await client.subtitleSearch(name);
       setSubCands(list || []);
+      if (list && list.length && resourceName) {
+        // 怪名→真名记忆：用户改写的词命中后记住，下次同资源自动复用（对称弹幕 winbox-dm-mem）
+        const auto = buildSearchQuery(resourceName);
+        if (name !== auto) {
+          const mem = loadSubMem();
+          mem[resourceName] = name;
+          saveSubMem(mem);
+        }
+      }
       if (!list || !list.length) setSubMsg('未找到匹配字幕');
     } catch (e) {
       setSubMsg((e as Error).message);
@@ -221,6 +471,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const poke = useCallback(() => {
     setUi(true);
     if (idleTimer.current) clearTimeout(idleTimer.current);
+    // 字幕/弹幕设置面板打开时：不再启动闲置隐藏计时 → 悬停在面板范围内保持显示
+    if (panelOpenRef.current) return;
     idleTimer.current = setTimeout(() => {
       if (!ref.current?.paused) setUi(false);
     }, 2800);
@@ -232,6 +484,15 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       if (idleTimer.current) clearTimeout(idleTimer.current);
     };
   }, [poke]);
+
+  // 字幕/弹幕设置面板打开：同步 ref + 清闲置计时并锁定显示（关闭面板恢复自动隐藏）
+  useEffect(() => {
+    panelOpenRef.current = !!(subPanel || dmPanel);
+    if (subPanel || dmPanel) {
+      if (idleTimer.current) clearTimeout(idleTimer.current);
+      setUi(true);
+    }
+  }, [subPanel, dmPanel]);
 
   // 键盘 ↑/↓ 调节音量时，短暂展开音量面板（1s 后自动淡出）
   const flashVol = useCallback(() => {
@@ -277,6 +538,9 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     setCur(0);
     setDur(0);
     setIsLive(false);
+    setNetSpeed(null);
+    setRelaySpeed(null);
+    setBuffering(false);
     v.src = '';
     hlsRef.current?.destroy();
     hlsRef.current = null;
@@ -292,12 +556,28 @@ export default function VideoPlayer(props: VideoPlayerProps) {
 
     const low = url.toLowerCase().split('?')[0];
     let restored = false;
+    // ---- 实时网速：原生直连（无 hls/mpegts 统计）时用 Resource Timing 采样，统一以 KB/s 上报 ----
+    let speedTimer: ReturnType<typeof setInterval> | null = null;
+    let prevBytes = -1;
+    let prevTime = 0;
+    const reportKBps = (kbs: number) => {
+      if (Number.isFinite(kbs) && kbs > 0) setNetSpeed(kbs);
+    };
   const onTime = () => {
     setCur(v.currentTime);
-    // 挂载后恢复到上次位置（一次性；跳过开头 3s 与结尾，避免误跳/看完后重播）
-    // ★ 先读后写：若先 setPlayTime 再 get，会把旧进度覆盖为当前 0.x，续播失效
-    const saved = uiMem.playTime.get(url) || 0;
-    if (!restored && saved > 3 && v.duration && saved < v.duration - 5) {
+    // 挂载后恢复上次位置（一次性；跳过开头 3s 与结尾，避免误跳/看完后重播）
+    tryRestore();
+    // 记录播放进度（供返回后继续播放 + 防抖持久化）
+    setPlayTime(url, v.currentTime);
+  };
+  // ★ 恢复播放进度（首次成功 seek 后置位 restored，保证只跳一次）：
+  //   优先级 = 外层显式 startTime（历史续播）> uiMem.playTime（同 url 会话内续播）。
+  //   同时在 onTime 与 onDuration（loadedmetadata）调用 —— 尽早跳转，避免只等 timeupdate 错过开头。
+  const tryRestore = () => {
+    if (restored) return;
+    const ext = typeof props.startTime === 'number' && props.startTime > 3 ? props.startTime : 0;
+    const saved = ext > 0 ? ext : uiMem.playTime.get(url) || 0;
+    if (saved > 3 && v.duration && Number.isFinite(v.duration) && saved < v.duration - 5) {
       restored = true;
       try {
         v.currentTime = saved;
@@ -305,16 +585,16 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         /* ignore */
       }
     }
-    // 记录播放进度（供返回后继续播放 + 防抖持久化）
-    setPlayTime(url, v.currentTime);
   };
   const onCanPlay = () => setLoading(false);
   const onDuration = () => {
     setDur(Number.isFinite(v.duration) ? v.duration : 0);
     if (v.duration === Infinity) setIsLive(true);
+    tryRestore(); // duration 就绪即尝试恢复（hls/mpegts 的 duration 出现晚于首个 timeupdate）
   };
   const onPlay = () => {
     setPaused(false);
+    setBuffering(false);
     clearAuto();
     poke();
   };
@@ -322,6 +602,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     setPaused(true);
     setUi(true);
   };
+  const onWaiting = () => setBuffering(true);
+  const onPlaying = () => setBuffering(false);
   const onErr = () => setErr('播放出错：视频加载失败或源不可用');
   const onEnded = () => {
     // ★ 自动下一集：有下一集 → 5 秒倒计时可取消；否则（最后一集）只提示已播完
@@ -333,6 +615,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   v.addEventListener('durationchange', onDuration);
   v.addEventListener('play', onPlay);
   v.addEventListener('pause', onPause);
+  v.addEventListener('waiting', onWaiting);
+  v.addEventListener('playing', onPlaying);
   v.addEventListener('error', onErr);
   v.addEventListener('ended', onEnded);
 
@@ -350,6 +634,11 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         hls.loadSource(url);
         hls.attachMedia(v);
         hls.on(Hls.Events.MANIFEST_PARSED, () => start());
+        // ★ 实时网速：分片加载完成后统计（loaded 字节 / loading 耗时）
+        hls.on(Hls.Events.FRAG_LOADED, (_e, d) => {
+          const s = (d as { stats?: { loading: number; loaded: number } }).stats;
+          if (s && s.loading > 0) reportKBps(s.loaded / 1024 / (s.loading / 1000));
+        });
         hls.on(Hls.Events.ERROR, (_e, d) => {
           if (d.fatal) setErr('HLS 播放失败：' + (d.details || '未知错误'));
         });
@@ -362,6 +651,10 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         (v as unknown as { __flv?: mpegts.Player }).__flv = p;
         p.attachMediaElement(v);
         p.load();
+        // ★ 实时网速（KB/s）
+        p.on(mpegts.Events.STATISTICS_INFO, (info: { currentSpeed?: number }) => {
+          if (info && info.currentSpeed != null && info.currentSpeed > 0) reportKBps(info.currentSpeed);
+        });
         try {
           p.play();
         } catch {
@@ -372,16 +665,51 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         setErr('当前环境不支持 FLV 播放');
       }
     } else {
+      // ★ 原生直连（含经 /play 中继的网盘直链）：无 hls/mpegts 统计，
+      //   用 Resource Timing 定时采样算实时网速。
+      //   注意：media 资源的 timing 可能因缓存命中 transferSize=0，故回退 encodedBodySize。
+      const targetPrefix = url.split('?')[0];
+      speedTimer = setInterval(() => {
+        let bytes = 0;
+        try {
+          for (const e of performance.getEntriesByType('resource')) {
+            const r = e as PerformanceResourceTiming;
+            if (!r || !r.name) continue;
+            // 前缀匹配：放宽 query 抖动（t0 兜底：某些平台媒体资源名不精确等于 url）
+            if (r.name !== url && !r.name.startsWith(targetPrefix)) continue;
+            const t = Number.isFinite(r.transferSize) && r.transferSize > 0
+              ? r.transferSize
+              : (Number.isFinite(r.encodedBodySize) && r.encodedBodySize > 0 ? r.encodedBodySize : 0);
+            bytes += t;
+          }
+        } catch {
+          /* ignore */
+        }
+        if (bytes > 0 && bytes !== prevBytes) {
+          const now = performance.now();
+          if (prevBytes >= 0 && prevTime > 0) {
+            const dtSec = (now - prevTime) / 1000;
+            const kbs = (bytes - prevBytes) / 1024 / (dtSec > 0 ? dtSec : 1);
+            // 忽略瞬时抖动（负值/异常大值）与 0 值，保证稳定
+            if (kbs > 0 && kbs < 1024 * 1024) reportKBps(kbs);
+          }
+          prevBytes = bytes;
+          prevTime = now;
+        }
+      }, 600);
       v.src = url;
       start();
     }
 
     return () => {
+      if (speedTimer) clearInterval(speedTimer);
       v.removeEventListener('timeupdate', onTime);
       v.removeEventListener('canplay', onCanPlay);
       v.removeEventListener('durationchange', onDuration);
       v.removeEventListener('play', onPlay);
       v.removeEventListener('pause', onPause);
+      v.removeEventListener('waiting', onWaiting);
+      v.removeEventListener('playing', onPlaying);
       v.removeEventListener('error', onErr);
       v.removeEventListener('ended', onEnded);
       clearAuto();
@@ -474,6 +802,40 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ---- 老板键：进入 → 暂停 + 静音（窗口被主进程隐藏）；退出 → 恢复原音量与原播放状态 ----
+  const bossSnapRef = useRef<{ wasPlaying: boolean; vol: number } | null>(null);
+  useEffect(() => {
+    const offEnter = client.bossOnEnter(() => {
+      const v = ref.current;
+      if (!v) return;
+      bossSnapRef.current = { wasPlaying: !v.paused, vol: v.volume };
+      try {
+        v.pause();
+        v.volume = 0;
+      } catch {
+        /* ignore */
+      }
+      setPaused(true);
+      setVol(0);
+    });
+    const offExit = client.bossOnExit(() => {
+      const v = ref.current;
+      const snap = bossSnapRef.current;
+      bossSnapRef.current = null;
+      if (!v || !snap) return;
+      v.volume = Math.max(0, Math.min(1, snap.vol));
+      setVol(v.volume);
+      if (snap.wasPlaying) {
+        v.play().catch(() => {});
+        setPaused(false);
+      }
+    });
+    return () => {
+      offEnter();
+      offExit();
+    };
+  }, []);
+
   const seek = (clientX: number) => {
     const v = ref.current;
     const wrap = wrapRef.current;
@@ -483,6 +845,13 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     v.currentTime = ratio * dur;
     setCur(v.currentTime);
   };
+
+  // 进入小窗口模式时退出元素全屏（mini 下全屏功能消失）
+  useEffect(() => {
+    if (mini && document.fullscreenElement) {
+      void document.exitFullscreen().then(() => setFull(false)).catch(() => undefined);
+    }
+  }, [mini]);
 
   const toggleFull = () => {
     const wrap = wrapRef.current;
@@ -517,22 +886,40 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   return (
     <div
       ref={wrapRef}
-      className={`vplayer${ui ? ' vui' : ''}${full ? ' vfull' : ''}`}
+      className={`vplayer${ui ? ' vui' : ''}${full ? ' vfull' : ''}${mini ? ' vp-mini' : ''}`}
       style={{ '--sub-font': `${subFont}px`, '--sub-bottom': `${subBottom}px` } as React.CSSProperties}
       onMouseMove={poke}
       onMouseLeave={() => setUi(false)}
-      onDoubleClick={toggleFull}
+      onDoubleClick={mini ? undefined : toggleFull}
     >
       <video ref={ref} style={{ width: '100%', height: '100%' }} onClick={togglePlay} playsInline />
-      {/* 加载 */}
-      {loading && !err && (
+      {/* 弹幕叠加层（canvas，全屏区域，不拦截鼠标） */}
+      <DanmakuOverlay
+        videoRef={ref}
+        items={dmItems}
+        enabled={dmEnabled}
+        region={dmCfg.region}
+        fontSize={dmCfg.fontSize}
+        opacity={dmCfg.opacity}
+        density={dmCfg.density}
+        speed={dmCfg.speed}
+        offset={dmCfg.offset}
+      />
+      {/* 加载 / 缓冲 */}
+      {(loading || buffering) && !err && (
         <div className="vp-loading">
           <span className="vp-spin" />
-          <span>缓冲中…</span>
+          <span className="vp-load-text">
+            缓存中
+            {(() => {
+              const kbs = relaySpeed && relaySpeed > 0 ? relaySpeed : netSpeed && netSpeed > 0 ? netSpeed : 0;
+              return kbs > 0 ? <span className="vp-load-speed"> {fmtNet(kbs)}</span> : null;
+            })()}
+          </span>
         </div>
       )}
-      {/* 中央大按钮 */}
-      {!loading && !err && (
+      {/* 中央大按钮（小窗口只保留控制条的 上/下集 + 播放暂停） */}
+      {!loading && !err && !mini && (
         <button className="vp-big" onClick={togglePlay} title={paused ? '播放' : '暂停'}>
           {paused ? (
             <svg width="44" height="44" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z" fill="currentColor" /></svg>
@@ -540,6 +927,19 @@ export default function VideoPlayer(props: VideoPlayerProps) {
             <svg width="40" height="40" viewBox="0 0 24 24"><path d="M7 5h3.6v14H7zM13.4 5H17v14h-3.6z" fill="currentColor" /></svg>
           )}
         </button>
+      )}
+      {/* ★ 网盘资源未绑定 cookie → 提示去配置页绑定（优先于加载/错误，确保用户可操作） */}
+      {needBind && (
+        <div className="vp-drive-bind">
+          <div>
+            此片源来自<b>「{driveProviderLabel(needBind)}」网盘</b>的专用链接，
+            需要先在<b>配置 → 账号与凭据</b>绑定对应网盘凭据（Cookie）才能取流播放。
+          </div>
+          <div className="row" style={{ gap: 10, justifyContent: 'center' }}>
+            <button className="primary" onClick={() => void client.gotoCfgAccount()}>去绑定 Cookie</button>
+            <button onClick={() => { bindDismissedRef.current = true; setNeedBind(null); }}>知道了</button>
+          </div>
+        </div>
       )}
       {/* 错误 */}
       {err && (
@@ -561,8 +961,30 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           )}
         </div>
       )}
-      {/* 控制条 */}
-      <div className="vp-controls" onClick={(e) => e.stopPropagation()}>
+      {/* 控制条（小窗口：只保留 上/下集 + 播放暂停） */}
+      <div className={`vp-controls${mini ? ' vp-mini' : ''}`} onClick={(e) => e.stopPropagation()}>
+        {mini ? (
+          <div className="vp-bar">
+            {(canPrev !== undefined || canNext !== undefined) && (
+              <button className="vp-ctl vp-nav" onClick={handlePrev} disabled={!canPrev} title={canPrev ? '上一集' : '已是第一集'}>
+                <svg width="16" height="16" viewBox="0 0 24 24"><path d="M6 5v14M19 5.5v13l-11-6.5z" fill="currentColor" /></svg>
+              </button>
+            )}
+            <button className="vp-ctl" onClick={togglePlay} title={paused ? '播放' : '暂停'}>
+              {paused ? (
+                <svg width="18" height="18" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z" fill="currentColor" /></svg>
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 24 24"><path d="M7 5h3.6v14H7zM13.4 5H17v14h-3.6z" fill="currentColor" /></svg>
+              )}
+            </button>
+            {(canPrev !== undefined || canNext !== undefined) && (
+              <button className="vp-ctl vp-nav" onClick={handleNext} disabled={!canNext} title={canNext ? '下一集' : '已是最后一集'}>
+                <svg width="16" height="16" viewBox="0 0 24 24"><path d="M18 5v14M5 5.5v13l11-6.5z" fill="currentColor" /></svg>
+              </button>
+            )}
+          </div>
+        ) : (
+        <>
         {!isLive && (
           <div
             className="vp-progress"
@@ -717,6 +1139,122 @@ export default function VideoPlayer(props: VideoPlayerProps) {
               )}
             </div>
           )}
+          <button
+            className="vp-ctl"
+            title={dmEnabled ? '弹幕开' : '弹幕'}
+            onClick={() => { setDmPanel((p) => !p); if (!dmPanel) poke(); }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24">
+              <path d="M3.5 8a2 2 0 012-2h13a2 2 0 012 2v8a2 2 0 01-2 2h-13a2 2 0 01-2-2z" fill="none" stroke="currentColor" strokeWidth="1.6" />
+              <path d="M8 11h4M8 14.5h7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            {dmEnabled && <span className="vp-subdot" />}
+          </button>
+          {dmPanel && (
+            <div className="vp-subpanel" onClick={(e) => e.stopPropagation()}>
+              <div className="vsp-row">
+                <button className={`tag ${dmEnabled ? 'active' : ''}`} onClick={toggleDanmaku}>弹幕：{dmEnabled ? '开' : '关'}</button>
+                <span className="muted" style={{ marginLeft: 'auto', fontSize: 11 }}>{dmMsg || (dmActiveEp != null ? '已加载' : '')}</span>
+              </div>
+              <div className="vsp-row">
+                <span className="muted vsp-label">区域</span>
+                {(['full', 'half', 'quarter'] as const).map((r) => (
+                  <button
+                    key={r}
+                    className={`vsp-btn${dmCfg.region === r ? ' active' : ''}`}
+                    onClick={() => setDmCfg((c) => ({ ...c, region: r }))}
+                  >
+                    {r === 'full' ? '全屏' : r === 'half' ? '半屏' : '1/4 屏'}
+                  </button>
+                ))}
+              </div>
+              <div className="vsp-row">
+                <span className="muted vsp-label">字号</span>
+                <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, fontSize: Math.max(16, c.fontSize - 2) }))}>A−</button>
+                <input
+                  type="range" min={16} max={40} value={dmCfg.fontSize}
+                  onChange={(e) => setDmCfg((c) => ({ ...c, fontSize: Number(e.target.value) }))}
+                />
+                <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, fontSize: Math.min(40, c.fontSize + 2) }))}>A＋</button>
+              </div>
+              <div className="vsp-row">
+                <span className="muted vsp-label">透明度</span>
+                <input
+                  type="range" min={20} max={100} value={Math.round(dmCfg.opacity * 100)}
+                  onChange={(e) => setDmCfg((c) => ({ ...c, opacity: Number(e.target.value) / 100 }))}
+                />
+                <span className="muted" style={{ fontSize: 11 }}>{Math.round(dmCfg.opacity * 100)}%</span>
+              </div>
+              <div className="vsp-row">
+                <span className="muted vsp-label">密度</span>
+                <input
+                  type="range" min={25} max={100} value={Math.round(dmCfg.density * 100)}
+                  onChange={(e) => setDmCfg((c) => ({ ...c, density: Number(e.target.value) / 100 }))}
+                />
+                <span className="muted" style={{ fontSize: 11 }}>{dmCfg.density.toFixed(2)}</span>
+              </div>
+              <div className="vsp-row">
+                <span className="muted vsp-label">速度</span>
+                <input
+                  type="range" min={50} max={300} value={dmCfg.speed}
+                  onChange={(e) => setDmCfg((c) => ({ ...c, speed: Number(e.target.value) }))}
+                />
+                <span className="muted" style={{ fontSize: 11 }}>{dmCfg.speed}</span>
+              </div>
+              <div className="vsp-row">
+                <span className="muted vsp-label">时间</span>
+                <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, offset: c.offset - 0.5 }))}>−0.5s</button>
+                <span className="muted" style={{ fontSize: 11 }}>{dmCfg.offset >= 0 ? '+' : ''}{dmCfg.offset}s</span>
+                <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, offset: c.offset + 0.5 }))}>+0.5s</button>
+                <button className="vsp-btn" title="重置" onClick={() => setDmCfg((c) => ({ ...c, offset: 0 }))}>重置</button>
+              </div>
+              <div className="vsp-row">
+                <span className="muted vsp-label">粗调</span>
+                <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, offset: c.offset - 30 }))} title="整体提前 30 秒（弹幕比视频晚则用）">−30s</button>
+                <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, offset: c.offset - 5 }))}>−5s</button>
+                <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, offset: c.offset + 5 }))}>+5s</button>
+                <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, offset: c.offset + 30 }))} title="整体延后 30 秒（弹幕比视频早则用）">+30s</button>
+              </div>
+              <div className="vsp-row">
+                <input
+                  type="text"
+                  value={dmQuery}
+                  placeholder="剧名（自动清洗；可改输常见名）…"
+                  style={{ flex: 1, minWidth: 120 }}
+                  onChange={(e) => { dmQueryUserRef.current = true; setDmQuery(e.target.value); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void matchDanmaku(dmQuery); }}
+                />
+              </div>
+              <div className="vsp-row" style={{ marginBottom: 6 }}>
+                <button
+                  className="vsp-btn primary"
+                  disabled={dmSearching || !dmCfg.appSecretSet || !dmQuery.trim()}
+                  onClick={() => void matchDanmaku(dmQuery)}
+                >
+                  {dmSearching ? '匹配中…' : '匹配弹幕'}
+                </button>
+                {!dmQuery.trim() && (
+                  <span className="vsp-hint" style={{ marginTop: 0 }}>请输入剧名后再匹配弹幕库；仍可调整上方样式与开关</span>
+                )}
+                {!dmCfg.appSecretSet && dmQuery.trim() && (
+                  <span className="vsp-hint" style={{ marginTop: 0 }}>内置弹幕服务未启用（凭据内置加密）</span>
+                )}
+              </div>
+              <div className="vsp-row" style={{ marginBottom: 4 }}>
+                <span className="muted" style={{ fontSize: 10 }}>弹幕来自 弹弹play 开放弹幕网络</span>
+              </div>
+              {dmCands.length > 0 && (
+                <div className="vsp-list">
+                  {dmCands.map((c, i) => (
+                    <button key={i} className="vsp-item" onClick={() => void applyDanmaku(c)}>
+                      <span className="vsp-item-name">{c.title || '未知番剧'} {c.episodeTitle || ''}</span>
+                      <span className="muted">{c.episodeId === dmActiveEp ? '当前' : '点击加载'}{dmCands.length > 1 ? ' · 共 ' + dmCands.length + ' 集' : ''}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <select
             className="vp-rate"
             value={rate}
@@ -740,6 +1278,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
             )}
           </button>
         </div>
+        </>
+        )}
       </div>
     </div>
   );

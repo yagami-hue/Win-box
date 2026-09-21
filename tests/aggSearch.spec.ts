@@ -1,33 +1,27 @@
-// tests/aggSearch.spec.ts — 聚合搜索汇总：跨源去重/来源标注/错误隔离/统计
+// tests/aggSearch.spec.ts — 聚合搜索汇总：不去重 / 来源标注 / 错误隔离 / 统计
 import { describe, it, expect } from 'vitest';
-import { mergeSearchResults, normalizeName, type AggSearchInput } from '../src/engine/vod/aggSearch';
+import { mergeSearchResults, type AggSearchInput } from '../src/engine/vod/aggSearch';
 import type { VodItem } from '../src/shared/types';
 
 function v(id: string, name: string, src: string): VodItem {
   return { id, name, pic: '', remarks: '', year: '', area: '', type: '', sourceKey: src };
 }
 
-describe('normalizeName — 去重键归一', () => {
-  it('小写并剔除空白与常见标点', () => {
-    expect(normalizeName(' 流浪地球2 (2023) ')).toBe('流浪地球2');
-    expect(normalizeName('A · B')).toBe(normalizeName('a-b'));
-  });
-});
-
-describe('mergeSearchResults — 汇总去重', () => {
+describe('mergeSearchResults — 汇总不去重', () => {
   const src = (key: string, name: string, items: VodItem[]): AggSearchInput => ({ key, name, status: items.length ? 'ok' : 'empty', items });
 
-  it('跨源同名去重，保留首见源并计数', () => {
+  it('跨源同名不去重：各源命中全部保留并标注来源', () => {
     const inputs = [
       src('a', '源A', [v('1', '流浪地球', 'a')]),
       src('b', '源B', [v('2', '流浪地球', 'b'), v('3', '独行月球', 'b')]),
     ];
     const r = mergeSearchResults(inputs);
-    expect(r.items.length).toBe(2);
-    const liu = r.items.find((i) => i.id === '1')!;
-    expect(liu.sourceKey).toBe('a');
-    expect(liu.sourceName).toBe('源A');
-    expect(liu.sameFromOtherSources).toBe(1);
+    expect(r.items.length).toBe(3); // 不去重：同名两条都保留
+    const fromA = r.items.find((i) => i.sourceKey === 'a')!;
+    expect(fromA.sourceName).toBe('源A');
+    expect(fromA.sameFromOtherSources).toBe(0);
+    const fromB = r.items.find((i) => i.id === '2')!;
+    expect(fromB.sourceName).toBe('源B');
     expect(r.totalRaw).toBe(3);
     expect(r.hitSources).toBe(2);
   });

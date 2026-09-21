@@ -5,11 +5,7 @@
 import { Spider, type SpiderInit } from './Spider';
 import { normalizeJarUrl, type JarSpiderBridge } from './JarSpiderBridge';
 import { SourceProblemError } from './errors';
-import { mergeDriveTokens, enrichExt } from './driveExt';
-
-// 网盘绑定 token 注入蜘蛛 ext 的实现已抽到 driveExt.ts（jar/js 蜘蛛共用），
-// 这里 re-export 保持既有导入路径（tests/jarSpiderMerge.spec.ts 等）兼容。
-export { mergeDriveTokens, enrichExt };
+import { enrichExt } from './driveExt';
 
 export class JarSpider extends Spider {
   private bridge: JarSpiderBridge;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeSubtitleQuery, extractEp, buildSearchQuery, normalizeTitle, titleVariants } from '../src/engine/subtitle/normalizeQuery';
+import { normalizeSubtitleQuery, extractEp, buildSearchQuery, normalizeTitle, titleVariants, animeTitleForQuery } from '../src/engine/subtitle/normalizeQuery';
 
 describe('normalizeSubtitleQuery', () => {
   it('抽取 剧名+集号（中文"第N集"）', () => {
@@ -51,5 +51,22 @@ describe('titleVariants', () => {
   });
   it('空输入返回空数组', () => {
     expect(titleVariants('')).toEqual([]);
+  });
+});
+
+describe('animeTitleForQuery（剧名副名统一兜底，弹幕/字幕共用）', () => {
+  it('优先已知副名（详情页 detail.name）', () => {
+    expect(animeTitleForQuery('葬送的芙莉莲', '葬送的芙莉莲')).toBe('葬送的芙莉莲');
+    expect(animeTitleForQuery('葬送的芙莉莲 - 第03集', '葬送的芙莉莲')).toBe('葬送的芙莉莲');
+  });
+
+  it('无副名时从资源名（剧名 - 集名）截断第一段', () => {
+    expect(animeTitleForQuery('葬送的芙莉莲 - 第03集')).toBe('葬送的芙莉莲');
+    expect(animeTitleForQuery('葬送的芙莉莲-001', '')).toBe('葬送的芙莉莲');
+    expect(animeTitleForQuery('葬送的芙莉莲 第03集', '')).toBe('葬送的芙莉莲 第03集');
+  });
+
+  it('空输入返回空串', () => {
+    expect(animeTitleForQuery('', '')).toBe('');
   });
 });

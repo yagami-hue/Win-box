@@ -2,7 +2,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { IpcResult } from '../shared/ipc-result';
 import { IPC } from '../shared/ipc-channels';
-import type { SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile } from '../shared/types';
+import type { SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile, MetaHit } from '../shared/types';
 
 const invoke = <T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> =>
   ipcRenderer.invoke(channel, ...args);
@@ -30,6 +30,14 @@ const api = {
     vodDebug: (key: string) => invoke(IPC.VOD_DEBUG, key),
     audit: () => invoke(IPC.VOD_AUDIT),
     cacheClear: () => invoke<{ freedBytes: number; cleared: string[]; failed: string[] }>(IPC.CACHE_CLEAR),
+    // ★ 播放网盘资源未绑定 cookie → 请求主窗口跳到「配置 → 账号与凭据」tab
+    gotoAccount: () => invoke<void>(IPC.CFG_GOTO_ACCOUNT),
+    // 主窗口接收跨窗口跳转指令（播放器窗口发起时主进程转发到主窗口）
+    onNavCfgAccount: (cb: () => void) => {
+      const l = () => cb();
+      ipcRenderer.on(IPC.NAV_CFG_ACCOUNT, l);
+      return () => ipcRenderer.removeListener(IPC.NAV_CFG_ACCOUNT, l);
+    },
   },
   vod: {
     home: (key: string) => invoke(IPC.VOD_HOME, key),
@@ -49,6 +57,17 @@ const api = {
     search: (name: string) => invoke(IPC.SUBTITLE_SEARCH, name),
     fetch: (cand: unknown) => invoke(IPC.SUBTITLE_FETCH, cand),
   },
+  danmaku: {
+    get: () => invoke(IPC.DANMAKU_GET),
+    set: (patch: unknown) => invoke(IPC.DANMAKU_SET, patch),
+    search: (name: string) => invoke(IPC.DANMAKU_SEARCH, name),
+    episodes: (bangumiId: number, animeTitle?: string) => invoke(IPC.DANMAKU_EPISODES, bangumiId, animeTitle),
+    fetch: (episodeId: number) => invoke(IPC.DANMAKU_FETCH, episodeId),
+  },
+  meta: {
+    // TMDB 元数据补全（缺封面/缺简介兜底；凭据内置密文，用户无需填 key）
+    search: (name: string, year?: string) => invoke<MetaHit | null>(IPC.META_SEARCH, name, year),
+  },
   drives: {
     get: () => invoke(IPC.DRIVE_GET),
     set: (a: { provider: string; token: string }) => invoke(IPC.DRIVE_SET, a),
@@ -63,11 +82,21 @@ const api = {
     close: () => invoke(IPC.WIN_CLOSE),
     isMaximized: () => invoke<boolean>(IPC.WIN_IS_MAXIMIZED),
   },
+  net: {
+    // 监听主进程推送的实时网速（KB/s，源于 /play 中继真实转发字节）
+    onSpeed: (cb: (kbs: number) => void) => {
+      const l = (_e: unknown, kbs: number) => cb(kbs);
+      ipcRenderer.on('net:speed', l);
+      return () => ipcRenderer.removeListener('net:speed', l);
+    },
+  },
   player: {
     open: (init: unknown) => invoke(IPC.PLAYER_OPEN, init),
     switchEp: (epIndex: number) => invoke(IPC.PLAYER_SWITCH_EP, epIndex),
     isOpen: () => invoke<{ open: boolean }>(IPC.PLAYER_IS_OPEN),
     close: () => invoke('player:close'),
+    setMini: (isMini: boolean) => invoke<{ mini: boolean }>(IPC.PLAYER_SET_MINI, isMini),
+    isMini: () => invoke<{ mini: boolean }>(IPC.PLAYER_IS_MINI),
     // 监听主进程推送：初始化数据 / 换集
     onInit: (cb: (init: unknown) => void) => {
       const l = (_e: unknown, init: unknown) => cb(init);
@@ -79,10 +108,35 @@ const api = {
       ipcRenderer.on('player:switchEp', l);
       return () => ipcRenderer.removeListener('player:switchEp', l);
     },
+    // 小窗口模式切换（窗口尺寸由主进程变更，这里只同步状态）
+    onMini: (cb: (mini: boolean) => void) => {
+      const l = (_e: unknown, mini: boolean) => cb(!!mini);
+      ipcRenderer.on('player:mini', l);
+      return () => ipcRenderer.removeListener('player:mini', l);
+    },
+  },
+  boss: {
+    get: () => invoke(IPC.BOSS_GET),
+    set: (patch: unknown) => invoke(IPC.BOSS_SET, patch),
+    // 老板键进入/退出：全应用窗口被隐藏/恢复（渲染层据此暂停静音/恢复播放）
+    onEnter: (cb: () => void) => {
+      const l = () => cb();
+      ipcRenderer.on('boss:enter', l);
+      return () => ipcRenderer.removeListener('boss:enter', l);
+    },
+    onExit: (cb: () => void) => {
+      const l = () => cb();
+      ipcRenderer.on('boss:exit', l);
+      return () => ipcRenderer.removeListener('boss:exit', l);
+    },
   },
   merge: {
     export: (ids: string[]) => invoke(IPC.CFG_MERGE_EXPORT, ids),
     save: (a: { content: string; defaultName?: string }) => invoke<{ saved: boolean; path: string }>(IPC.CFG_EXPORT_SAVE, a),
+  },
+  quark: {
+    // 夸克落盘文件清理（渲染层播放页/播放器页卸载、窗口关闭时触发）
+    cleanup: () => invoke<void>(IPC.QUARK_CLEANUP),
   },
 };
 

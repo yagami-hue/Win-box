@@ -27,12 +27,15 @@ interface AssrtSub {
 
 interface AssrtSearchJson {
   status: number;
+  /** ★ 实测为小写字段（如 "invalid token"），不是 error.msg */
+  errmsg?: string;
   sub?: { action?: string; keyword?: string; result?: string; subs?: AssrtSub[] };
   error?: { code?: number; msg?: string };
 }
 
 interface AssrtDetailJson {
   status: number;
+  errmsg?: string;
   sub?: { action?: string; result?: string; subs?: Array<AssrtSub & { url?: string; filename?: string; filelist?: Array<{ url: string; f?: string }> }> };
   error?: { code?: number; msg?: string };
 }
@@ -60,7 +63,10 @@ export async function assrtSearch(token: string, keyword: string, isFile = false
   } catch {
     return [];
   }
-  if (r.statusCode !== 200 || json.status !== 0 || !json.sub?.subs) return [];
+  if (r.statusCode === 400) throw new Error('关键词过短（assrt 要求搜索词 ≥3 个字符）');
+  if (r.statusCode !== 200) throw new Error('assrt 服务错误 HTTP ' + r.statusCode);
+  if (json.status !== 0) throw new Error(json.errmsg || json.error?.msg || ('错误码 ' + json.status));
+  if (!json.sub?.subs) return [];
   return json.sub.subs
     .filter((x) => x && x.id != null)
     .map((x) => ({
@@ -133,7 +139,10 @@ export async function assrtDetailUrl(token: string, id: string): Promise<string>
   } catch {
     return '';
   }
-  if (r.statusCode !== 200 || json.status !== 0 || !json.sub?.subs?.length) return '';
+  if (r.statusCode === 400) throw new Error('关键词过短（assrt 要求搜索词 ≥3 个字符）');
+  if (r.statusCode !== 200) throw new Error('assrt 服务错误 HTTP ' + r.statusCode);
+  if (json.status !== 0) throw new Error(json.errmsg || json.error?.msg || ('错误码 ' + json.status));
+  if (!json.sub?.subs?.length) return '';
   const sub = json.sub.subs[0];
   // 优先压缩包内的 .srt/.ass 直链（onthefly 路径，免解压）；否则用整包 url
   if (Array.isArray(sub.filelist)) {

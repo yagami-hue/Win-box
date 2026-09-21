@@ -15,17 +15,28 @@ import { decodeUrlSafe } from '../../engine/util/base64';
 import type { Logger } from '../../shared/types';
 import { LOCAL_PROXY_PORT } from '../../shared/constants';
 import { userDataDir, cacheDir } from '../util/paths';
+import { createDohAgent } from '../net/DnsResolver';
 
 const agent = new Agent({ connect: { timeout: 30000 } });
+/** 出图中继专用（TMDB 图床经 DoH 可达；渲染层直连可能被 DNS 污染 → 图裂） */
+const imgAgent = createDohAgent();
 
 // ★ 并发回源聚合参数：夸克单连接被限速，多连接并发可叠加带宽。
 //   每片 512KB、一次 8 个并发回源、纯利用 Range。太小(<1MB)的请求不值得并发。
 const AGGREGATE_CHUNK = 512 * 1024;
 const AGGREGATE_CONCURRENCY = 8;
 const AGGREGATE_MIN_LEN = 1 * 1024 * 1024;
+// ★★ 2026-09-19 回归 release65 定论：**加速节点（dl-c-zb 等）禁聚合、单连接透传**。
+//   release75 曾在加速节点加「Range 预检 + 3 并发聚合」：预检会额外消费一次 auth_key 直链请求
+//   （夸克 download_url 的 token 绑定会话，多打一次 Range 会被 CDN 拒绝后续请求 → 直接无法播放），
+//   且加速节点不理会并发子 Range（release65 已实测坏流）→ 播放反向劣化"出现快反而播不出"。
+//   加速节点本身单连接吞吐 ≈1.4MB/s，普通直连已可播；不再预检、不再聚合。
+//   普通节点（dl-pc-zb 及非夸克源）保留 8 并发聚合（release65 验证：标准 206 + Content-Range，可靠提速）。
 
 export class LocalProxyServer {
   private server?: ReturnType<typeof createServer>;
+  /** 实时网速回调（KB/s）：主进程注入后即可把真实转发字节推给渲染层显示 */
+  onSpeed?: (kbs: number) => void;
 
   constructor(private logger: Logger, private driveTokens?: () => Record<string, string>) {}
 
@@ -53,6 +64,9 @@ export class LocalProxyServer {
       if (u.pathname === '/play') {
         return this.playProxy(u, req, res);
       }
+      if (u.pathname === '/img') {
+        return this.imgProxy(u, res);
+      }
       if (u.pathname.startsWith('/file/')) {
         return this.fileProxy(u, res);
       }
@@ -63,6 +77,48 @@ export class LocalProxyServer {
       res.writeHead(502, { 'Content-Type': 'text/plain' });
       res.end('proxy error');
     }
+  }
+
+  /**
+   * /img?u=<encoded image URL> —— TMDB 封面出图中继。
+   * ★ 渲染层（Chromium）直连 image.tmdb.org 在本机常被 DNS 污染 → 图裂；
+   *   本地代理经 DoH 主进程拉取后透传字节，保证补全封面真实可显示。
+   * 安全：仅放行 image.tmdb.org（白名单），避免成为任意 URL 开放代理。
+   */
+  private imgProxy(u: URL, res: ServerResponse): void {
+    const target = u.searchParams.get('u') || '';
+    if (!/^https:\/\/image\.tmdb\.org\//i.test(target)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('bad request');
+      return;
+    }
+    void (async () => {
+      try {
+        const r = await undiciRequest(target, {
+          method: 'GET',
+          headers: { accept: 'image/*', 'User-Agent': 'Win-Box/0.73' },
+          headersTimeout: 15000,
+          bodyTimeout: 30000,
+          dispatcher: imgAgent,
+        });
+        if (r.statusCode !== 200) {
+          await r.body.dump().catch(() => undefined);
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('not found');
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': String(r.headers['content-type'] || 'image/jpeg'),
+          'Cache-Control': 'public, max-age=86400',
+        });
+        for await (const chunk of r.body) res.write(chunk as Buffer);
+        res.end();
+      } catch (e) {
+        this.logger.w(`proxy /img 失败: ${e instanceof Error ? e.message : String(e)}`);
+        res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('proxy error');
+      }
+    })();
   }
 
   /**
@@ -160,13 +216,50 @@ export class LocalProxyServer {
       res.end(body);
       return;
     }
+    // ★ 真实网速：统计本 /play 实际写回播放器的字节（透传 + 聚合两路都涵盖），
+    //   经 onSpeed 推送渲染层 —— 比渲染层 Resource Timing 可靠（媒体 timing 常拿不到字节）。
+    const out = { bytes: 0, prev: 0, prevT: 0 };
+    let speedTimer: ReturnType<typeof setInterval> | null = null;
+    const origWrite = res.write.bind(res);
+    // 包装 write 累计字节（透传/聚合都经此写回播放器；chunk 为 string|Buffer）
+    type WriteFn = typeof res.write;
+    (res as unknown as { write: WriteFn }).write = ((chunk: unknown, ...rest: unknown[]) => {
+      try { if (chunk) out.bytes += Buffer.byteLength(chunk as Buffer | string); } catch { /* ignore */ }
+      return origWrite(chunk as never, ...(rest as never[]));
+    }) as WriteFn;
+    const stopSpeed = () => { if (speedTimer) { clearInterval(speedTimer); speedTimer = null; } };
+    res.once('close', stopSpeed);
+    res.once('finish', stopSpeed);
+    if (this.onSpeed) {
+      speedTimer = setInterval(() => {
+        const now = Date.now();
+        const dt = (now - out.prevT) / 1000;
+        if (out.prevT > 0 && dt > 0) {
+          const kbs = (out.bytes - out.prev) / 1024 / dt;
+          if (kbs > 0) this.onSpeed?.(kbs);
+        }
+        out.prev = out.bytes;
+        out.prevT = now;
+      }, 600);
+    }
     // ★ 并发回源聚合（对齐影视仓多段并发，绕开关卡单连接限速）：
     //   夸克对"单条上游连接"限速（实测约 1.1MB/s），但允许多连接并发叠加（8 并发约 3.7MB/s）。
     //   这里把播放器发来的一个 Range 拆成多个并发的子 Range 回源夸克（每个子请求一条独立连接），
     //   再按偏移顺序拼装回写 —— 对播放器完全透明（仍见到单条 206/200 流），seek 照常。
-    const canAggregate = !!range && resp.status === 206 && this.partialRangeOf(resp.headers) !== null;
+    //   ⚠️ 夸克直链按节点分流（release65 实测定论，release75 曾破坏 → 已回归）：
+    //     · **普通节点(dl-pc-zb)**：支持标准 206 + Content-Range，并发聚合拼装可靠 → **允许聚合提速**。
+    //     · **加速节点(dl-c-zb 等，需 acquire_dl_token)**：**禁聚合、单连接透传** —— 并发子 Range
+    //       会被节点忽略导致坏流（release65），且额外的 Range 预检会消费 auth_key → 播不出（release75 教训）。
+    //     · 其余源（其它网盘/普通源）：保留聚合，不误伤。
+    const isQuarkAccelNode = /[.-]dl-c-zb/i.test(target);
+    const rng = range === undefined ? '' : Array.isArray(range) ? range[0] : String(range);
+    const canAggregate =
+      !!rng &&
+      resp.status === 206 &&
+      this.partialRangeOf(resp.headers) !== null &&
+      !isQuarkAccelNode; // 加速节点恒单连接（历史教训，勿再开启聚合）
     if (canAggregate) {
-      const handled = await this.tryAggregateStream(target, headers, Array.isArray(range) ? range[0] : String(range), resp, res);
+      const handled = await this.tryAggregateStream(target, headers, rng, resp, res, AGGREGATE_CONCURRENCY);
       if (handled) {
         // 上游已在本方法内取消/复用（避免双读），返回
         (resp.body as unknown as { cancel?: () => Promise<void> }).cancel?.().catch(() => { /* ignore */ });
@@ -214,6 +307,7 @@ export class LocalProxyServer {
     rangeHeader: string,
     probe: { status: number; headers: Record<string, unknown>; body: unknown },
     res: ServerResponse,
+    concurrency: number = AGGREGATE_CONCURRENCY,
   ): Promise<boolean> {
     const total = this.partialRangeOf(probe.headers);
     if (total === null) return false;
@@ -241,7 +335,7 @@ export class LocalProxyServer {
     const onClientClose = () => { aborted.flag = true; };
     res.on('close', onClientClose);
     try {
-      await this.aggregatePipelined(slices, target, headers, res, aborted);
+      await this.aggregatePipelined(slices, target, headers, res, aborted, concurrency);
     } catch (e) {
       if (!(e instanceof Error) || e.name !== 'AbortError') this.logger.e('proxy /play 聚合流错误', e);
     } finally {
@@ -264,6 +358,7 @@ export class LocalProxyServer {
     headers: Record<string, string>,
     res: ServerResponse,
     aborted: { flag: boolean },
+    concurrency: number = AGGREGATE_CONCURRENCY,
   ): Promise<void> {
     const ready = new Map<number, Buffer>();
     let nextWrite = 0; // 已写出的片数（= 下一个应写片的序号）
@@ -282,7 +377,7 @@ export class LocalProxyServer {
       while (
         !aborted.flag &&
         dispatched < slices.length &&
-        dispatched - nextWrite < AGGREGATE_CONCURRENCY
+        dispatched - nextWrite < concurrency
       ) {
         const idx = dispatched++;
         const sl = slices[idx];
@@ -339,9 +434,28 @@ export class LocalProxyServer {
   /** 拉取单个子切片（独立回源连接），seek 时客户端断开按 AbortError 语义向上抛 */
   private async fetchSliceOne(sl: { start: number; end: number }, target: string, headers: Record<string, string>, res: ServerResponse): Promise<Buffer> {
     const h: Record<string, string> = { ...headers, Range: `bytes=${sl.start}-${sl.end}` };
+    const want = sl.end - sl.start + 1;
     try {
       const r = await this.openStream(target, h);
-      return Buffer.from(await (r.body as unknown as { arrayBuffer(): Promise<ArrayBuffer> }).arrayBuffer());
+      const buf = Buffer.from(await (r.body as unknown as { arrayBuffer(): Promise<ArrayBuffer> }).arrayBuffer());
+      // ★★ 2026-09-19 片长校验改为「容错」而非「直接中止」：
+      //   · 长度与请求区间严重不符（<50%）——典型"节点不理会子 Range 返回整流"（release65 坏流）
+      //     → 立即抛错中止聚合（防拼装损坏），外层 res.destroy 让播放器重试；
+      //   · 长度偏差不大（尾巴片偶发差几个字节/重复几字节）→ 重试一次后按预期长度截断继续，
+      //     避免 release75 的"严格相等即中止"导致整片反复失败 → 播放器无限缓冲/无法播放。
+      if (buf.length !== want) {
+        for (let retry = 0; retry < 1; retry++) {
+          const retryR = await this.openStream(target, h);
+          const retryBuf = Buffer.from(await (retryR.body as unknown as { arrayBuffer(): Promise<ArrayBuffer> }).arrayBuffer());
+          if (retryBuf.length === want) return retryBuf;
+        }
+        if (buf.length >= want * 0.5) {
+          if (buf.length !== want) this.logger.w(`proxy /play 切片长度 ${buf.length} != ${want}，截断容错`);
+          return buf.subarray(0, want);
+        }
+        throw new Error(`切片长度不符 ${buf.length} != ${want} (${sl.start}-${sl.end})`);
+      }
+      return buf;
     } catch (e) {
       // 客户端已断开（seek 关闭旧连接）或上游被中止 → 以 AbortError 语义向上抛，外层静默
       if (res.destroyed || (e instanceof Error && e.name === 'AbortError')) {

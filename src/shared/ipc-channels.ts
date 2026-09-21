@@ -10,6 +10,14 @@ export const IPC = {
   SUBTITLE_SET: 'subtitle:set',
   SUBTITLE_SEARCH: 'subtitle:search',
   SUBTITLE_FETCH: 'subtitle:fetch',
+  // 弹幕（弹弹play）
+  DANMAKU_GET: 'danmaku:get',
+  DANMAKU_SET: 'danmaku:set',
+  DANMAKU_SEARCH: 'danmaku:search',
+  DANMAKU_EPISODES: 'danmaku:episodes',
+  DANMAKU_FETCH: 'danmaku:fetch',
+  // TMDB 元数据补全（缺封面/缺简介兜底；凭据内置密文，仅查询通道）
+  META_SEARCH: 'meta:search',
   DRIVE_GET: 'drive:get',
   DRIVE_SET: 'drive:set',
   DRIVE_REMOVE: 'drive:remove',
@@ -43,6 +51,10 @@ export const IPC = {
   VOD_AUDIT: 'vod:audit',
   CFG_MERGE_EXPORT: 'cfg:mergeExport',
   CFG_EXPORT_SAVE: 'cfg:exportSave',
+  // 播放网盘资源未绑定 cookie → 请求主窗口跳到「配置 → 账号与凭据」tab
+  CFG_GOTO_ACCOUNT: 'cfg:gotoAccount',
+  // 主进程 → 主窗口事件：跳到配置页账号 tab（播放器窗口发起时经此跨窗口跳转）
+  NAV_CFG_ACCOUNT: 'nav:cfgAccount',
   WIN_MINIMIZE: 'win:minimize',
   WIN_MAXIMIZE: 'win:maximize',
   WIN_CLOSE: 'win:close',
@@ -58,4 +70,11 @@ export const IPC = {
   PLAYER_SWITCH_EP: 'player:switchEp',
   PLAYER_GET_INIT: 'player:getInit',
   PLAYER_IS_OPEN: 'player:isOpen',
+  PLAYER_SET_MINI: 'player:setMini',
+  PLAYER_IS_MINI: 'player:isMini',
+  // 老板键（全局快捷键隐藏/恢复）
+  BOSS_GET: 'boss:get',
+  BOSS_SET: 'boss:set',
+  // 夸克落盘文件清理（渲染层播放页/播放器页卸载时触发）
+  QUARK_CLEANUP: 'quark:cleanup',
 } as const;

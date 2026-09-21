@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { client } from '../api/client';
 import type { ImportReturn } from '../api/client';
-import type { ImportReport, SourceBean, UserConfig } from '../../shared/types';
+import type { ImportReport, SourceBean, UserConfig, BossKeySettings } from '../../shared/types';
 import { sourceAvailability } from '../../engine/vod/sourceAvailability';
 import { EXT_TEMPLATES, validateExtJson, extAsObject } from '../../engine/config/extHelper';
 import { sourceKindInfo } from '../../engine/config/sourceKind';
 import type { AuditItem, SourceDebugReport } from '../../shared/types';
 import { applyTheme, currentTheme, type Theme } from '../lib/theme';
+
+type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'appearance' | 'shortcut';
 
 interface Draft {
   name: string;
@@ -76,6 +78,47 @@ export default function ConfigPage() {
   useEffect(() => {
     client.subtitleGet().then((s) => { setSubToken(s.assrtToken || ''); setSubTokenSaved(!!s.assrtToken); }).catch(() => undefined);
   }, []);
+
+  // ---- 老板键设置（全局快捷键隐藏/恢复）----
+  const [bossKey, setBossKey] = useState<BossKeySettings | null>(null);
+  const [bossAccelDraft, setBossAccelDraft] = useState('');
+  const [bossMsg, setBossMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  useEffect(() => {
+    client.bossGet().then((s) => setBossKey(s)).catch(() => setBossKey({ enabled: false, accel: 'CommandOrControl+Shift+B' }));
+  }, []);
+  /** 快捷键展示为中文友好格式（CommandOrControl → Ctrl） */
+  const accelDisplay = (a: string) => a.replace('CommandOrControl', 'Ctrl').replace(/\+/g, ' + ');
+  /** 键盘事件 → Electron accelerator；无修饰键或按键不支持时返回 null */
+  const comboFromEvent = (e: React.KeyboardEvent<HTMLInputElement>): string | null => {
+    const key = e.key;
+    const isLetterDigit = /^[A-Za-z0-9]$/.test(key);
+    const isFn = /^F([1-9]|1[0-2])$/.test(key);
+    const isNav = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', 'Insert', 'Delete'].includes(key);
+    if (!isLetterDigit && !isFn && !isNav) return null;
+    if (['Control', 'Shift', 'Alt', 'Meta', 'CapsLock', 'Tab', 'Escape', 'Dead'].includes(key)) return null;
+    const mods: string[] = [];
+    if (e.ctrlKey || e.metaKey) mods.push('CommandOrControl');
+    if (e.altKey) mods.push('Alt');
+    if (e.shiftKey) mods.push('Shift');
+    if (mods.length === 0) return null; // 老板键必须带修饰键，避免劫持普通按键
+    return [...mods, isLetterDigit ? key.toUpperCase() : key].join('+');
+  };
+  async function saveBossKey() {
+    if (!bossKey) return;
+    const accel = (bossAccelDraft || bossKey.accel).trim();
+    try {
+      const r = await client.bossSet({ enabled: bossKey.enabled, accel });
+      setBossKey(r.settings);
+      setBossAccelDraft('');
+      if (r.settings.enabled && !r.registered) {
+        setBossMsg({ text: '快捷键注册失败：可能已被其它程序占用，请换一个组合', kind: 'err' });
+      } else {
+        setBossMsg({ text: r.settings.enabled ? `已启用：${accelDisplay(r.settings.accel)}` : '已停用老板键', kind: 'ok' });
+      }
+    } catch (e) {
+      setBossMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
+    }
+  }
 
   // 编辑态
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -468,6 +511,30 @@ export default function ConfigPage() {
     }
   }
 
+  // ---- 选项卡（替代原 <a href="#cfg-*"> 锚点跳转，避免 HashRouter 下触发路由跳到空页）----
+  const TABS: { id: TabId; label: string }[] = [
+    { id: 'sources', label: '订阅与源' },
+    { id: 'health', label: '源健康与维护' },
+    { id: 'profiles', label: '配置档案' },
+    { id: 'account', label: '账号与凭据' },
+    { id: 'appearance', label: '外观' },
+    { id: 'shortcut', label: '快捷键' },
+  ];
+  const CFG_TAB_KEY = 'winbox-cfg-tab';
+  // 记住上次打开的选项卡：从配置页跳走再返回时仍停在原 tab
+  const [tab, setTab] = useState<TabId>(() => {
+    try {
+      const s = localStorage.getItem(CFG_TAB_KEY) as TabId | null;
+      return s && TABS.some((t) => t.id === s) ? s : 'sources';
+    } catch {
+      return 'sources';
+    }
+  });
+  const selectTab = (t: TabId) => {
+    setTab(t);
+    try { localStorage.setItem(CFG_TAB_KEY, t); } catch { /* ignore */ }
+  };
+
   const extOk = validateExtJson(draft?.ext ?? '');
   const statusCell = (s: SourceBean) => {
     const avail = sourceAvailability(s);
@@ -477,315 +544,37 @@ export default function ConfigPage() {
 
   return (
     <div className="content">
-      <div className="row" style={{ marginBottom: 12, alignItems: 'baseline' }}>
-        <h3 style={{ margin: 0 }}>源管理与导入</h3>
-        <span className="muted" style={{ fontSize: 11 }}>
-          常用：导入订阅 → 在我的源列表点行选中 → 需要时用「编辑」补 ext
-        </span>
-      </div>
-
-      {/* 快捷跳转：面板多了以后不用一路滚 */}
-      <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
-        {[
-          ['导入订阅', '#cfg-import'],
-          ['我的源列表', '#cfg-sources'],
-          ['逐源体检', '#cfg-audit'],
-          ['自定义源', '#cfg-custom'],
-          ['网盘绑定', '#cfg-drive'],
-          ['多配置档案', '#cfg-profiles'],
-          ['合并导出', '#cfg-merge'],
-          ['外挂字幕', '#cfg-subtitle'],
-          ['清理缓存', '#cfg-cache'],
-        ].map(([label, href]) => (
-          <a key={href} href={href} className="tag" style={{ textDecoration: 'none' }}>{label}</a>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => selectTab(t.id)}
+            style={{
+              background: tab === t.id ? 'var(--bg-elev2)' : 'transparent',
+              border: tab === t.id ? '1px solid var(--accent)' : '1px solid transparent',
+              color: tab === t.id ? 'var(--text)' : 'var(--text-dim)',
+              borderBottomLeftRadius: 0,
+              borderBottomRightRadius: 0,
+              padding: '8px 16px',
+              fontWeight: tab === t.id ? 600 : 400,
+            }}
+          >
+            {t.label}
+          </button>
         ))}
       </div>
 
-      {/* 外观：亮/深色模式（Mica 表层随主题切换） */}
-      <div className="card" id="cfg-appearance" style={{ padding: 12, marginBottom: 16 }}>
-        <div className="row" style={{ marginBottom: 8 }}>
-          <span className="muted" style={{ fontWeight: 600 }}>外观主题</span>
-        </div>
-        <div className="row" style={{ gap: 6 }}>
-          {(Object.entries({
-            dark: '🌙 深色',
-            light: '☀️ 亮色',
-          }) as [Theme, string][]).map(([t, label]) => (
-            <span
-              key={t}
-              className={`tag ${theme === t ? 'active' : ''}`}
-              onClick={() => {
-                setTheme(t);
-                applyTheme(t);
-              }}
-              title={t === 'dark' ? '深色模式（默认）' : '亮色模式'}
-            >
-              {label} {theme === t ? '✓' : ''}
-            </span>
-          ))}
-        </div>
-        <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-          选择后立即应用，并保存以供下次启动沿用。窗口将使用 Windows Mica 材质，表层随所选主题呈现半透明磨砂质感。
-        </div>
-      </div>
-
-      {/* 清理缓存：只删可重建的纯缓存（Chromium 缓存 / jar 转换缓存），绝不动配置/历史/绑定 */}
-      <div className="card" id="cfg-cache" style={{ padding: 12, marginBottom: 16 }}>
-        <div className="row" style={{ marginBottom: 8 }}>
-          <span className="muted" style={{ fontWeight: 600 }}>清理缓存</span>
-        </div>
-        <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button className="primary" disabled={cacheBusy} onClick={async () => {
-            setCacheBusy(true);
-            setCacheMsg(null);
-            try {
-              const r = await client.cacheClear();
-              const mb = (r.freedBytes / 1024 / 1024).toFixed(1);
-              setCacheMsg({
-                text: `已清理 ${r.cleared.length} 类缓存，释放约 ${mb} MB${r.failed.length ? `（${r.failed.length} 项暂被占用跳过）` : ''}。配置、历史记录与网盘绑定均未受影响。`,
-                kind: 'ok',
-              });
-            } catch (e) {
-              setCacheMsg({ text: `清理失败：${(e as Error).message}`, kind: 'err' });
-            } finally {
-              setCacheBusy(false);
-            }
-          }}>
-            {cacheBusy ? '清理中…' : '🧹 立即清理'}
-          </button>
-        </div>
-        <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-          仅清理可自动重建的缓存（图片缓存、jar 转换缓存、播放器临时数据等）；你的订阅配置、网盘绑定、播放历史与字幕设置都不会被删除。
-        </div>
-        {cacheMsg && <div className="muted" style={{ fontSize: 11, marginTop: 4, color: cacheMsg.kind === 'ok' ? 'var(--accent-2)' : 'var(--warn)' }}>{cacheMsg.text}</div>}
-      </div>
-
-      {/* 外挂字幕：assrt token 配置（用户自填，仅作接口调用） */}
-      <div className="card" id="cfg-subtitle" style={{ padding: 12, marginBottom: 16 }}>
-        <div className="row" style={{ marginBottom: 8 }}>
-          <span className="muted" style={{ fontWeight: 600 }}>外挂字幕（assrt 在线检索）</span>
-        </div>
-        <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <input
-            type="password"
-            placeholder="粘贴你的 assrt.net token…"
-            value={subToken}
-            style={{ flex: 1 }}
-            onChange={(e) => { setSubToken(e.target.value); setSubTokenSaved(false); }}
-          />
-          <button className="primary" disabled={!subToken.trim()} onClick={async () => {
-            await client.subtitleSet({ assrtToken: subToken.trim() }).catch(() => undefined);
-            setSubTokenSaved(true);
-          }}>保存</button>
-        </div>
-        <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-          {subTokenSaved ? '✓ 已保存。播放器中点「字幕」即可按当前剧集在线检索。' : '在 assrt.net 免费注册后，会员中心可获取一个 token（无需付费）。填写后即可在线检索中文字幕。'}
-        </div>
-        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-          提示：伪射手域名已失效、字幕库/SubHD 需浏览器反爬破解，故在线字幕统一走 assrt 公开 API。
-        </div>
-      </div>
-
-      {/* 0a) 网盘/资源站绑定（先绑定、再调用网盘内资源的源需要） */}
-      <div className="card" id="cfg-drive" style={{ padding: 12, marginBottom: 16 }}>
-        <div className="row" style={{ marginBottom: 6 }}>
-          <span className="muted" style={{ fontWeight: 600 }}>网盘绑定（阿里云盘/夸克/UC/百度等 csp_ 源：先绑盘→再调用盘内资源）</span>
-        </div>
-        <div className="row" style={{ flexWrap: 'wrap' }}>
-          <select value={driveProv} onChange={(e) => setDriveProv(e.target.value)}>
-            {['ali', 'alipan', 'uc', 'quark', 'pan', 'baidu', 'pansou'].map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
-          <input style={{ flex: 1, minWidth: 220 }} placeholder="粘贴 token（refresh_token / 授权串；随源 jar 文档）" value={driveTok} onChange={(e) => setDriveTok(e.target.value)} />
-          <button disabled={!driveTok.trim() || !driveProv.trim()} onClick={saveDrive}>保存绑定</button>
-          {viaWeb ? (
-            <button disabled={webBusy} onClick={doWebLogin} title={`${labelOf(driveProv)}：打开网盘登录页，用 App 扫其中二维码后自动写入绑定（不动过期的应用内码，最可靠）`}>
-              {webBusy ? '登录中…' : '📱 扫码登录'}
-            </button>
-          ) : viaCas ? (
-            <button disabled={qrBusy} onClick={startQrLogin} title={`${labelOf(driveProv)}：应用内二维码，扫码授权后自动写入绑定`}>
-              {qrBusy ? '…' : '📱 扫码获取'}
-            </button>
-          ) : (
-            <span className="muted" style={{ fontSize: 11 }}>暂不支持扫码，请填 token 保存</span>
-          )}
-          <span className="muted" style={{ fontSize: 10 }}>夸克/UC/百度「扫码登录」=弹网页二维码最稳；阿里走应用内码；其它手动粘贴</span>
-        </div>
-        {driveMsg && <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>{driveMsg}</div>}
-        {Object.keys(drives).length > 0 && (
-          <div className="row" style={{ flexWrap: 'wrap', marginTop: 6 }}>
-            {Object.entries(drives).map(([p, t]) => (
-              <span key={p} className="tag" style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'default' }}>
-                {p} <span className="muted">已绑定</span>
-                <button className="linkbtn danger" onClick={() => delDrive(p)}>解绑</button>
-              </span>
-            ))}
-          </div>
-        )}
-        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-          <b>绑定即注入</b>：保存后，宿主会在每次调用 jar(dex) 蜘蛛前，把这里绑定的 token 按「provider 名」实时并入该源 <code>ext</code> JSON（同名键覆盖，蜘蛛 <code>init(Context,ext)</code> 即可读到）。使用时在目标源的 ext 里写好对应键名（如阿里云盘族常见 <code>{'{ "ali": "" }'}</code> / <code>{'{ "alipan": "" }'}</code>）再保存即可生效，无需重启。具体键名与获取步骤以各 jar 自带说明为准（不同源族写法不同）；未声明 ext 的源不会被强塞。
-        </div>
-      </div>
-
-      {/* 0b) 合并导出（多配置 → 去重 → 新 JSON，不写原文件） */}
-      <div className="card" id="cfg-merge" style={{ padding: 12, marginBottom: 16 }}>
-        <div className="row" style={{ marginBottom: 6 }}>
-          <span className="muted" style={{ fontWeight: 600 }}>合并导出（把多份配置的源合并去重成一份订阅 JSON）</span>
-          <button className="primary" disabled={!mergePick.size} onClick={doMergeExport}>合并并另存为…</button>
-        </div>
-        {cfg?.profiles && cfg.profiles.length > 0 ? (
-          <div className="row" style={{ flexWrap: 'wrap', marginBottom: 4 }}>
-            {cfg.profiles.map((p) => {
-              const checked = mergePick.has(p.id);
-              return (
-                <label key={p.id} className={`tag ${checked ? 'active' : ''}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    style={{ accentColor: 'var(--accent)', margin: 0 }}
-                    checked={checked}
-                    onChange={() => {
-                      const next = new Set(mergePick);
-                      if (next.has(p.id)) next.delete(p.id); else next.add(p.id);
-                      setMergePick(next);
-                    }}
-                  />
-                  {p.name} <span className="muted">({p.sourceCount})</span>
-                  {!p.json && <span className="muted" title="该档案来自早期版本，无原始数据可合并">· 无数据</span>}
-                </label>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="muted" style={{ fontSize: 12 }}>没有可合并的档案——先在上方「已保存配置」里存下至少两份配置。</div>
-        )}
-        {mergeMsg && (
-          <div style={{ marginTop: 6, fontSize: 12, color: mergeMsg.kind === 'ok' ? 'var(--accent-2)' : 'var(--danger)', wordBreak: 'break-all' }}>
-            {mergeMsg.text}
-          </div>
-        )}
-        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-          合并规则：源按 key 去重（保留整条原始字段）；key 不同但同名同 api 视为同一源；直播按地址去重。
-          导出走系统"另存为"对话框，只写新文件——导入的原始 JSON 一律只读、绝不被修改。
-        </div>
-      </div>
-
-      {/* 0) 多配置档案（多 JSON 源切换） */}
-      <div className="card" id="cfg-profiles" style={{ padding: 12, marginBottom: 16 }}>
-        <details open={false}>
-          <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
-            已保存配置（多份订阅离线切换）
-            {cfg?.profiles?.length ? <span className="muted" style={{ fontWeight: 400 }}> —— 共 {cfg.profiles.length} 份，当前「{cfg.profiles.find((p) => p.id === cfg.activeProfileId)?.name ?? '未知'}」</span> : null}
-          </summary>
-          <div style={{ marginTop: 10 }}>
-        {(!cfg?.profiles || cfg.profiles.length === 0) ? (
-          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
-            暂无档案。从地址/JSON 导入后，或点右侧「存为新配置」，即可在多份订阅源之间离线切换。
-          </div>
-        ) : (
-          <div className="row" style={{ flexWrap: 'wrap', marginBottom: 8 }}>
-            {cfg.profiles.map((p) => {
-              const active = p.id === cfg.activeProfileId;
-              return (
-                <span key={p.id} className={`tag ${active ? 'active' : ''}`}
-                  style={{ padding: '6px 10px', display: 'inline-flex', gap: 6, alignItems: 'center' }}
-                  title={p.json ? `${p.json.length} 字节可恢复数据` : '该档案由早期版本迁移，无原始数据'}>
-                  {p.name}{active ? ' ✓' : ''} <span className="muted">({p.sourceCount})</span>
-                  {!active && <button className="linkbtn" onClick={() => activateProfile(p.id)}>切换</button>}
-                  {!active && <button className="linkbtn danger" onClick={() => delProfile(p.id)}>删</button>}
-                </span>
-              );
-            })}
-          </div>
-        )}
-        <div className="row" style={{ flexWrap: 'wrap' }}>
-          <input style={{ width: 220 }} placeholder="把当前源列表存为新配置的名称…" value={profileName} onChange={(e) => setProfileName(e.target.value)} />
-          <button disabled={busy} onClick={saveProfile}>存为新配置</button>
-          <span className="muted" style={{ fontSize: 11 }}>提示：导入新的地址/JSON 会替换当前生效配置；想保留旧配置，先「存为新配置」。</span>
-        </div>
-          </div>
-        </details>
-      </div>
-
-      {/* 0.5) 逐源体检（主页可见性审计） */}
-      <div className="card" id="cfg-audit" style={{ padding: 12, marginBottom: 16 }}>
-        <div className="row" style={{ marginBottom: 8, flexWrap: 'wrap' }}>
-          <span className="muted" style={{ fontWeight: 600 }}>主页可见性体检（判定源是否有效）</span>
-          <button className="primary" disabled={auditBusy || !sources.length} onClick={runAudit}>
-            {auditBusy ? '体检中…（逐源加载首页，jar 源较慢）' : '一键体检全部源'}
-          </button>
-          {audit && (
-            <button
-              style={{ color: 'var(--danger)' }}
-              disabled={!audit.some((a) => a.health === 'error')}
-              onClick={deleteFailedSources}
-              title="批量删除体检结果为「失败/报错」的源（不触碰原始文件）"
-            >
-              一键删除失败源（{audit.filter((a) => a.health === 'error').length}）
-            </button>
-          )}
-          {audit && (
-            <span className="status">
-              {audit.filter((a) => a.health === 'ok-content' || a.health === 'ok-classes').length} 有效 ·
-              {audit.filter((a) => a.needsExt).length} 需补 ext ·
-              {audit.filter((a) => a.health === 'error' || a.health === 'empty').length} 失效/空
-            </span>
-          )}
-        </div>
-        {audit ? (
-          <div style={{ fontSize: 12 }}>
-            <div className="row" style={{ marginBottom: 6 }}>
-              <span className={`tag ${auditFilter === 'all' ? 'active' : ''}`} onClick={() => setAuditFilter('all')}>全部 {audit.length}</span>
-              <span className={`tag ${auditFilter === 'usable' ? 'active' : ''}`} onClick={() => setAuditFilter('usable')}>✅ 有效</span>
-              <span className={`tag ${auditFilter === 'needs-ext' ? 'active' : ''}`} onClick={() => setAuditFilter('needs-ext')}>🔧 需补 ext</span>
-              <span className={`tag ${auditFilter === 'bad' ? 'active' : ''}`} onClick={() => setAuditFilter('bad')}>⛔ 失效/空</span>
-            </div>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ color: 'var(--text-dim)', textAlign: 'left' }}>
-                  <th style={{ borderBottom: '1px solid var(--border-soft)' }}>源</th>
-                  <th style={{ borderBottom: '1px solid var(--border-soft)' }}>形态</th>
-                  <th style={{ borderBottom: '1px solid var(--border-soft)' }}>体检结果</th>
-                  <th style={{ borderBottom: '1px solid var(--border-soft)' }}>建议 / 错误</th>
-                  <th style={{ borderBottom: '1px solid var(--border-soft)' }}>耗时</th>
-                </tr>
-              </thead>
-              <tbody>
-                {audit
-                  .filter((a) => (auditFilter === 'usable' ? a.usable : auditFilter === 'needs-ext' ? a.needsExt : auditFilter === 'bad' ? !a.usable && !a.needsExt : true))
-                  .map((a) => (
-                    <tr key={a.key}>
-                      <td style={{ borderBottom: '1px solid var(--border-soft)' }}>
-                        <div>{a.name}</div>
-                        <div className="muted">{a.key}</div>
-                      </td>
-                      <td style={{ borderBottom: '1px solid var(--border-soft)' }}>type{a.type}·{a.kind}{a.homeFallback ? '·首页回退' : ''}</td>
-                      <td style={{ borderBottom: '1px solid var(--border-soft)', color: healthColor[a.health] }}>
-                        {healthLabel[a.health]}
-                        {a.items > 0 ? `（${a.items} 条）` : ''}
-                      </td>
-                      <td style={{ borderBottom: '1px solid var(--border-soft)', color: 'var(--text-dim)', maxWidth: 380 }}>
-                        {a.advice}
-                        {a.error && <div style={{ color: 'var(--danger)' }}>{a.error}</div>}
-                      </td>
-                      <td style={{ borderBottom: '1px solid var(--border-soft)' }}>{a.ms}ms</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-            <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-              有效标准：主页真实拉到内容条目或分类（CMS 自动回退首分类）；需补 ext 的源可在「编辑」里套用模板填站址后重跑体检。
-            </div>
-          </div>
-        ) : null}
-      </div>
-
-      {/* 1) 导入区 */}
+      
+      {/* ===== 一、订阅与源 ===== */}
+      {tab === 'sources' && (
+      <>
+      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>一、订阅与源</h4>
+{/* 1) 导入区 */}
       <div className="card" id="cfg-import" style={{ padding: 12, marginBottom: 16 }}>
         <div className="row" style={{ marginBottom: 10 }}>
           <input
             style={{ flex: 1, minWidth: 260 }}
-            placeholder="配置地址（http(s)://…）—— 导入即用新配置全量替换当前源列表"
+            placeholder="配置地址（http(s)://…）—— 导入为新增订阅，旧订阅自动存档（可在「已保存配置」切回）"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
           />
@@ -794,7 +583,7 @@ export default function ConfigPage() {
           </button>
         </div>
         <details style={{ marginBottom: 6 }}>
-          <summary className="muted" style={{ cursor: 'pointer' }}>粘贴 JSON 文本导入（全量替换）</summary>
+          <summary className="muted" style={{ cursor: 'pointer' }}>粘贴 JSON 文本导入（新增订阅，旧订阅自动存档）</summary>
           <textarea
             style={{ width: '100%', minHeight: 110, marginTop: 6, fontFamily: 'monospace' }}
             placeholder='{"sites":[...],"lives":[...]}'
@@ -814,9 +603,12 @@ export default function ConfigPage() {
         )}
       </div>
 
-      {/* 2) 我的源列表 */}
-      <h4 id="cfg-sources" style={{ margin: '0 0 8px', scrollMarginTop: 12 }}>我的源列表（{sources.length}）—— 点行选中并立即生效（重启保留）</h4>
-      <div style={{ marginBottom: 16 }}>
+      {/* 2) 我的源列表（可折叠） */}
+      <details className="card" id="cfg-sources" open style={{ padding: 12, marginBottom: 16 }}>
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+          我的源列表（{sources.length}）—— 点行选中并立即生效（重启保留）
+        </summary>
+        <div style={{ marginTop: 10 }}>
         {sources.length === 0 ? (
           <div className="empty" style={{ padding: 24 }}>尚无源，请先导入订阅，或使用下方"自定义源"添加</div>
         ) : (
@@ -1031,45 +823,9 @@ export default function ConfigPage() {
             </tbody>
           </table>
         )}
-      </div>
-
-      {/* 2.5) 单源诊断结果 */}
-      {diagKey && (
-        <div className="card" style={{ padding: 12, marginBottom: 16 }}>
-          <h4 style={{ margin: '0 0 8px' }}>诊断：{diagKey}</h4>
-          {diagBusy && <div className="status">正在探测并实际调用（首次拉 jar 可能较慢）…</div>}
-          {diagErr && <div className="err">{diagErr}</div>}
-          {diag && (
-            <div style={{ fontSize: 12, lineHeight: 1.9 }}>
-              <div><span className="muted">类型/形态：</span>{diag.type} / {diag.kind}</div>
-              <div><span className="muted">ext：</span>{diag.ext.present ? (diag.ext.jsonOk ? `有（JSON ✓ 键：${diag.ext.preview.slice(0, 120)}）` : `有但非 JSON：${diag.ext.preview}`) : '无（部分蜘蛛需要）'}</div>
-              {diag.jarUrl && <div><span className="muted">jar：</span>{diag.jarUrl.slice(0, 160)}</div>}
-              {diag.probe && (
-                <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 6 }}>
-                  <div className="muted">—— 接口探测 ——</div>
-                  <div>地址：{diag.probe.url}</div>
-                  <div>结果：HTTP {diag.probe.status} · {diag.probe.bytes} 字节 · 类型 {diag.probe.contentType || '未知'}</div>
-                  <div>解析：分类 {diag.probe.classes} · 条目 {diag.probe.items}{diag.probe.error ? ` · ${diag.probe.error}` : ''}</div>
-                  {diag.probe.preview && <div className="muted" style={{ wordBreak: 'break-all' }}>正文预览：{diag.probe.preview}</div>}
-                </div>
-              )}
-              {diag.run && (
-                <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 6 }}>
-                  <div className="muted">—— 实际调用 ——</div>
-                  <div>{diag.run.ok ? `成功：分类 ${diag.run.classes} · 条目 ${diag.run.items} · ${diag.run.ms}ms` : `失败：${diag.run.error}`}</div>
-                  {diag.run.head && <div className="muted" style={{ wordBreak: 'break-all' }}>数据预览：{diag.run.head}</div>}
-                </div>
-              )}
-              <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 6, color: diag.verdict.startsWith('探测正常') || diag.verdict.includes('成功') ? 'var(--accent-2)' : 'var(--warn)' }}>
-                <b>结论：</b>{diag.verdict}
-              </div>
-              <button style={{ marginTop: 8 }} onClick={() => setDiagKey(null)}>关闭</button>
-            </div>
-          )}
         </div>
-      )}
-
-      {/* 3) 自定义源 */}
+      </details>
+{/* 3) 自定义源 */}
       <div className="card" id="cfg-custom" style={{ padding: 12, marginBottom: 16 }}>
         <h4 style={{ margin: '0 0 8px' }}>自定义源</h4>
         <div className="row" style={{ flexWrap: 'wrap' }}>
@@ -1134,7 +890,424 @@ export default function ConfigPage() {
           </table>
         </div>
       )}
-      {/* 网盘扫码弹层 */}
+{/* 2.5) 单源诊断结果 */}
+      {diagKey && (
+        <div className="card" style={{ padding: 12, marginBottom: 16 }}>
+          <h4 style={{ margin: '0 0 8px' }}>诊断：{diagKey}</h4>
+          {diagBusy && <div className="status">正在探测并实际调用（首次拉 jar 可能较慢）…</div>}
+          {diagErr && <div className="err">{diagErr}</div>}
+          {diag && (
+            <div style={{ fontSize: 12, lineHeight: 1.9 }}>
+              <div><span className="muted">类型/形态：</span>{diag.type} / {diag.kind}</div>
+              <div><span className="muted">ext：</span>{diag.ext.present ? (diag.ext.jsonOk ? `有（JSON ✓ 键：${diag.ext.preview.slice(0, 120)}）` : `有但非 JSON：${diag.ext.preview}`) : '无（部分蜘蛛需要）'}</div>
+              {diag.jarUrl && <div><span className="muted">jar：</span>{diag.jarUrl.slice(0, 160)}</div>}
+              {diag.probe && (
+                <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 6 }}>
+                  <div className="muted">—— 接口探测 ——</div>
+                  <div>地址：{diag.probe.url}</div>
+                  <div>结果：HTTP {diag.probe.status} · {diag.probe.bytes} 字节 · 类型 {diag.probe.contentType || '未知'}</div>
+                  <div>解析：分类 {diag.probe.classes} · 条目 {diag.probe.items}{diag.probe.error ? ` · ${diag.probe.error}` : ''}</div>
+                  {diag.probe.preview && <div className="muted" style={{ wordBreak: 'break-all' }}>正文预览：{diag.probe.preview}</div>}
+                </div>
+              )}
+              {diag.run && (
+                <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 6 }}>
+                  <div className="muted">—— 实际调用 ——</div>
+                  <div>{diag.run.ok ? `成功：分类 ${diag.run.classes} · 条目 ${diag.run.items} · ${diag.run.ms}ms` : `失败：${diag.run.error}`}</div>
+                  {diag.run.head && <div className="muted" style={{ wordBreak: 'break-all' }}>数据预览：{diag.run.head}</div>}
+                </div>
+              )}
+              <div style={{ borderTop: '1px solid var(--border)', marginTop: 6, paddingTop: 6, color: diag.verdict.startsWith('探测正常') || diag.verdict.includes('成功') ? 'var(--accent-2)' : 'var(--warn)' }}>
+                <b>结论：</b>{diag.verdict}
+              </div>
+              <button style={{ marginTop: 8 }} onClick={() => setDiagKey(null)}>关闭</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      
+      </>
+      )}
+
+      
+      {/* ===== 二、源健康与维护 ===== */}
+      {tab === 'health' && (
+      <>
+      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>二、源健康与维护</h4>
+{/* 0.5) 逐源体检（主页可见性审计） */}
+      <div className="card" id="cfg-audit" style={{ padding: 12, marginBottom: 16 }}>
+        <div className="row" style={{ marginBottom: 8, flexWrap: 'wrap' }}>
+          <span className="muted" style={{ fontWeight: 600 }}>主页可见性体检（判定源是否有效）</span>
+          <button className="primary" disabled={auditBusy || !sources.length} onClick={runAudit}>
+            {auditBusy ? '体检中…（逐源加载首页，jar 源较慢）' : '一键体检全部源'}
+          </button>
+          {audit && (
+            <button
+              style={{ color: 'var(--danger)' }}
+              disabled={!audit.some((a) => a.health === 'error')}
+              onClick={deleteFailedSources}
+              title="批量删除体检结果为「失败/报错」的源（不触碰原始文件）"
+            >
+              一键删除失败源（{audit.filter((a) => a.health === 'error').length}）
+            </button>
+          )}
+          {audit && (
+            <span className="status">
+              {audit.filter((a) => a.health === 'ok-content' || a.health === 'ok-classes').length} 有效 ·
+              {audit.filter((a) => a.needsExt).length} 需补 ext ·
+              {audit.filter((a) => a.health === 'error' || a.health === 'empty').length} 失效/空
+            </span>
+          )}
+        </div>
+        {audit ? (
+          <div style={{ fontSize: 12 }}>
+            <div className="row" style={{ marginBottom: 6 }}>
+              <span className={`tag ${auditFilter === 'all' ? 'active' : ''}`} onClick={() => setAuditFilter('all')}>全部 {audit.length}</span>
+              <span className={`tag ${auditFilter === 'usable' ? 'active' : ''}`} onClick={() => setAuditFilter('usable')}>✅ 有效</span>
+              <span className={`tag ${auditFilter === 'needs-ext' ? 'active' : ''}`} onClick={() => setAuditFilter('needs-ext')}>🔧 需补 ext</span>
+              <span className={`tag ${auditFilter === 'bad' ? 'active' : ''}`} onClick={() => setAuditFilter('bad')}>⛔ 失效/空</span>
+            </div>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ color: 'var(--text-dim)', textAlign: 'left' }}>
+                  <th style={{ borderBottom: '1px solid var(--border-soft)' }}>源</th>
+                  <th style={{ borderBottom: '1px solid var(--border-soft)' }}>形态</th>
+                  <th style={{ borderBottom: '1px solid var(--border-soft)' }}>体检结果</th>
+                  <th style={{ borderBottom: '1px solid var(--border-soft)' }}>建议 / 错误</th>
+                  <th style={{ borderBottom: '1px solid var(--border-soft)' }}>耗时</th>
+                </tr>
+              </thead>
+              <tbody>
+                {audit
+                  .filter((a) => (auditFilter === 'usable' ? a.usable : auditFilter === 'needs-ext' ? a.needsExt : auditFilter === 'bad' ? !a.usable && !a.needsExt : true))
+                  .map((a) => (
+                    <tr key={a.key}>
+                      <td style={{ borderBottom: '1px solid var(--border-soft)' }}>
+                        <div>{a.name}</div>
+                        <div className="muted">{a.key}</div>
+                      </td>
+                      <td style={{ borderBottom: '1px solid var(--border-soft)' }}>type{a.type}·{a.kind}{a.homeFallback ? '·首页回退' : ''}</td>
+                      <td style={{ borderBottom: '1px solid var(--border-soft)', color: healthColor[a.health] }}>
+                        {healthLabel[a.health]}
+                        {a.items > 0 ? `（${a.items} 条）` : ''}
+                      </td>
+                      <td style={{ borderBottom: '1px solid var(--border-soft)', color: 'var(--text-dim)', maxWidth: 380 }}>
+                        {a.advice}
+                        {a.error && <div style={{ color: 'var(--danger)' }}>{a.error}</div>}
+                      </td>
+                      <td style={{ borderBottom: '1px solid var(--border-soft)' }}>{a.ms}ms</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+            <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+              有效标准：主页真实拉到内容条目或分类（CMS 自动回退首分类）；需补 ext 的源可在「编辑」里套用模板填站址后重跑体检。
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      {/* 清理缓存：只删可重建的纯缓存（Chromium 缓存 / jar 转换缓存），绝不动配置/历史/绑定 */}
+      <div className="card" id="cfg-cache" style={{ padding: 12, marginBottom: 16 }}>
+        <div className="row" style={{ marginBottom: 8 }}>
+          <span className="muted" style={{ fontWeight: 600 }}>清理缓存</span>
+        </div>
+        <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button className="primary" disabled={cacheBusy} onClick={async () => {
+            setCacheBusy(true);
+            setCacheMsg(null);
+            try {
+              const r = await client.cacheClear();
+              const mb = (r.freedBytes / 1024 / 1024).toFixed(1);
+              setCacheMsg({
+                text: `已清理 ${r.cleared.length} 类缓存，释放约 ${mb} MB${r.failed.length ? `（${r.failed.length} 项暂被占用跳过）` : ''}。配置、历史记录与网盘绑定均未受影响。`,
+                kind: 'ok',
+              });
+            } catch (e) {
+              setCacheMsg({ text: `清理失败：${(e as Error).message}`, kind: 'err' });
+            } finally {
+              setCacheBusy(false);
+            }
+          }}>
+            {cacheBusy ? '清理中…' : '🧹 立即清理'}
+          </button>
+        </div>
+        <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+          仅清理可自动重建的缓存（图片缓存、jar 转换缓存、播放器临时数据等）；你的订阅配置、网盘绑定、播放历史与字幕设置都不会被删除。
+        </div>
+        {cacheMsg && <div className="muted" style={{ fontSize: 11, marginTop: 4, color: cacheMsg.kind === 'ok' ? 'var(--accent-2)' : 'var(--warn)' }}>{cacheMsg.text}</div>}
+      </div>
+
+      
+      {/* ===== 三、配置档案 ===== */}
+      </>
+      )}
+
+      {/* ===== 三、配置档案 ===== */}
+      {tab === 'profiles' && (
+      <>
+      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>三、配置档案</h4>
+{/* 0) 多配置档案（多 JSON 源切换） */}
+      <div className="card" id="cfg-profiles" style={{ padding: 12, marginBottom: 16 }}>
+        <details open={false}>
+          <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+            已保存配置（多份订阅离线切换）
+            {cfg?.profiles?.length ? <span className="muted" style={{ fontWeight: 400 }}> —— 共 {cfg.profiles.length} 份，当前「{cfg.profiles.find((p) => p.id === cfg.activeProfileId)?.name ?? '未知'}」</span> : null}
+          </summary>
+          <div style={{ marginTop: 10 }}>
+        {(!cfg?.profiles || cfg.profiles.length === 0) ? (
+          <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            暂无档案。从地址/JSON 导入后，或点右侧「存为新配置」，即可在多份订阅源之间离线切换。
+          </div>
+        ) : (
+          <div className="row" style={{ flexWrap: 'wrap', marginBottom: 8 }}>
+            {cfg.profiles.map((p) => {
+              const active = p.id === cfg.activeProfileId;
+              return (
+                <span key={p.id} className={`tag ${active ? 'active' : ''}`}
+                  style={{ padding: '6px 10px', display: 'inline-flex', gap: 6, alignItems: 'center' }}
+                  title={p.json ? `${p.json.length} 字节可恢复数据` : '该档案由早期版本迁移，无原始数据'}>
+                  {p.name}{active ? ' ✓' : ''} <span className="muted">({p.sourceCount})</span>
+                  {!active && <button className="linkbtn" onClick={() => activateProfile(p.id)}>切换</button>}
+                  {!active && <button className="linkbtn danger" onClick={() => delProfile(p.id)}>删</button>}
+                </span>
+              );
+            })}
+          </div>
+        )}
+        <div className="row" style={{ flexWrap: 'wrap' }}>
+          <input style={{ width: 220 }} placeholder="把当前源列表存为新配置的名称…" value={profileName} onChange={(e) => setProfileName(e.target.value)} />
+          <button disabled={busy} onClick={saveProfile}>存为新配置</button>
+          <span className="muted" style={{ fontSize: 11 }}>提示：导入新的地址/JSON 会替换当前生效配置；想保留旧配置，先「存为新配置」。</span>
+        </div>
+          </div>
+        </details>
+      </div>
+
+      {/* 0b) 合并导出（多配置 → 去重 → 新 JSON，不写原文件） */}
+      <div className="card" id="cfg-merge" style={{ padding: 12, marginBottom: 16 }}>
+        <div className="row" style={{ marginBottom: 6 }}>
+          <span className="muted" style={{ fontWeight: 600 }}>合并导出（把多份配置的源合并去重成一份订阅 JSON）</span>
+          <button className="primary" disabled={!mergePick.size} onClick={doMergeExport}>合并并另存为…</button>
+        </div>
+        {cfg?.profiles && cfg.profiles.length > 0 ? (
+          <div className="row" style={{ flexWrap: 'wrap', marginBottom: 4 }}>
+            {cfg.profiles.map((p) => {
+              const checked = mergePick.has(p.id);
+              return (
+                <label key={p.id} className={`tag ${checked ? 'active' : ''}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    style={{ accentColor: 'var(--accent)', margin: 0 }}
+                    checked={checked}
+                    onChange={() => {
+                      const next = new Set(mergePick);
+                      if (next.has(p.id)) next.delete(p.id); else next.add(p.id);
+                      setMergePick(next);
+                    }}
+                  />
+                  {p.name} <span className="muted">({p.sourceCount})</span>
+                  {!p.json && <span className="muted" title="该档案来自早期版本，无原始数据可合并">· 无数据</span>}
+                </label>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="muted" style={{ fontSize: 12 }}>没有可合并的档案——先在上方「已保存配置」里存下至少两份配置。</div>
+        )}
+        {mergeMsg && (
+          <div style={{ marginTop: 6, fontSize: 12, color: mergeMsg.kind === 'ok' ? 'var(--accent-2)' : 'var(--danger)', wordBreak: 'break-all' }}>
+            {mergeMsg.text}
+          </div>
+        )}
+        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+          合并规则：源按 key 去重（保留整条原始字段）；key 不同但同名同 api 视为同一源；直播按地址去重。
+          导出走系统"另存为"对话框，只写新文件——导入的原始 JSON 一律只读、绝不被修改。
+        </div>
+      </div>
+
+      
+      {/* ===== 四、账号与凭据 ===== */}
+      </>
+      )}
+
+      {/* ===== 四、账号与凭据 ===== */}
+      {tab === 'account' && (
+      <>
+      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>四、账号与凭据</h4>
+{/* 0a) 网盘/资源站绑定（先绑定、再调用网盘内资源的源需要） */}
+      <div className="card" id="cfg-drive" style={{ padding: 12, marginBottom: 16 }}>
+        <div className="row" style={{ marginBottom: 6 }}>
+          <span className="muted" style={{ fontWeight: 600 }}>网盘绑定（阿里云盘/夸克/UC/百度等 csp_ 源：先绑盘→再调用盘内资源）</span>
+        </div>
+        <div className="row" style={{ flexWrap: 'wrap' }}>
+          <select value={driveProv} onChange={(e) => setDriveProv(e.target.value)}>
+            {['ali', 'alipan', 'uc', 'quark', 'pan', 'baidu', 'pansou'].map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+          <input style={{ flex: 1, minWidth: 220 }} placeholder="粘贴 token（refresh_token / 授权串；随源 jar 文档）" value={driveTok} onChange={(e) => setDriveTok(e.target.value)} />
+          <button disabled={!driveTok.trim() || !driveProv.trim()} onClick={saveDrive}>保存绑定</button>
+          {viaWeb ? (
+            <button disabled={webBusy} onClick={doWebLogin} title={`${labelOf(driveProv)}：打开网盘登录页，用 App 扫其中二维码后自动写入绑定（不动过期的应用内码，最可靠）`}>
+              {webBusy ? '登录中…' : '📱 扫码登录'}
+            </button>
+          ) : viaCas ? (
+            <button disabled={qrBusy} onClick={startQrLogin} title={`${labelOf(driveProv)}：应用内二维码，扫码授权后自动写入绑定`}>
+              {qrBusy ? '…' : '📱 扫码获取'}
+            </button>
+          ) : (
+            <span className="muted" style={{ fontSize: 11 }}>暂不支持扫码，请填 token 保存</span>
+          )}
+          <span className="muted" style={{ fontSize: 10 }}>夸克/UC/百度「扫码登录」=弹网页二维码最稳；阿里走应用内码；其它手动粘贴</span>
+        </div>
+        {driveMsg && <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>{driveMsg}</div>}
+        {Object.keys(drives).length > 0 && (
+          <div className="row" style={{ flexWrap: 'wrap', marginTop: 6 }}>
+            {Object.entries(drives).map(([p, t]) => (
+              <span key={p} className="tag" style={{ display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'default' }}>
+                {p} <span className="muted">已绑定</span>
+                <button className="linkbtn danger" onClick={() => delDrive(p)}>解绑</button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+          <b>绑定即注入</b>：保存后，宿主会在每次调用 jar(dex) 蜘蛛前，把这里绑定的 token 按「provider 名」实时并入该源 <code>ext</code> JSON（同名键覆盖，蜘蛛 <code>init(Context,ext)</code> 即可读到）。使用时在目标源的 ext 里写好对应键名（如阿里云盘族常见 <code>{'{ "ali": "" }'}</code> / <code>{'{ "alipan": "" }'}</code>）再保存即可生效，无需重启。具体键名与获取步骤以各 jar 自带说明为准（不同源族写法不同）；未声明 ext 的源不会被强塞。
+        </div>
+      </div>
+
+      {/* 外挂字幕：assrt token 配置（用户自填，仅作接口调用） */}
+      <div className="card" id="cfg-subtitle" style={{ padding: 12, marginBottom: 16 }}>
+        <div className="row" style={{ marginBottom: 8 }}>
+          <span className="muted" style={{ fontWeight: 600 }}>外挂字幕（assrt 在线检索）</span>
+        </div>
+        <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <input
+            type="password"
+            placeholder="粘贴你的 assrt.net token…"
+            value={subToken}
+            style={{ flex: 1 }}
+            onChange={(e) => { setSubToken(e.target.value); setSubTokenSaved(false); }}
+          />
+          <button className="primary" disabled={!subToken.trim()} onClick={async () => {
+            await client.subtitleSet({ assrtToken: subToken.trim() }).catch(() => undefined);
+            setSubTokenSaved(true);
+          }}>保存</button>
+        </div>
+        <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+          {subTokenSaved ? '✓ 已保存。播放器中点「字幕」即可按当前剧集在线检索。' : '在 assrt.net 免费注册后，会员中心可获取一个 token（无需付费）。填写后即可在线检索中文字幕。'}
+        </div>
+        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+          提示：伪射手域名已失效、字幕库/SubHD 需浏览器反爬破解，故在线字幕统一走 assrt 公开 API。
+        </div>
+      </div>
+
+      {/* ===== 五、外观 ===== */}
+      </>
+      )}
+
+      {/* ===== 五、外观 ===== */}
+      {tab === 'appearance' && (
+      <>
+      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>五、外观</h4>
+{/* 外观：亮/深色模式（Mica 表层随主题切换） */}
+      <div className="card" id="cfg-appearance" style={{ padding: 12, marginBottom: 16 }}>
+        <div className="row" style={{ marginBottom: 8 }}>
+          <span className="muted" style={{ fontWeight: 600 }}>外观主题</span>
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          {(Object.entries({
+            dark: '🌙 深色',
+            light: '☀️ 亮色',
+          }) as [Theme, string][]).map(([t, label]) => (
+            <span
+              key={t}
+              className={`tag ${theme === t ? 'active' : ''}`}
+              onClick={() => {
+                setTheme(t);
+                applyTheme(t);
+              }}
+              title={t === 'dark' ? '深色模式（默认）' : '亮色模式'}
+            >
+              {label} {theme === t ? '✓' : ''}
+            </span>
+          ))}
+        </div>
+        <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+          选择后立即应用，并保存以供下次启动沿用。窗口将使用 Windows Mica 材质，表层随所选主题呈现半透明磨砂质感。
+        </div>
+      </div>
+
+      </>
+      )}
+
+      {/* ===== 六、快捷键（老板键） ===== */}
+      {tab === 'shortcut' && (
+      <>
+      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>六、快捷键（老板键）</h4>
+{/* 老板键：全局快捷键一键隐藏/恢复（视频自动暂停静音） */}
+      <div className="card" id="cfg-shortcut" style={{ padding: 12, marginBottom: 16 }}>
+        {bossKey ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div className="row" style={{ alignItems: 'center', gap: 10 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={bossKey.enabled}
+                  onChange={(e) => setBossKey((b) => (b ? { ...b, enabled: e.target.checked } : b))}
+                />
+                <span style={{ fontWeight: 600 }}>启用老板键</span>
+              </label>
+              <span className="muted" style={{ fontSize: 11 }}>
+                当前：{bossKey.enabled ? accelDisplay(bossKey.accel || 'CommandOrControl+Shift+B') : '未启用'}
+              </span>
+            </div>
+            <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+              <span className="muted" style={{ fontSize: 11, flex: 'none' }}>快捷键：</span>
+              <input
+                style={{ width: 220, fontFamily: 'monospace' }}
+                value={bossAccelDraft || accelDisplay(bossKey.accel || 'CommandOrControl+Shift+B')}
+                placeholder="按 Ctrl + Shift + B 等组合"
+                readOnly
+                onKeyDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const combo = comboFromEvent(e);
+                  if (combo) {
+                    setBossAccelDraft(combo);
+                    setBossMsg(null);
+                  }
+                }}
+              />
+              <span className="muted" style={{ fontSize: 11 }}>点击输入框后直接按下想要的组合</span>
+            </div>
+            <div className="muted" style={{ fontSize: 11, lineHeight: 1.7 }}>
+              按下快捷键：视频自动<b>暂停并静音</b>，软件最小化且<b>隐藏任务栏图标</b>；再次按下恢复刚刚的播放状态
+              （正常模式恢复正常窗口，小窗口模式恢复小窗口）。快捷键为<b>全局生效</b>，即使焦点不在本软件也能触发。
+            </div>
+            <div className="row" style={{ alignItems: 'center', gap: 10 }}>
+              <button className="primary" onClick={() => void saveBossKey()}>保存老板键</button>
+              {bossKey.enabled && bossAccelDraft && (
+                <button onClick={() => setBossAccelDraft('')}>取消修改</button>
+              )}
+              {bossMsg && (
+                <span className={bossMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0 }}>
+                  {bossMsg.text}
+                </span>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="empty">加载中…</div>
+        )}
+      </div>
+
+      </>
+      )}
+
+            {/* 网盘扫码弹层 */}
       {qrOpen && (
         <div
           style={{

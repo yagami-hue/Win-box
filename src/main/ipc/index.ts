@@ -9,10 +9,12 @@ import { clearAppCache } from '../util/cacheClean';
 import { join } from 'node:path';
 import { IPC } from '../../shared/ipc-channels';
 // 独立播放器窗口
-import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow } from '../player/PlayerWindow';
+import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow } from '../player/PlayerWindow';
+// 老板键
+import { bossKey, BOSS_DEFAULT_ACCEL } from '../bossKey';
 import { ok } from '../../shared/ipc-result';
 import type { IpcMainInvokeEvent } from 'electron';
-import type { SourceBean, SourceMoveDirection, SourceUpdatePatch } from '../../shared/types';
+import type { BossKeySettings, SourceBean, SourceMoveDirection, SourceUpdatePatch } from '../../shared/types';
 
 function winOf(e: IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(e.sender);
@@ -42,7 +44,9 @@ export function registerIpc(host: SpiderHost): void {
   registerHandler(IPC.THEME_SET, (_e: any, theme: string) => {
     nativeTheme.themeSource = theme === 'light' ? 'light' : theme === 'dark' ? 'dark' : 'system';
     const w = winOf(_e as IpcMainInvokeEvent);
-    if (w) w.setBackgroundColor('rgba(0,0,0,0)');
+    // ★ 不透明底色：对齐主窗口 createWindow 的修复（透明背景在放大/最大化时残影异形）
+    const dark = nativeTheme.shouldUseDarkColors;
+    if (w) w.setBackgroundColor(dark ? '#0a0c10' : '#dce4ec');
   }, log);
   // 应用图标 dataURL（标题栏/窗口内展示与进程图标一致）
   registerHandler(IPC.APP_ICON, () => {
@@ -94,6 +98,14 @@ export function registerIpc(host: SpiderHost): void {
   registerHandler(IPC.SUBTITLE_SET, (_e: any, patch: any) => host.subtitleSetSettings(patch || {}), log);
   registerHandler(IPC.SUBTITLE_SEARCH, (_e: any, name: string) => host.subtitleSearch(String(name)), log);
   registerHandler(IPC.SUBTITLE_FETCH, (_e: any, cand: any) => host.subtitleFetch(cand), log);
+  // 弹幕（弹弹play）
+  registerHandler(IPC.DANMAKU_GET, () => host.danmakuGetSettings(), log);
+  registerHandler(IPC.DANMAKU_SET, (_e: any, patch: any) => host.danmakuSetSettings(patch || {}), log);
+  registerHandler(IPC.DANMAKU_SEARCH, (_e: any, name: string) => host.danmakuSearch(String(name)), log);
+  registerHandler(IPC.DANMAKU_EPISODES, (_e: any, bangumiId: number, animeTitle?: string) => host.danmakuEpisodes(Number(bangumiId), animeTitle ? String(animeTitle) : undefined), log);
+  registerHandler(IPC.DANMAKU_FETCH, (_e: any, episodeId: number) => host.danmakuFetch(Number(episodeId)), log);
+  // TMDB 元数据补全（缺封面/缺简介兜底；凭据内置密文，仅查询）
+  registerHandler(IPC.META_SEARCH, (_e: any, name: string, year?: string) => host.metaSearch(String(name || ''), year ? String(year) : undefined), log);
   registerHandler(IPC.CFG_MERGE_EXPORT, (_e: any, ids: string[]) => host.mergeProfilesExport(ids), log);
   registerHandler(IPC.CFG_EXPORT_SAVE, async (_e: any, a: { content: string; defaultName?: string }) => {
     const w = winOf(_e as IpcMainInvokeEvent);
@@ -105,6 +117,22 @@ export function registerIpc(host: SpiderHost): void {
     if (r.canceled || !r.filePath) return { saved: false, path: '' };
     writeFileSync(r.filePath, a.content, 'utf-8'); // 只写新文件，绝不改动任何原始文件
     return { saved: true, path: r.filePath };
+  }, log);
+  // ★ 播放网盘资源未绑定 cookie → 从任意窗口请求主窗口跳到「配置 → 账号与凭据」tab
+  //   播放器窗口没有绑定 UI，必须落到主窗口操作。
+  registerHandler(IPC.CFG_GOTO_ACCOUNT, () => {
+    const pwin = playerWindow();
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w === pwin || w.isDestroyed()) continue;
+      try {
+        if (w.isMinimized()) w.restore();
+        w.show();
+        w.focus();
+        w.webContents.send(IPC.NAV_CFG_ACCOUNT);
+      } catch { /* ignore */ }
+      break;
+    }
+    return true;
   }, log);
   registerHandler(IPC.CFG_IMPORT_JSON, async (_e: any, a: { json: string }) => {
     const r = await host.importConfig({ json: a.json });
@@ -131,9 +159,31 @@ export function registerIpc(host: SpiderHost): void {
   }, log);
   registerHandler(IPC.PLAYER_IS_OPEN, () => ({ open: isPlayerOpen() }), log);
   registerHandler(IPC.PLAYER_GET_INIT, () => ({ open: isPlayerOpen() }), log);
+  registerHandler(IPC.PLAYER_SET_MINI, (_e: any, isMini: boolean) => {
+    playerSetMini(!!isMini);
+    return { mini: playerIsMini() };
+  }, log);
+  registerHandler(IPC.PLAYER_IS_MINI, () => ({ mini: playerIsMini() }), log);
   registerHandler('player:close', () => {
     closePlayerWindow();
     return { ok: true };
+  }, log);
+
+  // ---- 老板键（全局快捷键隐藏/恢复窗口）----
+  registerHandler(IPC.BOSS_GET, () => bossKey.settings, log);
+  registerHandler(IPC.BOSS_SET, (_e: any, patch: Partial<BossKeySettings>) => {
+    const cur = bossKey.settings;
+    bossKey.settings = {
+      enabled: patch?.enabled ?? cur.enabled,
+      accel: (patch?.accel ?? cur.accel).trim() || BOSS_DEFAULT_ACCEL,
+    };
+    const registered = bossKey.apply();
+    return { settings: bossKey.settings, registered: registered || !bossKey.settings.enabled };
+  }, log);
+  // ---- 夸克落盘文件清理（渲染层播放页/播放器页卸载时触发；删除异步执行，失败会持久化重试）----
+  registerHandler(IPC.QUARK_CLEANUP, () => {
+    void host.quarkDeletePending().catch(() => undefined);
+    return true;
   }, log);
 
   registerHandler(IPC.LIVE_LOAD, (_e: any, index: number) => host.loadLive(index), log);
