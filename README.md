@@ -40,3 +40,6 @@ npm run build:renderer# vite 渲染层
 ## 许可
 
 代码采用 MIT 许可证（见 [LICENSE](LICENSE)）。请遵守第三方软件（蜘蛛 jar、运行时、壳等）各自的版权与许可。
+
+## 赞赏
+如果你认可我的项目，欢迎在爱发电对我赞赏https://afdian.com/a/WinBox
