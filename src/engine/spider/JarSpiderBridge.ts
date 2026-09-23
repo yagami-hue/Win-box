@@ -10,6 +10,7 @@ import type { EngineHost } from '../ports';
 import { md5Hex } from '../util/md5';
 import { NullLogger } from '../util/logger';
 import { buildZip, listZipEntries, looksLikeZip, readZipEntries, type ZipEntryData } from '../util/syncZip';
+import { SpiderProcPool, poolEnabled, servePoolKey } from './SpiderProcPool';
 
 export interface JarBridgeOptions {
   /** resources/jvm 目录（含 jre/d2j/stubs/libs） */
@@ -54,6 +55,9 @@ export class JarSpiderBridge {
   private lastSpiderReason = '';
   /** 当前存活的 JVM 子进程（退出时统一终止，防止残留） */
   private activeChildren = new Set<import('node:child_process').ChildProcess>();
+  /** ★ 子进程常驻复用池（--serve/-serve；进程复用加速首页/搜索；单测与显式关闭时禁用） */
+  private readonly pool: SpiderProcPool | null;
+  private readonly poolReclaimTimer?: ReturnType<typeof setInterval>;
 
   constructor(opts: JarBridgeOptions, private host?: EngineHost) {
     this.jvmDir = opts.jvmDir;
@@ -64,6 +68,25 @@ export class JarSpiderBridge {
     mkdirSync(this.cacheDir, { recursive: true });
     // ★ 老版本留下的转换产物可能缺 assets（v1 格式）→ 必须作废重转，否则本轮修复不生效
     this.ensureCacheVersion();
+    // 池默认启用（生产）；VITEST 或 TVBOX_DISABLE_SPIDER_POOL=1 关闭（单测走一次性路径，argv 断言零改动）
+    if (poolEnabled()) {
+      this.pool = new SpiderProcPool((spec) => {
+        const child = spawn(spec.exe, spec.serveArgv, {
+          windowsHide: true,
+          // ★ serve 进程只读 stdout（池按物理行分帧）；stderr 无人消费会阻塞蜘蛛
+          //   （大量源往 stderr 打日志可写满 64KB 管道 → 子进程挂死）→ 直接丢弃
+          stdio: ['pipe', 'pipe', 'ignore'],
+          ...(spec.env ? { env: { ...process.env, ...spec.env } } : {}),
+        });
+        this.activeChildren.add(child);
+        child.on('exit', () => this.activeChildren.delete(child));
+        return child;
+      });
+      // 空闲进程每 15s 回收一次（30s 无请求即杀，保留每 key 1 个热进程）
+      this.poolReclaimTimer = this.pool.startReclaimTimer();
+    } else {
+      this.pool = null;
+    }
   }
 
   get defaultJar(): string {
@@ -403,6 +426,20 @@ export class JarSpiderBridge {
       ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []),
       'SpiderRunner', jarPaths.join(';'), className, method, ...args,
     ];
+    // ★ 进程池：常驻 JVM（--serve）跨请求复用 → 二次调用跳过冷启动。
+    //   serve argv = javaPrefix + [SpiderRunner, --serve, cp]（cp 已含 shim jar）。
+    //   失败（进程崩溃/超时/传输错误 → resolve('')）回退一次性路径保底。
+    if (this.pool) {
+      const serveArgv = [...this.jvmPrefix(cp), ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []), 'SpiderRunner', '--serve', cp];
+      const key = servePoolKey(this.javaExe(), serveArgv);
+      try {
+        const out = await this.poolSubmit(this.javaExe(), key, serveArgv, className, method, args);
+        if (out !== '') return out; // 进程可复用且正常返回
+        // out==='' 可能是蜘蛛空结果或进程失效；为保语义一致回退一次性（空结果场景一次性也会返回 ''）→ 安全
+      } catch {
+        /* 池异常 → 回退一次性 */
+      }
+    }
     return this.runSubprocess(this.javaExe(), argv, className, method, timeoutMs);
   }
 
@@ -420,7 +457,38 @@ export class JarSpiderBridge {
     const pyExe = join(dir, 'python.exe');
     const runner = join(dir, 'runner.py');
     const argv = [runner, pyPath, clsName, method, ...args];
+    // ★ 进程池：常驻 Python（-serve）跨请求复用（服务端循环；env 带 PYTHONIOENCODING）
+    if (this.pool) {
+      const serveArgv = [runner, '-serve', pyPath, clsName];
+      const key = servePoolKey(pyExe, serveArgv, { PYTHONIOENCODING: 'utf-8' });
+      try {
+        const out = await this.poolSubmit(pyExe, key, serveArgv, clsName, method, args, { PYTHONIOENCODING: 'utf-8' });
+        if (out !== '') return out;
+      } catch {
+        /* 池异常 → 回退一次性 */
+      }
+    }
     return this.runSubprocess(pyExe, argv, clsName, method, timeoutMs ?? 100000, { PYTHONIOENCODING: 'utf-8' });
+  }
+
+  /** 进程池提交：同类请求复用同一 serve 进程。返回蜘蛛结果字符串（进程失效/超时 → ''）。 */
+  private async poolSubmit(
+    exe: string,
+    key: string,
+    serveArgv: string[],
+    className: string,
+    method: string,
+    args: string[],
+    env?: Record<string, string>,
+  ): Promise<string> {
+    if (!this.pool) return '';
+    const id = `${exe.includes('python') ? 'py' : 'jvm'}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise<string>((resolve) => {
+      void this.pool!
+        .submit(key, { exe, serveArgv, env, key }, { id, className, method, args })
+        .then(resolve)
+        .catch(() => resolve(''));
+    });
   }
 
   /** python 运行时版本目录（main 用 3.11；win7-legacy 同步时换 3.8.x —— 3.11.2+ 弃 Win7） */
@@ -718,8 +786,10 @@ export class JarSpiderBridge {
     }
   }
 
-  /** 终止所有存活 JVM 子进程（应用退出时调用，确保无残留进程） */
+  /** 终止所有存活 JVM 子进程 + 池（应用退出时调用，确保无残留进程/定时器） */
   dispose(): void {
+    if (this.poolReclaimTimer) clearInterval(this.poolReclaimTimer);
+    this.pool?.dispose();
     for (const child of this.activeChildren) {
       try {
         child.kill();
