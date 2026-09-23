@@ -133,7 +133,7 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
     const busy = ['a', 'b', 'c', 'd'].map((id) => pool.submit('k1', SPEC, REQ(id))); // 占满 PER_KEY_CAP
     const queued = pool.submit('k1', SPEC, REQ('q'));
     await vi.advanceTimersByTimeAsync(16_000); // 排队等待上限 15s
-    expect(await queued).toEqual({ ok: false, data: '' });
+    expect(await queued).toEqual({ ok: false, data: '', reason: 'queue-timeout' });
     expect(killed).toHaveLength(0); // 排队超时不牵连进程
     // 收尾：进程仍在跑（各自等待自己的请求超时）→ 清理避免悬挂
     await vi.advanceTimersByTimeAsync(20_000);
@@ -163,7 +163,8 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
     const pool = new SpiderProcPool(() => muteChild(() => killed.push('kill')) as never);
     const p = pool.submit('k1', SPEC, REQ('t'), 8000); // 源级超时 8s
     await vi.advanceTimersByTimeAsync(8_100);
-    expect(await p).toEqual({ ok: false, data: '' });
+    // ★ reason='timeout' 是「不回退一次性」的判据（见 JarSpiderBridge）：死源只等一个超时，不再 ×2
+    expect(await p).toEqual({ ok: false, data: '', reason: 'timeout' });
     expect(killed).toHaveLength(1);
   });
 
@@ -177,7 +178,7 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
     const p = pool.submit('k1', SPEC, REQ('c'));
     await new Promise((r) => setTimeout(r, 5));
     (children[0] as unknown as EventEmitter).emit('exit', 1);
-    expect(await p).toEqual({ ok: false, data: '' });
+    expect(await p).toEqual({ ok: false, data: '', reason: 'exit' });
   });
 
   it('全局上限：额度用尽时回收最久空闲进程（LRU）后再复用额度', async () => {

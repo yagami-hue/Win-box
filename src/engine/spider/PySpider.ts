@@ -93,14 +93,15 @@ export class PySpider extends Spider {
   /**
    * 调用 .py 方法。第一段 arg = ext（runner.py 喂给 init），其余为方法实参。
    * 脚本下载/缓存失败时直接抛 SourceProblemError（A1），不静默返回空串。
+   * @param timeoutMs 可选调用预算（搜索会传更紧的值）；缺省沿用 callPython 的 100s 上限。
    */
-  private async call(method: string, ...args: string[]): Promise<string> {
+  private async call(method: string, args: string[], timeoutMs?: number): Promise<string> {
     if (!(await this.ensureReady())) {
       // A1：脚本下载/缓存失败不再静默返回空串，直接抛错上屏
       throw new SourceProblemError('SPIDER_ERROR', this.loadError, { sourceKey: this.siteKey });
     }
     try {
-      return await this.bridge.callPython(this.pyPath, this.clsName, method, [this.enrichedExt(), ...args]);
+      return await this.bridge.callPython(this.pyPath, this.clsName, method, [this.enrichedExt(), ...args], timeoutMs);
     } catch (e) {
       // ★ 运行时缺失/下载失败 → 明确提示（不静默空结果）
       throw new SourceProblemError(
@@ -121,35 +122,35 @@ export class PySpider extends Spider {
   }
 
   homeContent(_filter: boolean): Promise<string> {
-    return this.call('homeContent');
+    return this.call('homeContent', []);
   }
   homeVideoContent(): Promise<string> {
-    return this.call('homeVideoContent');
+    return this.call('homeVideoContent', []);
   }
   categoryContent(tid: string, pg: string, _filter: boolean, extend: Record<string, string>): Promise<string> {
     // extend 以 JSON 字符串传入，Python 侧 json.loads 解析
-    return this.call('categoryContent', tid, pg, JSON.stringify(extend || {}));
+    return this.call('categoryContent', [tid, pg, JSON.stringify(extend || {})]);
   }
   detailContent(ids: string[]): Promise<string> {
     // ids 以 JSON 数组字符串传入，runner.py 用 json.loads 还原为 Python list
-    return this.call('detailContent', JSON.stringify(ids || []));
+    return this.call('detailContent', [JSON.stringify(ids || [])]);
   }
-  searchContent(key: string, _quick: boolean): Promise<string> {
-    return this.call('searchContent', key);
+  searchContent(key: string, _quick: boolean, timeoutMs?: number): Promise<string> {
+    return this.call('searchContent', [key], timeoutMs);
   }
-  searchContentPage(key: string, _quick: boolean, pg: string): Promise<string> {
+  searchContentPage(key: string, _quick: boolean, pg: string, timeoutMs?: number): Promise<string> {
     // 多占一个空位，让 pg 落到 runner.py 的 r2，触发 3 参 search 签名
-    return this.call('searchContent', key, '', pg);
+    return this.call('searchContent', [key, '', pg], timeoutMs);
   }
   playerContent(flag: string, id: string, vipFlags: string[]): Promise<string> {
     // A2：vipFlags 以 JSON 数组传入，runner.py 解析成 list 交给 python 蜘蛛
-    return this.call('playerContent', flag, id, JSON.stringify(vipFlags || []));
+    return this.call('playerContent', [flag, id, JSON.stringify(vipFlags || [])]);
   }
   liveContent(url: string): Promise<string> {
-    return this.call('liveContent', url);
+    return this.call('liveContent', [url]);
   }
   proxy(params: Record<string, string>): Promise<string> {
-    return this.call('proxy', JSON.stringify(params || {}));
+    return this.call('proxy', [JSON.stringify(params || {})]);
   }
   async destroy(): Promise<void> {
     this.ready = false;

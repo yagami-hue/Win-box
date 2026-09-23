@@ -7,7 +7,7 @@ import type { SourceBean, VodItem, VodDetail, PlayResult } from '../../shared/ty
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import { CmsSource, type CmsResult } from './CmsSource';
 import { parseFilters, type SortClass } from '../parse/Movie';
-import { SpiderFactory, type SpiderFactoryOptions } from '../spider/SpiderFactory';
+import { SpiderFactory, sourceTimeoutMs, type SpiderFactoryOptions } from '../spider/SpiderFactory';
 import type { Spider } from '../spider/Spider';
 import { parseEpisodes } from './VodNormalizer';
 import { SourceProblemError, SOURCE_PROBLEM_TEXT } from '../spider/errors';
@@ -92,15 +92,19 @@ export class SourceViewModel {
     this.throwUnsupported(bean, 'detail');
   }
 
-  /** 搜索 */
-  async search(bean: SourceBean, wd: string, quick = false, timeoutMs = 20000): Promise<VodItem[]> {
+  /**
+   * 搜索。timeoutMs 为调用方预算（聚合搜索传更紧的值）；缺省用**源声明 timeout**，
+   * 子进程蜘蛛据此设超时（死源最多占一个预算，不再 ×2，见 JarSpiderBridge 的超时语义）。
+   */
+  async search(bean: SourceBean, wd: string, quick = false, timeoutMs?: number): Promise<VodItem[]> {
     const { type, api, key } = bean;
+    const budget = timeoutMs && timeoutMs > 0 ? timeoutMs : sourceTimeoutMs(bean);
     if (type === 0 || type === 1 || type === 4) {
-      return this.cms.search(api, type, key, wd, this.t(bean, timeoutMs));
+      return this.cms.search(api, type, key, wd, this.t(bean, budget));
     }
     if (type === 3) {
       const sp = this.factory.getCSP(bean, this.host);
-      const json = await Promise.resolve(sp.searchContent(wd, quick));
+      const json = await Promise.resolve(sp.searchContent(wd, quick, budget));
       return this.normalizeSpiderSearch(json, key);
     }
     this.throwUnsupported(bean, 'search');

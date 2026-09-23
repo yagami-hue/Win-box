@@ -3,12 +3,16 @@
 // 来源：m.douban.com rexxar 移动端搜索接口（无 key、实测 200 可用；官方 api.douban.com/v2 早已关闭，
 //       网页 j/search 已 403 反爬；第三方聚合均为付费且延迟高）。
 // 封面：豆瓣图床 qnmob3-sign.doubanio.com / img*.doubanio.com，经本地 /img 中继出图（防 DNS 污染/无 Referer）。
-import { request as undiciRequest } from 'undici';
+import { request as undiciRequest, Agent } from 'undici';
 import { createDohAgent } from '../net/DnsResolver';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import type { Logger, MetaHit } from '../../shared/types';
 
-const agent = createDohAgent();
+// ★ 2026-09-23：豆瓣是**国内**站点，走系统 DNS 直连更快更稳（DoH 只是为 TMDB 这类被污染域名准备的）；
+//   实测系统 DNS 直连 m.douban.com 可达（400/200 都说明连上了）。
+//   DoH Agent 作为兜底：系统 DNS 失败（异常/被劫持）时再试一次。
+const agent = new Agent({ connect: { timeout: 15000 } });
+const dohFallback = createDohAgent();
 const SEARCH_API = 'https://m.douban.com/rexxar/api/v2/search';
 /** 豆瓣封面图床域名（/img 白名单同源，见 LocalProxyServer.imgProxy） */
 const DOUBAN_IMG_HOST = 'doubanio.com';
@@ -67,23 +71,27 @@ interface RexxarResp {
 }
 
 async function getJson(url: string, headersTimeoutMs: number): Promise<RexxarResp> {
-  try {
-    const r = await undiciRequest(url, {
-      method: 'GET',
-      headers: {
-        accept: 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
-        Referer: 'https://m.douban.com/',
-      },
-      headersTimeout: headersTimeoutMs,
-      bodyTimeout: headersTimeoutMs,
-      dispatcher: agent,
-    });
-    const text = Buffer.from(await r.body.arrayBuffer()).toString('utf-8');
-    return { status: r.statusCode, text };
-  } catch (e) {
-    return { status: 0, text: (e as Error).message || String(e) };
+  for (const dispatcher of [agent, dohFallback]) {
+    try {
+      const r = await undiciRequest(url, {
+        method: 'GET',
+        headers: {
+          accept: 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+          Referer: 'https://m.douban.com/',
+        },
+        headersTimeout: headersTimeoutMs,
+        bodyTimeout: headersTimeoutMs,
+        dispatcher,
+      });
+      const text = Buffer.from(await r.body.arrayBuffer()).toString('utf-8');
+      return { status: r.statusCode, text };
+    } catch (e) {
+      // 系统 DNS 失败 → 再试 DoH；DoH 也失败 → 记 0（调用方不落缓存，下次重试）
+      if (dispatcher === dohFallback) return { status: 0, text: (e as Error).message || String(e) };
+    }
   }
+  return { status: 0, text: 'network failed' };
 }
 
 /**

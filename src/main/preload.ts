@@ -30,6 +30,12 @@ const api = {
     cfgProfiles: () => invoke(IPC.CFG_PROFILES),
     vodDebug: (key: string) => invoke(IPC.VOD_DEBUG, key),
     audit: () => invoke(IPC.VOD_AUDIT),
+    /** ★ 聚合搜索逐源进度（边搜边出）：订阅后返回退订函数 */
+    onSearchAllProgress: (cb: (ev: unknown) => void) => {
+      const l = (_e: unknown, ev: unknown) => cb(ev);
+      ipcRenderer.on(IPC.VOD_SEARCH_ALL_PROGRESS, l);
+      return () => { ipcRenderer.removeListener(IPC.VOD_SEARCH_ALL_PROGRESS, l); };
+    },
     cacheClear: () => invoke<{ freedBytes: number; cleared: string[]; failed: string[] }>(IPC.CACHE_CLEAR),
     // ★ 播放网盘资源未绑定 cookie → 请求主窗口跳到「配置 → 账号与凭据」tab
     gotoAccount: () => invoke<void>(IPC.CFG_GOTO_ACCOUNT),

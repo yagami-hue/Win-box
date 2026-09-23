@@ -37,7 +37,7 @@ import { sourceTimeoutMs } from '../../engine/spider/SpiderFactory';
 import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSearch';
 import { classifyHealth } from '../../engine/vod/sourceHealth';
 import { mergeSubscriptions, type MergeInput } from '../../engine/config/mergeSubscriptions';
-import type { AuditItem, SearchAllReport } from '../../shared/types';
+import type { AuditItem, SearchAllReport, SearchAllProgressEvent } from '../../shared/types';
 import { SubtitleStore } from '../subtitle/SubtitleStore';
 import { assrtSearch, assrtFetch, assrtSearchMulti } from '../subtitle/assrtProvider';
 import { buildSearchQuery, normalizeTitle, normalizeSubtitleQuery, titleVariants } from '../../engine/subtitle/normalizeQuery';
@@ -50,6 +50,7 @@ import type { MetaHit } from '../../shared/types';
 import { MetaStore } from '../meta/MetaStore';
 import { tmdbSearchTitle, metaCacheKey, metaQueryVariants } from '../meta/tmdbProvider';
 import { doubanSearchTitle, isCjkName, DOUBAN_CACHE_PREFIX } from '../meta/doubanProvider';
+import { so360SearchCover, SO360_CACHE_PREFIX } from '../meta/so360Provider';
 
 /** 豆瓣兜底最多尝试的名称变体数（原名 + 净化名；再多只会多打外部请求） */
 const DOUBAN_MAX_VARIANTS = 2;
@@ -58,6 +59,12 @@ const DOUBAN_MAX_VARIANTS = 2;
 const SEARCH_ALL_WORKERS = 6;
 /** 聚合搜索总体预算：到点先返回已拿到的结果，未完成的源标注超时（不再无限等） */
 const SEARCH_ALL_BUDGET_MS = 40_000;
+/**
+ * ★ 单源搜索超时上限（10s）：源声明 timeout 多为 15s，而死源/卡住的源会**占满整个预算**。
+ * 实测（本机 33 源全源搜索）：卡住的源按 15s 计，收敛这一项直接决定总时长；
+ * 正常源热进程平均 2.6s、最慢约 6s，10s 有充足余量。
+ */
+const SEARCH_ALL_SOURCE_MAX_MS = 10_000;
 
 /** Promise 竞速超时（超时即拒；落地后清掉计时器，避免残留定时器） */
 function raceTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
@@ -99,6 +106,11 @@ export class SpiderHost {
   private report: ImportReport | null = null;
   private sourceMap = new Map<string, SourceBean>();
   private lastSpiderJar = '';
+  /**
+   * ★ 聚合搜索逐源进度回调（IPC 层注入）：每完成一个源推一条给渲染层 → 结果边搜边出。
+   * 无回调（单测/CLI）时退化为「只在结束时返回完整报告」。
+   */
+  onSearchAllProgress?: (ev: SearchAllProgressEvent) => void;
 
   constructor() {
     const store = new JsonStore(join(cacheDir(), 'spider-local.json'));
@@ -437,6 +449,19 @@ export class SpiderHost {
         this.metaStore.cacheSet(dbKey, db, Date.now());
         if (db) return db;
       }
+      // ★ 最后一档：中文图片搜索（360 图片，无 key）。TMDB/豆瓣都没有条目时——
+      //   短剧/网文改编类「剧情式长片名」的常态——靠它兜住封面；带相关性过滤，宁缺勿错图。
+      for (const v of metaQueryVariants(n).slice(0, 1)) {
+        const soKey = `${SO360_CACHE_PREFIX}${metaCacheKey(v, '')}`;
+        const diskSo = this.metaStore.cacheGet(soKey);
+        if (diskSo) {
+          if (diskSo.hit) return diskSo.hit;
+          continue;
+        }
+        const so = await so360SearchCover(this.logger, v);
+        this.metaStore.cacheSet(soKey, so, Date.now());
+        if (so) return so;
+      }
       return null;
     } catch (e) {
       this.logger.e('meta:搜索失败', e);
@@ -742,8 +767,17 @@ export class SpiderHost {
     });
     const results = new Array<AggSearchInput | null>(pool.length).fill(null);
     let cursor = 0;
+    let done = 0;
     const workerCount = Math.min(SEARCH_ALL_WORKERS, pool.length || 1);
     const deadline = Date.now() + SEARCH_ALL_BUDGET_MS;
+    /** 单源完成 → 记结果 + 推流式进度（渲染层边搜边出） */
+    const finish = (i: number, input: AggSearchInput): void => {
+      results[i] = input;
+      done++;
+      try {
+        this.onSearchAllProgress?.({ wd: term, source: input, done, total: pool.length });
+      } catch { /* 进度推送失败不影响搜索本身 */ }
+    };
     const run = async (): Promise<void> => {
       for (;;) {
         const i = cursor++;
@@ -752,27 +786,27 @@ export class SpiderHost {
         const t0 = Date.now();
         const budget = deadline - Date.now();
         if (budget <= 500) {
-          results[i] = {
+          finish(i, {
             key: b.key,
             name: b.name || b.key,
             status: 'error',
             error: `总体搜索已超时（>${Math.round(SEARCH_ALL_BUDGET_MS / 1000)}s），该源未执行`,
             ms: 0,
-          };
+          });
           continue;
         }
-        const toMs = Math.min(sourceTimeoutMs(b), budget);
+        const toMs = Math.min(sourceTimeoutMs(b), SEARCH_ALL_SOURCE_MAX_MS, budget);
         try {
-          const items = await raceTimeout(this.vm.search(b, term), toMs, `单源搜索超时（>${Math.round(toMs / 1000)}s）`);
-          results[i] = {
+          const items = await raceTimeout(this.vm.search(b, term, false, toMs), toMs + 500, `单源搜索超时（>${Math.round(toMs / 1000)}s）`);
+          finish(i, {
             key: b.key,
             name: b.name || b.key,
             status: items.length > 0 ? 'ok' : 'empty',
             items,
             ms: Date.now() - t0,
-          };
+          });
         } catch (e) {
-          results[i] = { key: b.key, name: b.name || b.key, status: 'error', error: (e as Error).message, ms: Date.now() - t0 };
+          finish(i, { key: b.key, name: b.name || b.key, status: 'error', error: (e as Error).message, ms: Date.now() - t0 });
         }
       }
     };

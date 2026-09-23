@@ -23,10 +23,15 @@ export interface ServeRequest {
   args: string[];
 }
 
+/** 池的失败原因（调用方据此决定是否回退一次性：执行超时不回退，见 JarSpiderBridge） */
+export type PoolFailReason = 'timeout' | 'queue-timeout' | 'exit' | 'spawn-error' | 'stdin' | 'lru' | 'idle' | 'dispose';
+
 /** 池的结果：ok=false 仅表示进程/传输层失败（调用方应回退一次性）；ok=true + data='' 是合法空结果 */
 export interface PoolResult {
   ok: boolean;
   data: string;
+  /** ok=false 时的失败原因（超时/退出/排队超时…） */
+  reason?: PoolFailReason;
 }
 
 export interface PendingEntry {
@@ -147,7 +152,7 @@ export class SpiderProcPool {
       timer: setTimeout(() => {
         const i = proc.queue.indexOf(entry);
         if (i >= 0) proc.queue.splice(i, 1);
-        resolve({ ok: false, data: '' }); // 排队超时 → 调用方回退一次性
+        resolve({ ok: false, data: '', reason: 'queue-timeout' }); // 排队超时 → 调用方回退一次性
       }, QUEUE_WAIT_MS),
     };
     proc.queue.push(entry);
@@ -173,9 +178,9 @@ export class SpiderProcPool {
     const line = JSON.stringify({ id: req.id, className: req.className, method: req.method, args: req.args });
     try {
       if (proc.child.stdin && proc.child.stdin.writable) proc.child.stdin.write(line + '\n');
-      else this.kill(proc, 'stdin-not-writable');
+      else this.kill(proc, 'stdin');
     } catch {
-      this.kill(proc, 'stdin-write-error');
+      this.kill(proc, 'stdin');
     }
   }
 
@@ -240,19 +245,19 @@ export class SpiderProcPool {
     return proc;
   }
 
-  /** 进程失效：拒绝 pending + 清队列 + 移除组；调用方按失败回退一次性路径 */
-  private kill(proc: Proc, reason: string): void {
+  /** 进程失效：拒绝 pending + 清队列 + 移除组；调用方按失败原因决定是否回退一次性路径 */
+  private kill(proc: Proc, reason: PoolFailReason): void {
     if (proc.dead) return;
     proc.dead = true;
     for (const p of proc.pending.values()) {
       clearTimeout(p.timer);
-      // 传输层失败：ok=false → 上层回退一次性再试
-      p.resolve({ ok: false, data: '' });
+      // 传输层失败：ok=false + reason → 上层决定是否回退一次性
+      p.resolve({ ok: false, data: '', reason });
     }
     proc.pending.clear();
     for (const q of proc.queue) {
       clearTimeout(q.timer);
-      q.resolve({ ok: false, data: '' });
+      q.resolve({ ok: false, data: '', reason });
     }
     proc.queue = [];
     try {

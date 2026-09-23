@@ -83,17 +83,17 @@ export default function DetailPage({
   const coverErr = (e: React.SyntheticEvent<HTMLImageElement>) => {
     const el = e.target as HTMLImageElement;
     const src = el.currentSrc || el.src || '';
+    // 源图中继（/img?u=…&ref=…）失败 → 置灰收手
+    if (/[?&]ref=/.test(src)) {
+      el.style.opacity = '0.2';
+      return;
+    }
     if (/\/img\?/.test(src)) {
       if (metaHit) setMetaHit(null);
       return;
     }
-    if (/\/play\?/.test(src)) {
-      // 中继重试也失败 → 置灰（TMDB 兜底已尽力，不再反复重试）
-      el.style.opacity = '0.2';
-      return;
-    }
     setSrcPicBad(true);
-    // ★ 源封面失败 → 先经本地 /play 中继重试一次（同源 Referer，破防盗链 403）
+    // ★ 源封面失败 → 先经本地 /img 中继重试一次（DoH + Referer 链，破防盗链与 DNS 污染）
     const relay = wrapImageUrlForRelay(src, navigator.userAgent);
     if (relay) setSrcPicRelay((prev) => prev || relay);
     else el.style.opacity = '0.2';

@@ -49,6 +49,8 @@ export const IPC = {
   VOD_DETAIL: 'vod:detail',
   VOD_SEARCH: 'vod:search',
   VOD_SEARCH_ALL: 'vod:searchAll',
+  /** 主进程 → 渲染层：聚合搜索逐源进度（边搜边出，见 SearchAllProgressEvent） */
+  VOD_SEARCH_ALL_PROGRESS: 'vod:searchAllProgress',
   VOD_AUDIT: 'vod:audit',
   CFG_MERGE_EXPORT: 'cfg:mergeExport',
   CFG_EXPORT_SAVE: 'cfg:exportSave',

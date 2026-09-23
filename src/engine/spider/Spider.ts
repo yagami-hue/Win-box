@@ -73,13 +73,18 @@ export abstract class Spider {
     return '';
   }
 
-  /** 搜索：quick=是否快速搜索 */
-  searchContent(key: string, quick: boolean): Promise<string> | string {
+  /**
+   * 搜索：quick=是否快速搜索。
+   * @param timeoutMs 可选的**调用方预算**（聚合搜索会传比源声明更紧的值以加速出结果；
+   *                  子进程蜘蛛据此设超时，缺省用源声明 timeout）。
+   */
+  searchContent(key: string, quick: boolean, timeoutMs?: number): Promise<string> | string {
+    void key; void quick; void timeoutMs;
     return '';
   }
 
-  searchContentPage(key: string, quick: boolean, pg: string): Promise<string> | string {
-    return this.searchContent(key, quick);
+  searchContentPage(key: string, quick: boolean, pg: string, timeoutMs?: number): Promise<string> | string {
+    return this.searchContent(key, quick, timeoutMs);
   }
 
   /** 播放信息：flag=播放源标识, id=剧集id, vipFlags=需解析的flag列表 */

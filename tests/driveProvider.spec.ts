@@ -2,26 +2,24 @@
 import { describe, it, expect } from 'vitest';
 import { matchDriveCookieProvider, wrapPlayUrl, driveUrlHost, wrapImageUrlForRelay } from '../src/shared/driveProvider';
 
-// ★ 2026-09-23：源封面防盗链兜底 —— 图裂的源图经本地 /play 中继重试（注入同源 Referer）
+// ★ 2026-09-23：源封面防盗链/DNS 污染兜底 —— 源图经本地 /img 中继（DoH + Referer 重试链）
 describe('wrapImageUrlForRelay', () => {
-  it('http(s) 源图 → 中继 URL（url + 同源 Referer）', () => {
+  it('http(s) 源图 → /img 中继（u + ref=同源 Referer）', () => {
     const r = wrapImageUrlForRelay('http://wim.xzjykj.com/upload/vod/a.jpg');
-    expect(r.startsWith('http://127.0.0.1:9978/play?')).toBe(true);
+    expect(r.startsWith('http://127.0.0.1:9978/img?')).toBe(true);
     const q = new URLSearchParams(r.split('?')[1]);
-    expect(q.get('url')).toBe('http://wim.xzjykj.com/upload/vod/a.jpg');
-    expect(q.get('referer')).toBe('http://wim.xzjykj.com/');
+    expect(q.get('u')).toBe('http://wim.xzjykj.com/upload/vod/a.jpg');
+    expect(q.get('ref')).toBe('http://wim.xzjykj.com/');
   });
 
-  it('携带 UA（渲染层传 navigator.userAgent）', () => {
-    const r = wrapImageUrlForRelay('https://img.example.com/a.png', 'Mozilla/5.0 X');
-    expect(new URLSearchParams(r.split('?')[1]).get('ua')).toBe('Mozilla/5.0 X');
+  it('中继地址带 &ref= 作为「源图中继」标识（渲染层据此区分 TMDB 补图失败）', () => {
+    expect(wrapImageUrlForRelay('https://img.example.com/a.png')).toMatch(/[?&]ref=/);
   });
 
   it('非 http(s) / 空 / 非法 → 空串（调用方保持原图）', () => {
     expect(wrapImageUrlForRelay('')).toBe('');
     expect(wrapImageUrlForRelay('data:image/png;base64,AAA')).toBe('');
     expect(wrapImageUrlForRelay('/relative/a.jpg')).toBe('');
-    expect(wrapImageUrlForRelay('http://127.0.0.1:9978/play?url=x')).toContain('/play?');
   });
 });
 

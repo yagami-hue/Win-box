@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { client } from '../api/client';
 import type { SourceBean, VodItem, SearchAllReport, AggVodItem, FilterGroup } from '../../shared/types';
 import { sourceAvailability } from '../../engine/vod/sourceAvailability';
-import { mergeSearchResults } from '../../engine/vod/aggSearch';
+import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSearch';
 import { uiMem, schedulePersist } from '../lib/uiMemory';
 import { getSessionSort, setSessionSort } from '../lib/sessionSort';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
@@ -31,6 +31,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const [searchAllSources, setSearchAllSources] = useState(false);
   /** 实际执行搜索时用的范围（结果区展示用，避免用户中途改勾选导致文案错位） */
   const [aggScope, setAggScope] = useState<'current' | 'all'>('current');
+  /** ★ 全源搜索进度（已完成/总源数）：让用户看到「边搜边出」的推进，而不是干等 */
+  const [aggProgress, setAggProgress] = useState<{ done: number; total: number } | null>(null);
   const keyRef = useRef('');
   const contentRef = useRef<HTMLDivElement>(null);
   const filtersRef = useRef<Record<string, string>>({});
@@ -109,8 +111,13 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const picErr = (it: VodItem) => (e: React.SyntheticEvent<HTMLImageElement>) => {
     const el = e.target as HTMLImageElement;
     const src = el.currentSrc || el.src || '';
+    // ★ 源图中继（/img?u=…&ref=…）失败 → 置灰收手（避免与「TMDB 补图失败」混淆）
+    if (/[?&]ref=/.test(src)) {
+      el.style.opacity = '0.15';
+      return;
+    }
     if (/\/img\?/.test(src)) {
-      // 失败的是 TMDB 补图（/img 中继 4xx/超时）→ 移除覆盖（不当作获取成功）
+      // 失败的是 TMDB/豆瓣 补图（/img 中继 4xx/超时）→ 移除覆盖（不当作获取成功）
       if (picOver[it.id] !== undefined) {
         setPicOver((prev) => {
           if (prev[it.id] === undefined) return prev;
@@ -121,12 +128,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       }
       return;
     }
-    // ★ 源封面失败（防盗链 403/坏图）→ 先经本地 /play 中继重试一次（注入同源 Referer），
-    //   同时触发 TMDB 幂等补查；中继也失败就置灰交占位，不再反复重试。
-    if (/\/play\?/.test(src)) {
-      el.style.opacity = '0.15';
-      return;
-    }
+    // ★ 源封面失败（防盗链/DNS 污染/坏图）→ 先经本地 /img 中继重试一次（DoH + Referer 链），
+    //   同时触发 TMDB/豆瓣幂等补查；中继也失败就置灰交占位，不再反复重试。
     setBadPics((prev) => (prev[it.id] ? prev : { ...prev, [it.id]: true }));
     ensureMetaSingle(it);
     const relay = wrapImageUrlForRelay(src, navigator.userAgent);
@@ -193,6 +196,10 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     const el = e.target as HTMLImageElement;
     const src = el.currentSrc || el.src || '';
     const k = aggKeyOf(it);
+    if (/[?&]ref=/.test(src)) {
+      el.style.opacity = '0.15';
+      return;
+    }
     if (/\/img\?/.test(src)) {
       setAggPicOver((prev) => {
         if (prev[k] === undefined) return prev;
@@ -441,6 +448,17 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       setAggScope('all');
       setAgg(null);
       setItems([]);
+      // ★ 边搜边出（2026-09-23）：订阅逐源进度，命中一个源就先渲染一批结果 ——
+      //   此前要等所有源跑完（慢源/死源多时要几十秒）界面全空，用户感受就是「搜索特别慢」。
+      //   进度事件带 wd 用于丢弃过期事件（用户已经改了关键词/换了范围）。
+      const acc: AggSearchInput[] = [];
+      setAggProgress(null);
+      const off = client.onSearchAllProgress((ev) => {
+        if (ev.wd !== term) return;
+        acc.push(ev.source);
+        setAgg(mergeSearchResults(acc));
+        setAggProgress({ done: ev.done, total: ev.total });
+      });
       try {
         const r = await client.searchAll(term);
         setAgg(r);
@@ -448,6 +466,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       } catch (e) {
         setErr(`聚合搜索失败：${(e as Error).message}`);
       } finally {
+        off();
+        setAggProgress(null);
         setLoading(false);
       }
       return;
@@ -545,7 +565,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         <span className="status" style={{ marginLeft: 'auto' }}>
           {loading
             ? aggScope === 'all'
-              ? '全源搜索中…（遍历全部源，可能较慢）'
+              ? `全源搜索中…${aggProgress ? `已完成 ${aggProgress.done}/${aggProgress.total} 个源（结果边搜边出）` : '（遍历全部源，结果边搜边出）'}`
               : '搜索中…'
             : aggMode
               ? `命中 ${agg?.items.length ?? 0} 条`

@@ -80,50 +80,65 @@ export class LocalProxyServer {
   }
 
   /**
-   * /img?u=<encoded image URL> —— TMDB/豆瓣封面出图中继。
-   * ★ 渲染层（Chromium）直连 image.tmdb.org / doubanio.com 在本机常被 DNS 污染/无 Referer → 图裂；
-   *   本地代理经 DoH 主进程拉取后透传字节，保证补全封面真实可显示。
-   * 安全：仅放行 TMDB 图床与豆瓣图床（白名单），避免成为任意 URL 开放代理。
-   */
-  private imgProxy(u: URL, res: ServerResponse): void {
-    const target = u.searchParams.get('u') || '';
-    // 白名单：TMDB（image.tmdb.org）+ 豆瓣（*.doubanio.com，2026-09-23 兜底接入）
-    const allowed =
-      /^https:\/\/image\.tmdb\.org\//i.test(target) ||
-      /^https:\/\/[^/]+\.doubanio\.com\//i.test(target);
-    if (!allowed) {
-      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('bad request');
-      return;
-    }
-    void (async () => {
-      try {
-        const r = await undiciRequest(target, {
-          method: 'GET',
-          headers: { accept: 'image/*', 'User-Agent': 'Win-Box/0.73' },
-          headersTimeout: 15000,
-          bodyTimeout: 30000,
-          dispatcher: imgAgent,
-        });
-        if (r.statusCode !== 200) {
-          await r.body.dump().catch(() => undefined);
-          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-          res.end('not found');
-          return;
-        }
-        res.writeHead(200, {
-          'Content-Type': String(r.headers['content-type'] || 'image/jpeg'),
-          'Cache-Control': 'public, max-age=86400',
-        });
-        for await (const chunk of r.body) res.write(chunk as Buffer);
-        res.end();
-      } catch (e) {
-        this.logger.w(`proxy /img 失败: ${e instanceof Error ? e.message : String(e)}`);
-        res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('proxy error');
-      }
-    })();
+ * /img?u=<encoded image URL>&ref=<encoded Referer?> —— 封面出图中继（TMDB / 豆瓣 / 任意源站图床）。
+ *
+ * ★ 2026-09-23 三处强化（用户报「还是有部分封面无内容，尤其 py 源」）：
+ *   ① **放开主机白名单**：源站图床五花八门，白名单无法穷举；本服务只监听 127.0.0.1，
+ *      与 /play 同级（/play 一直是任意 URL 中继），放开不新增暴露面。
+ *   ② **Referer 重试链**：源图常见两种失败 —— 防盗链要 Referer（缺失/跨站 403）、
+ *      不认 Referer（带了自己反而 403）→ 依次尝试 [调用方给的 ref, 图片自身 origin, 不带 Referer]。
+ *   ③ **DoH + 系统 DNS 双通道**：图床可能是被污染的海外域（DoH 可解）或国内域（系统 DNS 更快）；
+ *      两条都试，任一成功即回图。响应必须是图片（拒 text/html 错误页，避免把 403 页面当封面缓存）。
+ */
+private imgProxy(u: URL, res: ServerResponse): void {
+  const target = u.searchParams.get('u') || '';
+  const ref = u.searchParams.get('ref') || '';
+  if (!/^https?:\/\//i.test(target)) {
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('bad request');
+    return;
   }
+  // Referer 重试链（去重）：调用方给的 → 图片自身 origin → 不带
+  const refs: string[] = [];
+  const push = (r: string): void => { if (r && !refs.includes(r)) refs.push(r); };
+  push(ref);
+  try { push(new URL(target).origin + '/'); } catch { /* 非法 URL 已在上面拦掉 */ }
+  push('');
+  void (async () => {
+    for (const r of refs) {
+      for (const dispatcher of [imgAgent, agent]) {
+        try {
+          const headers: Record<string, string> = { accept: 'image/*', 'User-Agent': 'Mozilla/5.0 Win-Box/0.86' };
+          if (r) headers.Referer = r;
+          const rr = await undiciRequest(target, {
+            method: 'GET',
+            headers,
+            headersTimeout: 12000,
+            bodyTimeout: 20000,
+            dispatcher,
+          });
+          const ct = String(rr.headers['content-type'] || '');
+          const okStatus = rr.statusCode === 200 || rr.statusCode === 206;
+          const looksImage = /^image\//i.test(ct) || (/octet-stream/i.test(ct) && okStatus);
+          if (okStatus && looksImage) {
+            const body = Buffer.from(await rr.body.arrayBuffer());
+            res.writeHead(200, {
+              'Content-Type': /^image\//i.test(ct) ? ct : 'image/jpeg',
+              'Cache-Control': 'public, max-age=86400',
+            });
+            res.end(body);
+            return;
+          }
+          await rr.body.dump().catch(() => undefined);
+        } catch {
+          /* 换下一个 referer/通道 */
+        }
+      }
+    }
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('not found');
+  })();
+}
 
   /**
    * /file/<子路径> —— 等效安卓 TVBox 的内置 Local 蜘蛛。
@@ -212,11 +227,19 @@ export class LocalProxyServer {
 
     const resp = await this.openStream(target, headers);
     const ct = (resp.headers['content-type'] as string | undefined) || 'application/octet-stream';
-    if (/mpegurl|m3u8/i.test(ct)) {
+    // ★ 2026-09-23 修复 py 源「视频无法播放」：清单判定不能只看 Content-Type，
+    //   且**相对地址必须以「302 之后的最终地址」为基准**重写。
+    //   实测（可可影视）：play URL 在 208.69.102.188:21302 → 302 到 142.248.97.185:11302；
+    //   片段是相对地址（`xxx.ts?sign=…`）→ 老实现按**原始** target 拼 → 请求回到 208 主机，
+    //   该主机对分片只回 3 字节 "OK\n"（防盗链哨兵）→ hls.js 拿到"3 字节分片"→ 永远播不出来。
+    let pathIsPlaylist = false;
+    try { pathIsPlaylist = /\.m3u8$/i.test(new URL(target).pathname); } catch { /* 非法 URL 交给下游 */ }
+    if (/mpegurl|m3u8/i.test(ct) || pathIsPlaylist) {
       // m3u8 清单小，读全文后重写片段地址（每段都走 /play 带回 header/Cookie）
       const raw = Buffer.from(await resp.body.arrayBuffer());
-      const body = rewriteM3u8(raw, target, ua, referer, cookie);
-      res.writeHead(resp.status, { 'Content-Type': ct });
+      const base = resp.finalUrl || target; // ★ 302/重定向后的真实地址
+      const body = rewriteM3u8(raw, base, ua, referer, cookie);
+      res.writeHead(resp.status, { 'Content-Type': /mpegurl|m3u8/i.test(ct) ? ct : 'application/vnd.apple.mpegurl' });
       res.end(body);
       return;
     }
@@ -482,12 +505,17 @@ export class LocalProxyServer {
 
   /**
    * 手动跟随重定向（undici v7 不支持 request maxRedirections），返回最终响应：
-   * 含 statusCode、headers 与**未消费的可读 body 流**（供调用方流式转发，避免大文件整块载入内存）。
+   * 含 statusCode、headers、**finalUrl（重定向后的真实地址）**与**未消费的可读 body 流**
+   * （供调用方流式转发，避免大文件整块载入内存）。
+   *
+   * ★ finalUrl 是 m3u8 相对地址重写的基准：302 后的 m3u8 与其分片常在不同主机上
+   *   （实测可可影视：清单 208.x → 142.x，分片只在 142.x 可下载），
+   *   用原始 URL 拼分会拿到防盗链哨兵响应（3 字节 "OK\n"）→ 播放无声无画。
    */
   private async openStream(
     url: string,
     headers: Record<string, string>,
-  ): Promise<{ status: number; headers: Record<string, unknown>; body: import('undici').Dispatcher.ResponseData['body'] }> {
+  ): Promise<{ status: number; headers: Record<string, unknown>; body: import('undici').Dispatcher.ResponseData['body']; finalUrl: string }> {
     let cur = url;
     for (let i = 0; i <= 10; i++) {
       const r = await undiciRequest(cur, {
@@ -504,7 +532,7 @@ export class LocalProxyServer {
         await (r.body as unknown as { cancel(): Promise<void> }).cancel().catch(() => { /* ignore */ });
         continue;
       }
-      return { status: r.statusCode || 200, headers: r.headers as Record<string, unknown>, body: r.body };
+      return { status: r.statusCode || 200, headers: r.headers as Record<string, unknown>, body: r.body, finalUrl: cur };
     }
     throw new Error('too many redirects: ' + url);
   }

@@ -72,7 +72,7 @@ export class JarSpider extends Spider {
     }
   }
 
-  private async call(method: string, ...args: string[]): Promise<string> {
+  private async call(method: string, args: string[] = [], timeoutMs?: number): Promise<string> {
     if (!(await this.ensureReady())) {
       // A1：准备期失败（jar 下载/转换/缓存缺失）不再静默返回空串，直接抛错上屏，
       //   避免上层误走「homeVideoContent/分类兜底」浪费一次 JVM 调用再报空结果。
@@ -94,7 +94,7 @@ export class JarSpider extends Spider {
       this.host.logger.w(`jar-spider ${this.siteKey}: ${this.loadError}`);
       throw new SourceProblemError('SPIDER_ERROR', this.loadError, { sourceKey: this.siteKey });
     }
-    return this.bridge.call(paths, this.clsName, method, [this.enrichedExt(), ...args], this.timeoutMs);
+    return this.bridge.call(paths, this.clsName, method, [this.enrichedExt(), ...args], timeoutMs ?? this.timeoutMs);
   }
 
   /**
@@ -127,26 +127,30 @@ export class JarSpider extends Spider {
     const kv = Object.entries(extend || {})
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
       .join('&');
-    return this.call('categoryContent', tid, pg, kv);
+    return this.call('categoryContent', [tid, pg, kv]);
   }
   detailContent(ids: string[]): Promise<string> {
-    return this.call('detailContent', ids.join(','));
+    return this.call('detailContent', [ids.join(',')]);
   }
-  searchContent(key: string, _quick: boolean): Promise<string> {
-    return this.call('searchContent', key);
+  /**
+   * 搜索：timeoutMs 由调用方（聚合搜索/单源搜索）传入的更紧预算；缺省用源声明 timeout。
+   * ★ 全源搜索里死源会占满整个超时，收紧这个值直接决定「搜索结果多久出得来」。
+   */
+  searchContent(key: string, _quick: boolean, timeoutMs?: number): Promise<string> {
+    return this.call('searchContent', [key], timeoutMs);
   }
-  searchContentPage(key: string, quick: boolean, pg: string): Promise<string> {
-    return this.call('searchContent', key, pg);
+  searchContentPage(key: string, quick: boolean, pg: string, timeoutMs?: number): Promise<string> {
+    return this.call('searchContent', [key, pg], timeoutMs);
   }
   playerContent(flag: string, id: string, vipFlags: string[]): Promise<string> {
     // A2：vipFlags 透传给 SpiderRunner（拼逗号串，Java 侧还原成 List），供蜘蛛判断是否需解析
-    return this.call('playerContent', flag, id, (vipFlags || []).join(','));
+    return this.call('playerContent', [flag, id, (vipFlags || []).join(',')]);
   }
   liveContent(url: string): Promise<string> {
-    return this.call('liveContent', url);
+    return this.call('liveContent', [url]);
   }
   proxy(params: Record<string, string>): Promise<string> {
-    return this.call('proxy', JSON.stringify(params || {}));
+    return this.call('proxy', [JSON.stringify(params || {})]);
   }
   async destroy(): Promise<void> {
     this.ready = false;

@@ -214,9 +214,18 @@ export class JarSpiderBridge {
 
   /** 版本不符时清空转换产物，强制重转。失败只警告，不影响主流程。 */
   private ensureCacheVersion(): void {
-    if (!existsSync(this.cacheDir)) return;
+    // ★ 2026-09-23 修复「每次启动都重新下载+转换 jar」：
+    //   首装/清缓存后 cacheDir 不存在，老实现直接 return —— **版本戳从未写入**；
+    //   下次启动 cur='' ≠ v2 → 误判为 v1 旧产物 → 把刚转好的 jar 全删掉重来。
+    //   结果：缓存永远留不住（用户日志里每次启动都是「转换产物格式升级（v1 → v2）」+ 重新转换）。
+    //   现在：目录不存在也先建目录并写戳（写戳失败只警告，不影响主流程）。
     const stamp = join(this.cacheDir, JarSpiderBridge.CACHE_STAMP);
     try {
+      if (!existsSync(this.cacheDir)) {
+        mkdirSync(this.cacheDir, { recursive: true });
+        writeFileSync(stamp, String(JarSpiderBridge.CACHE_VERSION));
+        return;
+      }
       const cur = existsSync(stamp) ? readFileSync(stamp, 'utf8').trim() : '';
       if (cur === String(JarSpiderBridge.CACHE_VERSION)) return;
       const fs = require('node:fs') as typeof import('node:fs');
@@ -447,9 +456,17 @@ export class JarSpiderBridge {
     if (this.pool) {
       const serveArgv = [...this.jvmPrefix(cp), ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []), 'SpiderRunner', '--serve', cp];
       const key = servePoolKey(this.javaExe(), serveArgv);
+      const tmo = timeoutMs ?? this.callTimeoutMs;
       try {
-        const r = await this.poolSubmit(this.javaExe(), key, serveArgv, className, method, args, undefined, timeoutMs ?? this.callTimeoutMs);
+        const r = await this.poolSubmit(this.javaExe(), key, serveArgv, className, method, args, undefined, tmo);
         if (r.ok) return r.data;
+        // ★ 2026-09-23：**执行超时不回退一次性** —— 超时说明蜘蛛/源站卡住，
+        //   立刻再跑一遍一次性只会再等一个满超时（实测死源从 15s 变 30s，全源搜索因此翻倍慢）。
+        if (r.reason === 'timeout') {
+          this.lastSpiderReason = `蜘蛛调用超时（>${Math.round(tmo / 1000)}s），源站可能无响应`;
+          this.host?.logger.i(`jvm-bridge ${className}.${method} 失败原因: ${this.lastSpiderReason}`);
+          return '';
+        }
       } catch {
         /* 池异常 → 回退一次性 */
       }

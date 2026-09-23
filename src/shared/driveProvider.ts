@@ -34,30 +34,33 @@ export function wrapPlayUrl(url: string, provider: string): string {
 }
 
 /**
- * 把**源站封面图**包装成经本地 /play 中继的地址（注入「图片自身站点」作 Referer）。
+ * 把**源站封面图**包装成经本地 `/img` 中继的地址（带 `ref` 提示 Referer）。
  *
- * ★ 2026-09-23「封面总有几个补不上」的一个真实成因：源站图床普遍有防盗链
- *   （无 Referer / 跨站 Referer / 桌面 UA 缺失 → 403 或空响应），渲染层直连必然图裂。
- *   同源 Referer 是能救回这类图的最小代价方案：绝大多数防盗链只校验「Referer 是不是本站」。
- *   失败（仍 403/404）时调用方维持 TMDB/豆瓣补图与占位逻辑，不做无限重试。
+ * ★ 2026-09-23 版（此前走 /play）：「封面总有几个补不上」的三类真实成因都对症：
+ *   ① 图床域名被 DNS 污染 / 只认特定 Referer（防盗链）→ 主进程经 DoH + 系统 DNS 双通道取图，
+ *      并按 [ref, 图片自身 origin, 不带 Referer] 依次重试（见 LocalProxyServer.imgProxy）；
+ *   ② 渲染层直连被跨域/Referer 限制；
+ *   ③ 源图是 http（页面在 file://）等混合内容限制。
+ *   ⚠️ 中继地址带 `&ref=` 是「源图中继」的标识：渲染层据此区分「TMDB 补图失败」与「源图中继失败」，
+ *   两者失败的后续动作不同（前者移除覆盖，后者置灰不再折腾）。
  * @param url 源站给的封面地址（仅 http(s) 可中继）
- * @param ua  可选的浏览器 UA（渲染层传 navigator.userAgent；主进程不必传）
+ * @param ua  预留参数（当前中继自带头，传了也不影响；保持调用方签名稳定）
  * @returns 中继 URL；非法/不可中继 → 空串（调用方保持原图）
  */
 export function wrapImageUrlForRelay(url: string, ua?: string): string {
+  void ua;
   const v = (url || '').trim();
   if (!/^https?:\/\//i.test(v)) return '';
-  let origin = '';
+  let ref = '';
   try {
-    origin = new URL(v).origin + '/';
+    ref = new URL(v).origin + '/';
   } catch {
     return '';
   }
   const p = new URLSearchParams();
-  p.set('url', v);
-  p.set('referer', origin);
-  if (ua) p.set('ua', ua);
-  return `http://127.0.0.1:9978/play?${p.toString()}`;
+  p.set('u', v);
+  p.set('ref', ref);
+  return `http://127.0.0.1:9978/img?${p.toString()}`;
 }
 
 /** provider → 中文展示名（提示「去配置页绑定」文案用）；未收录回退原 provider 名 */

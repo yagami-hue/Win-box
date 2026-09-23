@@ -171,6 +171,20 @@ export interface SearchAllReport {
   totalRaw: number; // 汇总前原始命中数
 }
 
+/**
+ * ★ 2026-09-23 聚合搜索「流式进度」事件：每完成一个源就推一条给渲染层，
+ * 让结果**边搜边出**（此前要等全部源跑完，慢源多时界面几十秒空白 → 「搜索特别慢」的观感主因）。
+ */
+export interface SearchAllProgressEvent {
+  /** 本次搜索关键词（渲染层据此丢弃过期事件） */
+  wd: string;
+  /** 该源的结果（结构同 mergeSearchResults 的输入） */
+  source: { key: string; name: string; status: 'ok' | 'empty' | 'error'; items?: VodItem[]; error?: string; ms?: number };
+  /** 已完成的源数 / 总源数 */
+  done: number;
+  total: number;
+}
+
 export interface VodDetail {
   id: string;
   name: string;

@@ -13,6 +13,7 @@ import type {
   SourceMoveDirection,
   SourceUpdatePatch,
   SearchAllReport,
+  SearchAllProgressEvent,
   SourceDebugReport,
   UserProfile,
   AuditItem,
@@ -76,6 +77,8 @@ declare global {
         detail: (a: { key: string; ids: string[] }) => Promise<IpcResult<VodDetail | null>>;
         search: (a: { key: string; wd: string }) => Promise<IpcResult<VodItem[]>>;
         searchAll: (wd: string) => Promise<IpcResult<SearchAllReport>>;
+        /** ★ 聚合搜索逐源进度（边搜边出）：返回退订函数 */
+        onSearchAllProgress: (cb: (ev: SearchAllProgressEvent) => void) => () => void;
         play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => Promise<IpcResult<PlayResult>>;
       };
       live: {
@@ -215,6 +218,7 @@ export const client = {
   detail: (a: { key: string; ids: string[] }) => unwrap(window.api.vod.detail(a)),
   search: (a: { key: string; wd: string }) => unwrap(window.api.vod.search(a)),
   searchAll: (wd: string) => unwrap(window.api.vod.searchAll(wd)),
+  onSearchAllProgress: (cb: (ev: SearchAllProgressEvent) => void) => window.api.vod.onSearchAllProgress(cb as (ev: unknown) => void),
   play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => unwrap(window.api.vod.play(a)),
   loadLive: (index: number) => unwrap(window.api.live.load(index)),
   liveMeta: () => unwrap(window.api.live.meta()),
