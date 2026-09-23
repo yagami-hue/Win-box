@@ -71,10 +71,14 @@ describe('站源解析 — Spider 类型二次分发（api 后缀）', () => {
     const r = parseSite({ key: 'js1', type: 3, api: 'http://x/a.js' }, 0);
     expect(r.report.status).toBe('OK');
   });
-  it('type=3 + api .py → DEGRADE(UNSUPPORTED_PY)', () => {
+  it('type=3 + api .py → OK（桌面端已内嵌嵌入式 CPython 运行时）', () => {
     const r = parseSite({ key: 'py1', type: 3, api: 'http://x/a.py' }, 0);
-    expect(r.report.status).toBe('DEGRADE');
-    expect(r.report.reason).toBe('UNSUPPORTED_PY');
+    expect(r.report.status).toBe('OK');
+    expect(r.report.reason).toBeUndefined();
+  });
+  it('type=3 + api file:// 本地 .py → OK（不降级）', () => {
+    const r = parseSite({ key: 'pylocal', type: 3, api: 'file:///C:/x/kkys.py' }, 0);
+    expect(r.report.status).toBe('OK');
   });
   it('type=3 + api csp_Xxx（jar dex） → OK（JVM 桥等效 DexClassLoader）', () => {
     const r = parseSite({ key: 'j1', type: 3, api: 'csp_NiNi' }, 0);

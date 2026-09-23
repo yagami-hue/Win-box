@@ -22,6 +22,7 @@ const api = {
     setActiveLive: (index: number) => invoke<void>(IPC.CFG_SET_ACTIVE_LIVE, index),
     importUrl: (url: string) => invoke(IPC.CFG_IMPORT_URL, { url }),
     importJson: (json: string) => invoke(IPC.CFG_IMPORT_JSON, { json }),
+    importPyLocal: () => invoke<{ ok: boolean; key?: string; error?: string }>(IPC.CFG_IMPORT_PY_LOCAL),
     saveAsProfile: (name: string) => invoke<UserProfile>(IPC.CFG_PROFILE_SAVE, name),
     activateProfile: (id: string) => invoke<void>(IPC.CFG_PROFILE_ACTIVATE, id),
     deleteProfile: (id: string) => invoke<void>(IPC.CFG_PROFILE_DELETE, id),

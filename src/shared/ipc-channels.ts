@@ -37,6 +37,7 @@ export const IPC = {
   CFG_SET_ACTIVE_LIVE: 'cfg:setActiveLive',
   CFG_IMPORT_URL: 'cfg:importUrl',
   CFG_IMPORT_JSON: 'cfg:importJson',
+  CFG_IMPORT_PY_LOCAL: 'cfg:importPyLocal',
   CFG_PROFILE_SAVE: 'cfg:profileSave',
   CFG_PROFILE_ACTIVATE: 'cfg:profileActivate',
   CFG_PROFILE_DELETE: 'cfg:profileDelete',

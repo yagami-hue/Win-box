@@ -1,6 +1,6 @@
 // tests/pySpider.spec.ts — .py 蜘蛛（嵌入式 CPython3 宿主 PySpider）适配层单测
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PySpider } from '../src/engine/spider/PySpider';
@@ -133,6 +133,32 @@ describe('PySpider — 方法→callPython 的参数契约', () => {
     const bridge = makeBridge(calls as never, cacheDir);
     const sp = new PySpider({ key: 'py', api: './a.py', ext: '', jar: '', host: makeHost([]) }, bridge);
     await expect(sp.homeContent(true)).rejects.toThrow(/不是 http\(s\)/);
+  });
+
+  it('file:// 本地 .py 存在 → 直接用本地文件（不下载、不缓存副本）', async () => {
+    const cacheDir = tmpCache();
+    const calls: { pyPath: string; cls: string; method: string; args: string[] }[] = [];
+    const bridge = makeBridge(calls, cacheDir);
+    const local = join(tmpdir(), `pyfile-${Date.now()}.py`);
+    tmpDirs.push(local);
+    writeFileSync(local, PY_SRC);
+    const sp = new PySpider({ key: 'py', api: `file:///${local.replace(/\\/g, '/')}`, ext: '', jar: '', host: makeHost([]) }, bridge);
+    await sp.homeContent(true);
+    expect(calls.length).toBe(1);
+    expect(calls[0].pyPath).toBe(local);
+    expect(calls[0].method).toBe('homeContent');
+  });
+
+  it('file:// 本地 .py 不存在 → 抛 SourceProblemError 含「本地 .py 文件不存在」', async () => {
+    const cacheDir = tmpCache();
+    const calls: unknown[] = [];
+    const bridge = makeBridge(calls as never, cacheDir);
+    const sp = new PySpider(
+      { key: 'py', api: 'file:///C:/definitely-not-exist-xyz.py', ext: '', jar: '', host: makeHost([]) },
+      bridge,
+    );
+    await expect(sp.homeContent(true)).rejects.toThrow(/本地 \.py 文件不存在/);
+    expect(calls.length).toBe(0);
   });
 
   it('category/detail/searchContentPage 参数契约', async () => {

@@ -67,6 +67,7 @@ export default function ConfigPage() {
   const [cfg, setCfg] = useState<UserConfig | null>(null);
   const [warn, setWarn] = useState<string[]>([]);
   const [err, setErr] = useState('');
+  const [lastOk, setLastOk] = useState('');
   // 外观主题
   const [theme, setTheme] = useState<Theme>(() => currentTheme());
   // 外挂字幕（assrt token）
@@ -191,6 +192,29 @@ export default function ConfigPage() {
       const r = await client.cfgImportJson(json);
       applyImportResult(r);
       await refresh();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 从本地选择 .py 文件导入为 py 源（经主进程 dialog；入库后与其它源一样可切换） */
+  async function doImportPyLocal() {
+    setBusy(true);
+    setErr('');
+    try {
+      const r = await client.cfgImportPyLocal();
+      if (r.ok) {
+        setReport(null);
+        setWarn([]);
+        setErr('');
+        // 提示语走 url 区下方的软提示（无 warning 时也显示成功）
+        setLastOk(`已导入本地 .py 源：${r.key}`);
+        await refresh();
+      }
+      // r.ok=false 且无 error = 用户取消文件选择，静默
+      else if (r.error) setErr(r.error);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -594,6 +618,15 @@ export default function ConfigPage() {
             导入 JSON
           </button>
         </details>
+        <div className="row" style={{ marginTop: 4 }}>
+          <button disabled={busy} onClick={doImportPyLocal}>
+            导入本地 .py 文件
+          </button>
+          <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+            选择本机 .py 蜘蛛脚本导入（与 JSON 源一样入库、可切换）
+          </span>
+        </div>
+        {lastOk && <div className="status" style={{ marginBottom: 8 }}>✅ {lastOk}</div>}
         {err && <div className="err" style={{ marginBottom: 8 }}>操作失败：{err}</div>}
         {warn.length > 0 && <div className="banner">⚠ {warn.join('；')}</div>}
         {report && (

@@ -7,6 +7,7 @@
 // 已就这一局限给出诚实文案。
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Spider, type SpiderInit } from './Spider';
 import type { JarSpiderBridge } from './JarSpiderBridge';
 import { SourceProblemError } from './errors';
@@ -41,13 +42,30 @@ export class PySpider extends Spider {
     this.clsName = cls;
   }
 
-  /** 下载 .py 到缓存并按 URL md5 缓存；失败置 loadError 并返回 false。 */
+  /** 下载/定位 .py 到本地并按 URL md5 缓存；失败置 loadError 并返回 false。 */
   private async ensureReady(): Promise<boolean> {
     if (this.ready) return true;
     try {
       const base = (this.api || '').split('?')[0];
+      // ★ 本地 .py 文件（file:// 前缀）：直接从磁盘读，不下载、不缓存副本
+      if (base.startsWith('file://')) {
+        let local: string;
+        try {
+          local = fileURLToPath(base);
+        } catch {
+          this.loadError = `本地 .py 路径无法解析（file:// 格式不正确）：${base}`;
+          return false;
+        }
+        if (!existsSync(local)) {
+          this.loadError = '本地 .py 文件不存在（可能已被移动或删除），请重新导入配置';
+          return false;
+        }
+        this.pyPath = local;
+        this.ready = true;
+        return true;
+      }
       if (!/^https?:\/\//i.test(base)) {
-        this.loadError = 'python 蜘蛛 api 不是 http(s) 脚本地址，无法获取脚本';
+        this.loadError = 'python 蜘蛛 api 不是 http(s) 或 file:// 脚本地址，无法获取脚本';
         return false;
       }
       const dir = this.bridge.pyCacheDir;

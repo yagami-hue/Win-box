@@ -1,13 +1,15 @@
 // src/main/ipc/index.ts — 注册所有 IPC handler
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme } from 'electron';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { registerHandler } from '../util/ipcGuard';
 import { fileLogger } from '../util/logger';
 import { SpiderHost } from '../spider/SpiderHost';
 import { resourcesDir, userDataDir, spiderCacheDir } from '../util/paths';
 import { clearAppCache } from '../util/cacheClean';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { IPC } from '../../shared/ipc-channels';
+import { md5Hex } from '../../engine/util/md5';
 // 独立播放器窗口
 import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow } from '../player/PlayerWindow';
 // 老板键
@@ -137,6 +139,33 @@ export function registerIpc(host: SpiderHost): void {
   registerHandler(IPC.CFG_IMPORT_JSON, async (_e: any, a: { json: string }) => {
     const r = await host.importConfig({ json: a.json });
     return { config: r.config, report: r.report, warnings: r.warnings, urls: r.urls };
+  }, log);
+
+  // ★ 从本地 .py 文件导入为新的 py 源：选文件 → 复制到 userData 持久区 → 与 JSON 源一样入库/可切换
+  registerHandler(IPC.CFG_IMPORT_PY_LOCAL, async (e: any): Promise<{ ok: boolean; key?: string; error?: string }> => {
+    const win = winOf(e);
+    const picked = await dialog.showOpenDialog(win ?? undefined!, {
+      properties: ['openFile'],
+      filters: [{ name: 'Python 蜘蛛脚本', extensions: ['py'] }],
+    });
+    if (picked.canceled || !picked.filePaths?.[0]) return { ok: false }; // 用户取消，不视为错误
+    const srcPath = picked.filePaths[0];
+    try {
+      const content = readFileSync(srcPath);
+      if (content.length === 0) return { ok: false, error: '所选 .py 文件为空' };
+      // 落盘到 userData 持久区（可被引用但不受清理源缓存影响），api 记 file:// 绝对路径
+      const dir = join(userDataDir(), 'local-py');
+      mkdirSync(dir, { recursive: true });
+      const storeName = `${md5Hex(content.toString('utf8'))}.py`;
+      const storePath = join(dir, storeName);
+      if (!existsSync(storePath)) writeFileSync(storePath, content);
+      const name = basename(srcPath).replace(/\.py$/i, '');
+      const api = pathToFileURL(storePath).href; // file:///C:/...
+      const bean = host.cfgAddSource({ key: name, name, type: 3, api, ext: '', jar: '' } as SourceBean);
+      return { ok: true, key: bean.key };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }, log);
 
   registerHandler(IPC.VOD_HOME, (_e: any, key: string) => host.home(key), log);

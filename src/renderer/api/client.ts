@@ -58,6 +58,7 @@ declare global {
         setActiveLive: (index: number) => Promise<IpcResult<void>>;
         importUrl: (url: string) => Promise<IpcResult<ImportReturn>>;
         importJson: (json: string) => Promise<IpcResult<ImportReturn>>;
+        importPyLocal: () => Promise<IpcResult<{ ok: boolean; key?: string; error?: string }>>;
         saveAsProfile: (name: string) => Promise<IpcResult<UserProfile>>;
         activateProfile: (id: string) => Promise<IpcResult<void>>;
         deleteProfile: (id: string) => Promise<IpcResult<void>>;
@@ -169,6 +170,7 @@ export const client = {
   cfgSetActiveLive: (index: number) => unwrap(window.api.config.setActiveLive(index)),
   cfgImportUrl: (url: string) => unwrap(window.api.config.importUrl(url)),
   cfgImportJson: (json: string) => unwrap(window.api.config.importJson(json)),
+  cfgImportPyLocal: () => unwrap(window.api.config.importPyLocal()),
   cfgSaveAsProfile: (name: string) => unwrap(window.api.config.saveAsProfile(name)),
   cfgActivateProfile: (id: string) => unwrap(window.api.config.activateProfile(id)),
   cfgDeleteProfile: (id: string) => unwrap(window.api.config.deleteProfile(id)),

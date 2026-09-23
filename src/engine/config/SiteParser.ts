@@ -19,8 +19,6 @@ export interface SiteParseResult {
   report: SiteReportItem;
 }
 
-const SITE_TYPE_JAR = 3; // 安卓的 Spider 分发；api 后缀再二次分
-
 function clampTimeout(v: number): number {
   if (v <= 0) return SITE_TIMEOUT_DEFAULT;
   if (v < SITE_TIMEOUT_MIN) return SITE_TIMEOUT_MIN;
@@ -77,16 +75,9 @@ export function parseSite(obj: unknown, index: number): SiteParseResult {
   const jar = safeJsonString(o, 'jar', '');
 
   // v1 降级判定（不影响 bean 落地，只影响诊断与后续 SpiderFactory）：
-  // - type=3 且 api 以 .py 结尾 → UNSUPPORTED_PY（DEGRADE，安卓 normal flavor 同为空实现）
   // - type=-1 推送源 → UNSUPPORTED_PUSH（DEGRADE）
-  // type=3 + .js → OK（JS 沙箱）；type=3 + jar(dex)/csp_ → OK（JVM 桥等效 DexClassLoader）
-  if (status === 'OK' && type === SITE_TYPE_JAR) {
-    const low = api.toLowerCase();
-    if (low.endsWith('.py')) {
-      status = 'DEGRADE';
-      reason = 'UNSUPPORTED_PY';
-    }
-  }
+  // - type=3 + .py → OK（桌面端已内嵌嵌入式 CPython 运行时，见 .py 源运行时改造；
+  //   与安卓 normal flavor 不同，这里不再降级）
   if (status === 'OK' && type === -1) {
     status = 'DEGRADE';
     reason = 'UNSUPPORTED_PUSH';
