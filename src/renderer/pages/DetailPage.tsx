@@ -31,6 +31,7 @@ export default function DetailPage({
     setErr('');
     setMetaHit(null);
     setSrcPicBad(false);
+    metaRetried.current = false;
     client
       .detail({ key: k, ids: [i] })
       .then((d) => {
@@ -74,7 +75,8 @@ export default function DetailPage({
 
   // ★ 封面加载失败兜底：
   //   · 失败的是 TMDB 补图（/img 中继 4xx/超时）→ 移除 metaHit；
-  //   · 失败的是源封面 → 标记 srcPicBad，改由 TMDB 补全替换（坏图不残留）。
+  //   · 失败的是源封面 → 标记 srcPicBad 且若无 TMDB 命中则重查一次，让 TMDB 有机会替换坏图。
+  const metaRetried = useRef(false);
   const coverErr = (e: React.SyntheticEvent<HTMLImageElement>) => {
     const el = e.target as HTMLImageElement;
     const src = el.currentSrc || el.src || '';
@@ -82,6 +84,17 @@ export default function DetailPage({
       if (metaHit) setMetaHit(null);
     } else {
       setSrcPicBad(true);
+      // ★ 源封面坏了而 TMDB 尚未命中 → 主动再查一次（幂等，仅一次）
+      if (!metaHit && !metaRetried.current) {
+        metaRetried.current = true;
+        const name = (detail?.name || '').trim().split(' - ')[0]?.trim();
+        if (name) {
+          const y = /((?:19|20)\d{2})/.exec(`${detail?.name || ''} ${detail?.year || ''} ${detail?.remarks || ''}`);
+          client.metaSearch(name, y ? y[1] : undefined)
+            .then((h) => { if (h) setMetaHit(h); })
+            .catch(() => undefined);
+        }
+      }
     }
     el.style.opacity = '0.2';
   };

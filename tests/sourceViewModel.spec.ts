@@ -307,6 +307,32 @@ describe('SourceViewModel — type 3 homeContent→homeVideoContent 回退（任
     expect(r.items).toHaveLength(0);
   });
 
+  it('★ py/蜘蛛返回 name/pic 字段（无 vod_ 前缀）→ 列表多键兜底（封面/名称不丢，TMDB 补全可触发）', async () => {
+    // 部分 py 蜘蛛返回 {name,pic,…} 而非 vod_name/vod_pic —— 此前列表归一化只认 vod_ 前缀，
+    // 名称取空 → 首页 TMDB 封面补全不触发 → 长期无封面。本用例锚定兜底生效。
+    const sp = new StubSpider(
+      JSON.stringify({ class: [{ type_id: '1', type_name: '电影' }], list: [{ id: 'a1', name: '电影A', pic: 'https://x/a.jpg' }] }),
+      '',
+    );
+    const r = await vmWithSpider(sp).home({ key: 'pyk', type: 3, api: 'csp_X' } as SourceBean);
+    expect(r.items[0].id).toBe('a1');
+    expect(r.items[0].name).toBe('电影A');
+    expect(r.items[0].pic).toBe('https://x/a.jpg');
+  });
+
+  it('★ detail 多键兜底：pic 别名键（vod_pic_url/video_pic/vod_pic_thumb）也能出封面', async () => {
+    const sp = new StubSpider('', '');
+    sp.detailContent = async () =>
+      JSON.stringify({
+        list: [{ id: 'a1', name: '视频B', vod_pic_url: 'https://x/b.jpg', vod_play_from: 'L1', vod_play_url: '1$https://x/1.m3u8' }],
+      });
+    const d = await vmWithSpider(sp).detail({ key: 'pyd', type: 3, api: 'csp_X' } as SourceBean, ['a1']);
+    expect(d!.id).toBe('a1');
+    expect(d!.name).toBe('视频B');
+    expect(d!.pic).toBe('https://x/b.jpg');
+    expect(d!.episodes['L1']).toHaveLength(1);
+  });
+
   it('homeVideoContent 超时 → 不挂起、返回 class+空 items', async () => {
     const sp = new StubSpider(
       JSON.stringify({ class: [{ type_id: '1', type_name: '电影' }], list: [] }),

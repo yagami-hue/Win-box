@@ -163,14 +163,23 @@ export class SourceViewModel {
         })
       : [];
     const list = Array.isArray(o['list']) ? (o['list'] as Record<string, unknown>[]) : [];
+    // ★ 字段名多键兜底（对齐 normalizeSpiderDetail）：部分 py 源/蜘蛛返回 `name`/`pic` 而非
+    //   vod_name/vod_pic —— 缺失会让列表 name 空 → 首页 TMDB 封面补全不触发 → 长期无封面。
     const items: VodItem[] = list.map((v) => ({
-      id: String(v['vod_id'] ?? ''),
-      name: String(v['vod_name'] ?? ''),
-      pic: String(v['vod_pic'] ?? ''),
-      remarks: String(v['vod_remarks'] ?? ''),
-      year: String(v['vod_year'] ?? ''),
-      area: String(v['vod_area'] ?? ''),
-      type: String(v['type_name'] ?? ''),
+      id: String(v['vod_id'] ?? v['id'] ?? ''),
+      name: String(v['vod_name'] ?? v['name'] ?? ''),
+      pic: String(
+        v['vod_pic'] ??
+          v['pic'] ??
+          v['vod_pic_url'] ??
+          v['video_pic'] ??
+          (Array.isArray(v['vod_pic_thumb']) ? v['vod_pic_thumb'][0] : '') ??
+          '',
+      ),
+      remarks: String(v['vod_remarks'] ?? v['remarks'] ?? ''),
+      year: String(v['vod_year'] ?? v['year'] ?? ''),
+      area: String(v['vod_area'] ?? v['area'] ?? ''),
+      type: String(v['type_name'] ?? v['type'] ?? ''),
       sourceKey: key,
     }));
     return {
@@ -402,8 +411,8 @@ export class SourceViewModel {
         }
       }
       return {
-        id: String(v['vod_id'] ?? ''),
-        name: String(v['vod_name'] ?? ''),
+        id: String(v['vod_id'] ?? v['id'] ?? ''),
+        name: String(v['vod_name'] ?? v['name'] ?? ''),
         pic: String(
           v['vod_pic'] ??
             v['pic'] ??

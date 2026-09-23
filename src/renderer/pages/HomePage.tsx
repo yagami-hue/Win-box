@@ -87,6 +87,21 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   }, [items]);
   // 封面取值：TMDB 补全优先，源自带 pic 只作占位/兜底
   const picOf = (it: VodItem) => picOver[it.id] || it.pic;
+  /** ★ 源封面加载失败/为空 → 显式触发一次单条 TMDB 查询覆盖（原逻辑只置透明，从不重查 TMDB） */
+  const retryMetaFor = useRef<Set<string>>(new Set());
+  const ensureMetaSingle = (it: VodItem) => {
+    if (retryMetaFor.current.has(it.id)) return; // 幂等：同一 id 只补查一次
+    const name = tmdbTitleOf(it);
+    if (!name) return;
+    retryMetaFor.current.add(it.id);
+    const y = tmdbYearOf(it);
+    client
+      .metaSearch(name, y)
+      .then((h) => {
+        if (h && h.poster) setPicOver((prev) => (prev[it.id] === undefined ? { ...prev, [it.id]: h.poster } : prev));
+      })
+      .catch(() => undefined);
+  };
   const picErr = (it: VodItem) => (e: React.SyntheticEvent<HTMLImageElement>) => {
     const el = e.target as HTMLImageElement;
     const src = el.currentSrc || el.src || '';
@@ -101,7 +116,9 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         });
       }
     } else {
+      // ★ 失败的是源封面 → 标坏 + 显式触发 TMDB 重查（此前版本仅 opacity 置灰，坏图永不换掉）
       setBadPics((prev) => (prev[it.id] ? prev : { ...prev, [it.id]: true }));
+      ensureMetaSingle(it);
     }
     el.style.opacity = '0.15';
   };
