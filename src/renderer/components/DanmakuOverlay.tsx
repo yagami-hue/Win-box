@@ -2,7 +2,7 @@
 // 弹幕叠加层：全屏 canvas，按 video.currentTime 驱动滚动/顶/底弹幕渲染。
 // 布局（轨道分配）由纯 TS 引擎 layoutDanmaku 负责，本组件只负责绘制。
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { layoutDanmaku, measureWidth, REGION_RATIO } from '../../engine/danmaku/layout';
+import { layoutDanmaku, measureWidth } from '../../engine/danmaku/layout';
 import type { DanmakuItem, DanmakuRegion } from '../../shared/danmaku';
 
 interface DanmakuOverlayProps {
@@ -57,14 +57,15 @@ export default function DanmakuOverlay({ videoRef, items, enabled, region, fontS
     let raf = 0;
     let lastT = -1;
     let si = 0; // 滚动弹幕活动起点：scroll 按 time 有序，跳过未到时间的条目
-    const lineHeight = Math.round(fontSize * 1.4);
-    const regionH = Math.max(1, size.h * REGION_RATIO[region]);
+    // ★ D7：seek 前进/回退都重启扫描源点——时间回退或一次性跳变（>0.3s，非正常播放推进）时
+    //   重置 si=0，让跳过的弹幕从右缘按新时间轴重新进入（此前仅回退重置，前进会"中途冒出"）
+    const SEEK_JUMP = 0.3;
 
     const draw = () => {
       raf = requestAnimationFrame(draw);
       const t = v.currentTime;
       // 暂停不跳过绘制：t 不变则弹幕位置不变，画面自然冻结（否则暂停时加载弹幕看不到出现）
-      if (t < lastT) si = 0; // seek 回退：从头重扫
+      if (t < lastT || Math.abs(t - lastT) > SEEK_JUMP) si = 0;
       lastT = t;
 
       const dpr = window.devicePixelRatio || 1;
@@ -89,25 +90,25 @@ export default function DanmakuOverlay({ videoRef, items, enabled, region, fontS
         ctx.fillText(text, x, y);
       };
 
-      // 滚动弹幕：x = 宽 - (t-time)*v，出左界后跳过
+      // 滚动弹幕：x = 宽 - (t-time)*v，出左界后跳过；y 由布局层分区给出（顶部滚动区）
       for (; si < layout.scroll.length; si++) {
         const p = layout.scroll[si];
         if (p.item.time > t) break;
         const x = cw - (t - p.item.time) * p.velocity;
         if (x + measureWidth(p.item.text, fontSize) < 0) continue;
-        drawText(p.item.text, x, p.row * lineHeight, p.item.color);
+        drawText(p.item.text, x, p.y, p.item.color);
       }
-      // 顶部固定（居中）
+      // 顶部固定（居中；y 在滚动区之下，避免与滚动弹幕重叠）
       for (const p of layout.top) {
         if (t < p.item.time || t > p.activeUntil) continue;
         const x = (cw - measureWidth(p.item.text, fontSize)) / 2;
-        drawText(p.item.text, x, p.row * lineHeight, p.item.color);
+        drawText(p.item.text, x, p.y, p.item.color);
       }
-      // 底部固定（居中；row 0 = 最底行，从区域底部向上排）
+      // 底部固定（居中；y 从区域底部向上排）
       for (const p of layout.bottom) {
         if (t < p.item.time || t > p.activeUntil) continue;
         const x = (cw - measureWidth(p.item.text, fontSize)) / 2;
-        drawText(p.item.text, x, regionH - (p.row + 1) * lineHeight, p.item.color);
+        drawText(p.item.text, x, p.y, p.item.color);
       }
     };
     draw();

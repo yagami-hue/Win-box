@@ -177,15 +177,44 @@ async function quarkTransferInner(
   return { url, header: { Referer: REF, 'User-Agent': UA, Cookie: playCookie }, ok: true, fid: ownFid, pdirFid: cacheDirFid };
 }
 
+/** 分享列表分页 fetch 契约（可注入内存树供单测） */
+export type ShareListFetcher = (pdirFid: string, offset: number) => Promise<unknown[]>;
+
 /** 分享列表 → 定位内层真实视频文件，返回 fid + token + name。
  *  优先使用调用方传入的 innerFid（episode JSON 里常有）；否则取列表第一个真实文件。
- *  分享下钻：外层可能是整季目录（dir=true）→ 进一层找视频。 */
+ *  分享下钻：外层可能是整季目录（dir=true）→ 递归进多层目录找视频（支持季/集嵌套目录）。 */
 async function pickShareFile(
   stoken: string,
   pwdId: string,
   cookie: string,
   preferFid: string | undefined,
   log: Logger,
+): Promise<QuarkShareFile | null> {
+  // 默认分页 fetch：走真实 API（size=50，翻 offset 枚举全量；"第一页 50 条"是本次 Bug
+  //   「点第6集落第29集」根因之一——目标集 fid 在 50 条之后匹配不到）
+  const defaultFetcher: ShareListFetcher = async (pdirFid, offset) => {
+    const d = await jget(`${BASE}/share/sharepage/detail${Q}&stoken=${encodeURIComponent(stoken)}&pwd_id=${encodeURIComponent(pwdId)}&pdir_fid=${pdirFid}&size=50&offset=${offset}`, cookie);
+    const list = d.json?.data?.list;
+    return Array.isArray(list) ? list : [];
+  };
+  return resolveShareFile(preferFid, log, defaultFetcher);
+}
+
+/**
+ * ★ 纯逻辑：在分享目录树里解析「要转存的目标文件」（可注入 fetcher，供单测）。
+ * 修复「点第6集却落盘第29集」：
+ *  ① 分页枚举：每个目录按 offset 翻完（上限 MAX_PAGED=500 条），目标集 fid 不再因"第一页 50 条"漏掉；
+ *  ② 递归下钻：支持 多层目录嵌套（根→季目录→集目录→文件），不再只进一层；
+ *  ③ 安全边界一：调用方给了 preferFid 就必须**精确命中**，全树找不到 → 返回 null（宁可转存失败让上层
+ *     回退蜘蛛，也绝不回退"目录里第一个文件"造成播错集）——旧逻辑静默取第一个真实文件是本次错选根因。
+ *  ④ 安全边界二：**没有 preferFid 时也不再盲取首文件**——仅当整根目录（含单层目录内）**唯一真实文件**
+ *     才自动选中（单文件分享/每集一个分享时正确）；多候选（整季目录多集但 id 无 fid 信息）→ 返回 null，
+ *     杜绝"共享一个分享链接→每次都落第一个文件"的错集。
+ */
+export async function resolveShareFile(
+  preferFid: string | undefined,
+  log: Logger,
+  fetcher: ShareListFetcher,
 ): Promise<QuarkShareFile | null> {
   const toFile = (item: any): QuarkShareFile | null => {
     if (!item || typeof item !== 'object' || !item.fid) return null;
@@ -197,44 +226,79 @@ async function pickShareFile(
       size: Number(item.size) || 0,
     };
   };
-  const fetchList = async (pdirFid: string): Promise<any[]> => {
-    const d = await jget(`${BASE}/share/sharepage/detail${Q}&stoken=${encodeURIComponent(stoken)}&pwd_id=${encodeURIComponent(pwdId)}&pdir_fid=${pdirFid}&size=50&offset=0`, cookie);
-    const list = d.json?.data?.list;
-    return Array.isArray(list) ? list : [];
+  const PAGE = 50;
+  const MAX_TOTAL = 500; // 单目录最多枚举 10 页（500 条），覆盖超大分享
+  /** 翻页枚举某目录下的全部节点（去重） */
+  const listAll = async (pdirFid: string): Promise<any[]> => {
+    const out: any[] = [];
+    const seen = new Set<string>();
+    for (let offset = 0; offset * PAGE < MAX_TOTAL; offset++) {
+      const page = await fetcher(pdirFid, offset * PAGE);
+      if (!Array.isArray(page) || page.length === 0) break;
+      for (const f of page) {
+        if (!f || typeof f !== 'object') continue;
+        const node = f as { fid?: unknown; pdir_fid?: unknown; file_name?: unknown };
+        const key = node.fid ? String(node.fid) : `${String(node.pdir_fid ?? '')}:${String(node.file_name ?? '')}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(f);
+      }
+      if (page.length < PAGE) break; // 不满页 → 无更多
+    }
+    return out;
   };
 
-  const outerList = await fetchList('0');
-  if (outerList.length === 0) { log.w('quarkTransfer: 分享列表为空'); return null; }
-  // ★ 首选调用方指定的内层 fid（episode JSON 给的是**内层文件** fid，可能不在外层列表里）。
-  //   精确匹配优先级：外层列表 → 下钻所有整季目录的一层子列表 → 取第一个真实文件。
-  //   修复"播某集却转存了目录里第一个文件/找不到 fid"导致落盘与播放对象错位的问题。
-  let pick: any = null;
+  // 有 preferFid → DFS 递归精确匹配（含多层目录），未命中返回 null（绝不瞎猜回退）
   if (preferFid) {
-    pick = outerList.find((f: any) => String(f?.fid) === String(preferFid)) ?? null;
-    if (!pick) {
-      // 外层是整季目录 → 下钻其内层列表，按 fid 精确匹配（每集一个 vfid）
-      for (const f of outerList) {
-        if (!isDirNode(f)) continue;
-        const sub = await fetchList(String(f.fid));
-        const m = sub.find((x: any) => String(x?.fid) === String(preferFid));
-        if (m) { pick = m; break; }
+    const wanted = String(preferFid);
+    let hit: any = null;
+    const seenDirs = new Set<string>();
+    const dfs = async (pdirFid: string, depth: number): Promise<boolean> => {
+      if (depth > 8 || seenDirs.has(pdirFid)) return false; // 深度/循环保护
+      seenDirs.add(pdirFid);
+      const list = await listAll(pdirFid);
+      const direct = list.find((f: any) => f?.fid && String(f.fid) === wanted);
+      if (direct) { hit = direct; return true; }
+      for (const node of list) {
+        if (!isDirNode(node) || !node.fid) continue;
+        if (await dfs(String(node.fid), depth + 1)) return true;
+      }
+      return false;
+    };
+    const found = await dfs('0', 0);
+    if (!found) {
+      log.w(`quarkTransfer: 分享内未找到指定 fid=${wanted.slice(0, 8)}…（拒绝回退首文件，避免播错集）`);
+      return null;
+    }
+    const file = toFile(hit);
+    if (!file) { log.w('quarkTransfer: 命中节点缺 fid/token'); return null; }
+    return file;
+  }
+
+  // 无 preferFid：候选必须唯一才自动选中（单文件分享 / 每集一个分享链接）。
+  const outer = await listAll('0');
+  const collectCandidates = async (nodes: any[], depth: number): Promise<any[]> => {
+    const files: any[] = [];
+    for (const n of nodes) {
+      if (isDirNode(n) && n.fid) {
+        if (depth > 2) continue; // 限制下钻深度，避免全树扫描
+        files.push(...await collectCandidates(await listAll(String(n.fid)), depth + 1));
+      } else if (!isDirNode(n)) {
+        files.push(n);
       }
     }
+    return files;
+  };
+  const candidates = await collectCandidates(outer, 0);
+  if (candidates.length === 0) {
+    log.w('quarkTransfer: 分享内无真实文件（且调用方未指定 fid）');
+    return null;
   }
-  if (!pick) {
-    pick = outerList.find((f: any) => !isDirNode(f)) ?? null;
-    if (!pick) pick = outerList[0];
+  if (candidates.length !== 1) {
+    log.w(`quarkTransfer: 分享含 ${candidates.length} 个文件但 id 未带上 fid，拒绝盲选首文件（避免播错集）`);
+    return null;
   }
-  const file = toFile(pick);
-  // 外层是目录（整季）且未命中具体集 → 下钻一层，取首个真实视频文件（顺带拿 token/name）
-  if (file && isDirNode(pick)) {
-    const innerList = await fetchList(String(pick.fid));
-    const inner = innerList.find((f: any) => !isDirNode(f)) ?? innerList[0] ?? null;
-    if (inner) return toFile(inner);
-  }
-  if (!file) return null;
-  if (!file.name) log.w(`quarkTransfer: 分享文件缺 file_name（fid=${file.fid.slice(0,8)}），文件名护栏可能失配`);
-  return file;
+  return toFile(candidates[0]);
 }
 
 /** 每次播放的会话子目录前缀（对齐 YunX TEMP_SUBDIR_PREFIX=tr_；用于规避同名转存冲突 + 精确清理） */
@@ -512,4 +576,30 @@ function dirCacheKey(cookie: string): string {
 export function isQuarkSharePlay(id: string): boolean {
   if (!id) return false;
   return /pan\.quark\.cn\/s\//i.test(id) || /"sId":\s*"/i.test(id);
+}
+
+/**
+ * ★ 从 episode id（夸克分享 JSON 或直达链接）提取「内层文件 fid」。
+ * 玩偶/立播等源的 episode JSON 字段不统一（fid / vfid / file_id / fids 数组 / URL ?fid= 参数），
+ * 只认 `"fid"` 会把字段名不同的传成 undefined → 转存落到「目录第一个文件」= 播第6集落第29集。
+ * 按常见字段名逐一尝试；取不到返回 ''（上游 resolveShareFile 无 preferFid 时仍会回退首文件）。
+ */
+export function extractEpisodeFid(id: string): string {
+  if (!id) return '';
+  // JSON：fid / vfid / file_id（字符串或数组首元素）
+  const pats = [
+    /"fid"\s*:\s*"([^"]+)"/,
+    /"vfid"\s*:\s*"([^"]+)"/,
+    /"file_id"\s*:\s*"([^"]+)"/,
+    /"fid"\s*:\s*\[?\s*"([^"]+)"/,
+    /"fids"\s*:\s*\[\s*"([^"]+)"/,
+  ];
+  for (const re of pats) {
+    const m = re.exec(id);
+    if (m?.[1]) return m[1];
+  }
+  // 直达链接 query（pan.quark.cn/s/xxx?fid=…&更多 或 #/ 内嵌页；取值到 & 或 # 为止）
+  const q = /[?&](?:fid|vfid|file_id)=([^&#"'\\\s]+)/i.exec(id);
+  if (q?.[1]) return decodeURIComponent(q[1]);
+  return '';
 }

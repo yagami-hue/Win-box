@@ -81,6 +81,9 @@ export async function assrtSearch(token: string, keyword: string, isFile = false
 
 /**
  * 多关键词检索 + 去重合并（同前）。按字幕 ID 去重。
+ * ★ S2（修复）：多关键词命中同一字幕时，hitKeyword 不再固定取首个——改取「与该字幕标题
+ *   关联更准确」的关键词（规范化后与 title/subname 精确相等者优先，其次较长的关键词更具体），
+ *   避免 UI 上"来源关键词"与实际命中词不符误导用户。
  */
 export async function assrtSearchMulti(
   token: string,
@@ -93,7 +96,9 @@ export async function assrtSearchMulti(
     if (!c.file) return;
     const prev = seen.get(c.file);
     if (!prev) seen.set(c.file, { ...c, hitKeyword: kw });
-    else if (!prev.hitKeyword) seen.set(c.file, { ...prev, hitKeyword: kw });
+    else if (prev.hitKeyword && hitKeywordQuality(kw, c) > hitKeywordQuality(prev.hitKeyword, prev)) {
+      seen.set(c.file, { ...prev, hitKeyword: kw });
+    }
   };
   const uniqueKws = Array.from(new Set(keywords.filter(Boolean))).filter((k) => k.length >= 1).slice(0, 6);
   const queue = [...uniqueKws];
@@ -120,6 +125,24 @@ export async function assrtSearchMulti(
     });
   }
   return out;
+}
+
+/**
+ * ★ S2：评估「关键词 kw 作为字幕 c 的命中来源」的准确度（分数越高越匹配）。
+ *   规范化比较：逐字去空白+小写；完全相等 3 分 > 关键词是标题子串 2 分 > 无关联 0 分。
+ *   无 title/subname 时取较长关键词（更具体）作弱区分。
+ */
+export function hitKeywordQuality(kw: string, c: SubtitleCandidate): number {
+  const k = (kw || '').trim().toLowerCase();
+  const t = (c.title || '').trim().toLowerCase();
+  const sn = (c.subname || '').trim().toLowerCase();
+  const norm = (s: string) => s.replace(/\s+/g, '');
+  if (!k) return -1;
+  if (t && norm(k) === norm(t)) return 3;
+  if (sn && norm(k) === norm(sn)) return 3;
+  if (t && norm(t).includes(norm(k))) return 2;
+  if (sn && norm(sn).includes(norm(k))) return 2;
+  return k.length > 0 ? 1 : 0;
 }
 
 /** 通过 detail 拿字幕下载地址（file0.assrt.net/download/{id}/...）。 */
@@ -168,14 +191,24 @@ export async function assrtFetch(
   });
   const buf = Buffer.from(await r.body.arrayBuffer());
   if (r.statusCode !== 200 || buf.length === 0) return '';
-  // 可能是 srt/ass 文本；若为压缩/二进制（rar/zip）则无法直接解析，返回空由上层提示
-  const head = buf.slice(0, 4);
-  if (head[0] === 0x52 && head[1] === 0x61 && head[2] === 0x72 && head[3] === 0x21) return ''; // RAR
-  if (head[0] === 0x50 && head[1] === 0x4b) return ''; // ZIP
+  // ★ S6（修复）：识别常见压缩/归档魔数（zip/rar/gzip/7z/bzip2）→ 非文本返回空由上层提示，
+  //   不再把压缩包字节当文本解码成乱码字符串
+  if (isArchive(buf)) return '';
   return decodeSubtitle(buf);
 }
 
-// 字幕文本解码：BOM 优先，其次 UTF-8 尝试，GBK 兜底。
+/** ★ S6：判断是否为压缩/归档文件（前面若干字节的魔数）。 */
+export function isArchive(buf: Buffer): boolean {
+  const h = buf.subarray(0, 10);
+  if (h[0] === 0x52 && h[1] === 0x61 && h[2] === 0x72 && h[3] === 0x21) return true; // RAR "Rar!"
+  if (h[0] === 0x50 && h[1] === 0x4b) return true; // ZIP "PK"
+  if (h[0] === 0x1f && h[1] === 0x8b) return true; // gzip
+  if (h[0] === 0x37 && h[1] === 0x7a && h[2] === 0xbc && h[3] === 0xaf && h[4] === 0x27 && h[5] === 0x1c) return true; // 7z
+  if (h[0] === 0x42 && h[1] === 0x5a && h[2] === 0x68) return true; // bzip2 "BZh"
+  return false;
+}
+
+// 字幕文本解码：BOM 优先，其次 UTF-8 / GB18030 双解码打分选优（S3），消除误判。
 export function decodeSubtitle(buf: Buffer): string {
   if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
     return buf.toString('utf-8').replace(/^\uFEFF/, '');
@@ -183,8 +216,36 @@ export function decodeSubtitle(buf: Buffer): string {
   if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
     return iconv.decode(buf.subarray(2), 'utf-16le');
   }
-  const utf8 = buf.toString('utf-8');
-  const asBuf = Buffer.from(utf8, 'utf-8');
-  if (asBuf.equals(buf) && !utf8.includes('\uFFFD')) return utf8;
-  return iconv.decode(buf, 'gb18030');
+  // ★ S3（修复）：UTF-8 与 GB18030 各严格解码一次，用「文本合理性得分」选优。
+  //   旧实现 `Buffer.from(utf8)==buf` 对「ASCII+GBK 混合」片（ASCII 段往返相等）会误判为
+  //   UTF-8，导致 GBK 中文被解成拉丁扩展乱码。双解码打分对「GBK 双字节恰是合法 UTF-8 序列」
+  //   的边界也正确：GBK 解出可读汉字得分高，UTF-8 解出怪异拉丁字符得分低 → 选 GBK。
+  const utf8 = tryDecodeUtf8(buf);
+  const gbk = iconv.decode(buf, 'gb18030');
+  return textScore(utf8) >= textScore(gbk) ? utf8 : gbk;
+}
+
+/** 严格 UTF-8 解码；非法序列返回原样（null 用空串避免 token 数错） */
+function tryDecodeUtf8(buf: Buffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {
+    return '';
+  }
+}
+
+/** 文本合理度：CJK 汉字加分、ASCII 可打印 +1、控制/替换符直接判负无穷。 */
+export function textScore(s: string): number {
+  let score = 0;
+  for (const ch of s) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (ch === '\uFFFD') return -Infinity;
+    if ((code >= 0x20 && code < 0x7f)) score += 1; // ASCII 可打印
+    else if (code >= 0x4e00 && code <= 0x9fff) score += 3; // CJK 汉字
+    else if (code >= 0x3000 && code <= 0x303f) score += 1.5; // CJK 标点
+    else if (code >= 0xff00 && code <= 0xffef) score += 1.5; // 全角字符
+    else if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code < 0xa0)) return -Infinity; // 控制区/罕见
+    else score += 0.5;
+  }
+  return s.length ? score / s.length : -Infinity;
 }

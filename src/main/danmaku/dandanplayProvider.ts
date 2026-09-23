@@ -39,6 +39,9 @@ interface BangumiJson {
  * 带签名 GET 并手动跟随重定向（返回最终 2xx 响应或最后一次非重定向响应）。
  * ★ 弹幕 comment 接口会 302 到 cas2.dandanplay.net/api/comment/{id}?sign=…（CDN 弹幕服务）；
  *   undici v7 对不同来源的 302 不自动跟随，须手动按 Location 循环（与主进程 HttpClient 一致）。
+ * ★ D9（修复）：重定向后的请求**不再带基于原路径的 X-Signature/X-Timestamp/X-AppId 头**
+ *   ——签名绑定的是请求方路径，跳转目标（cas2）用 Location 自带的 sign 参数鉴权；
+ *   继续带旧签名头一旦服务端校验 header 即 401，纯属隐患。仅首跳携带签名。
  */
 async function getWithRedirect(
   url0: string,
@@ -48,14 +51,16 @@ async function getWithRedirect(
   accept: string,
 ): Promise<{ status: number; body: Buffer }> {
   let url = url0;
+  let redirected = false; // 是否已发生跳转（此后不再带签名头）
   for (let i = 0; i < MAX_REDIRECTS; i++) {
+    const headers: Record<string, string> = {
+      'User-Agent': UA,
+      Accept: accept,
+    };
+    if (!redirected) Object.assign(headers, buildDanmakuHeaders(appId, appSecret, signPath));
     const r = await undiciRequest(url, {
       method: 'GET',
-      headers: {
-        ...buildDanmakuHeaders(appId, appSecret, signPath),
-        'User-Agent': UA,
-        Accept: accept,
-      },
+      headers,
       headersTimeout: 20000,
       bodyTimeout: 20000,
       dispatcher: agent,
@@ -64,6 +69,7 @@ async function getWithRedirect(
     const code = r.statusCode;
     if (code >= 300 && code < 400 && loc) {
       url = new URL(String(loc), url).toString();
+      redirected = true;
       await r.body.arrayBuffer().catch(() => undefined); // 排空，释放连接
       continue;
     }

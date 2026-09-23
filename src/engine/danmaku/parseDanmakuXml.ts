@@ -41,17 +41,23 @@ function toHexColor(n: number): string {
 /** 解析 B 站格式弹幕 XML。非 <d> 内容忽略；无有效项返回 []。 */
 export function parseDanmakuXml(xml: string): DanmakuItem[] {
   const out: DanmakuItem[] = [];
-  const re = /<d\s+p="([^"]*)"\s*>([\s\S]*?)<\/d>/g;
+  // ★ D8（修复）：①自闭合 <d …/> 统一成空对（内容空 → 丢弃，避免正则吞后续弹幕）；
+  //   ②p 属性宽松提取：属性顺序任意（不一定首位）、单双引号均可
+  const normalized = (xml || '').replace(/<d\b([^>]*?)\/>/g, '<d$1></d>');
+  const re = /<d\b([^>]*)>([\s\S]*?)<\/d>/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(xml || '')) !== null) {
-    const attrs = m[1].split(',');
-    const time = parseFloat(attrs[0]);
+  while ((m = re.exec(normalized)) !== null) {
+    const attrs = m[1];
+    const pm = /(?:^|\s)p\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(attrs);
+    if (!pm) continue;
+    const p = (pm[1] ?? pm[2] ?? '').split(',');
+    const time = parseFloat(p[0]);
     if (!Number.isFinite(time)) continue;
-    const mode = parseInt(attrs[1] || '0', 10);
+    const mode = parseInt(p[1] || '0', 10);
     const type = toType(mode);
     if (!type) continue;
-    const size = clamp(parseInt(attrs[2] || '25', 10) || 25, 12, 40);
-    const color = toHexColor(parseInt(attrs[3] || '0', 10) || 0);
+    const size = clamp(parseInt(p[2] || '25', 10) || 25, 12, 40);
+    const color = toHexColor(parseInt(p[3] || '0', 10) || 0);
     // 内容：剥 CDATA 再反转义，去 \r 与空串
     let text = m[2].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
     text = unescapeXml(text).replace(/\r/g, '');

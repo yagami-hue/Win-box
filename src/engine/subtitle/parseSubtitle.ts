@@ -39,14 +39,20 @@ export function parseSrt(text: string): SubtitleCue[] {
   return out;
 }
 
-// WebVTT：头部 WEBVTT（可选 NOTE/STYLE/REGION 等），其余同 SRT cue（时间轴用 . xxx 且可带设置）。
+// WebVTT：头部 WEBVTT（可选 NOTE/STYLE/REGION 等区块），其余同 SRT cue（时间轴用 . xxx 且可带设置）。
 export function parseVtt(text: string): SubtitleCue[] {
   const out: SubtitleCue[] = [];
-  // 去前导注释/头部，仅保留含 --> 的 cue 块
-  const content = text.replace(/^\uFEFF?WEBVTT.*?(?=\S)/s, '');
+  // 去 BOM + 首行 WEBVTT header（可带标题文本），保留其余
+  const content = text.replace(/^\uFEFF?WEBVTT[^\n]*(?:\n|$)/, '');
   const blocks = content.split(/\r?\n\s*\r?\n/);
   for (const b of blocks) {
-    const lines = b.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('NOTE'));
+    const lines = b.split(/\r?\n/).map((l) => l.trim()).filter((l) => l);
+    if (!lines.length) continue;
+    // ★ S7（修复）：按「块首行」识别区块头（VTT 规范保留字 NOTE/STYLE/REGION）→ 整块跳过，
+    //   不再逐行过滤 NOTE（旧逻辑会误删以 NOTE 开头的 cue 文本，且注释块内含 --> 的行
+    //   会被误当 cue 解析成字幕文本）。
+    const head = lines[0].toUpperCase();
+    if (head === 'NOTE' || head === 'STYLE' || head === 'REGION' || head.startsWith('NOTE ')) continue;
     const timeIdx = lines.findIndex((l) => l.includes('-->'));
     if (timeIdx < 0) continue;
     const [sRaw, ePart] = lines[timeIdx].split('-->');
@@ -98,9 +104,18 @@ export function parseSubtitleFile(
 /** 字幕总体时间偏移（±秒，用于用户手动校准）。 */
 export function shiftCues(cues: SubtitleCue[], offsetSec: number): SubtitleCue[] {
   if (!offsetSec) return cues;
-  return cues.map((c) => ({
-    start: Math.max(0, c.start + offsetSec),
-    end: Math.max(0, c.end + offsetSec),
-    text: c.text,
-  }));
+  const out: SubtitleCue[] = [];
+  for (const c of cues) {
+    const start = c.start + offsetSec;
+    const end = c.end + offsetSec;
+    // ★ S4（修复）：完全移出 0 点之前的区间直接丢弃；部分穿零的区间 start 钳 0，
+    //   保证 end > start（旧实现两端各 Math.max(0,…) 会把穿零区间压成 start=end 空区间）。
+    if (end <= 0) continue;
+    out.push({
+      start: Math.max(0, start),
+      end: Math.max(Math.max(0, start), end),
+      text: c.text,
+    });
+  }
+  return out;
 }

@@ -5,7 +5,7 @@ import { UserConfigManager } from '../store/UserConfigManager';
 import { DriveStore } from '../store/DriveStore';
 import { getAdapter } from '../net/qr';
 import { runDriveWebLogin } from '../net/webLogin';
-import { quarkTransfer, isQuarkSharePlay, quarkFileDelete } from '../net/quarkTransfer';
+import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid } from '../net/quarkTransfer';
 import { fileLogger } from '../util/logger';
 import { parseSiteConfig, parseSiteConfigWithBase, type ParseResult } from '../../engine/config/ApiConfigParser';
 import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName, type MultiRepo } from '../../engine/config/multiRepo';
@@ -64,7 +64,9 @@ export class SpiderHost {
   private drives: DriveStore;
   private subtitles: SubtitleStore;
   private danmakuStore: DanmakuStore;
+  /** ★ 弹幕内容缓存（只缓存成功非空结果；上限 200 条防无限增长，满则淘汰最旧）——修复 D4 */
   private danmakuCache = new Map<number, string>();
+  private static readonly DANMAKU_CACHE_MAX = 200;
   /** TMDB 元数据补全（配置+缓存；缺封面/缺简介时兜底查询） */
   private metaStore: MetaStore;
   /** ★ 夸克已落盘待清理队列（关闭播放/窗口/退出时删除，进度仍保留在本地历史；持久化防重启丢失） */
@@ -105,7 +107,7 @@ export class SpiderHost {
     // 用户配置持久化：<userData>/user-config.json；重启后恢复 sources/lives/全局 jar/选中源
     this.manager = new UserConfigManager(new JsonStore(join(userDataDir(), 'user-config.json')), this.logger);
     this.drives = new DriveStore(new JsonStore(join(userDataDir(), 'drive-tokens.json')), this.logger, safeStorageDriveCodec());
-    this.subtitles = new SubtitleStore(join(userDataDir(), 'subtitle.json'), this.logger);
+    this.subtitles = new SubtitleStore(join(userDataDir(), 'subtitle.json'), this.logger, safeStorageDriveCodec());
     this.danmakuStore = new DanmakuStore(join(userDataDir(), 'danmaku.json'), this.logger);
     this.metaStore = new MetaStore(new JsonStore(join(userDataDir(), 'meta.json')));
     this.autoRefreshStore = new JsonStore(join(userDataDir(), 'auto-refresh.json'));
@@ -370,11 +372,19 @@ export class SpiderHost {
   async danmakuFetch(episodeId: number): Promise<string> {
     const cred = this.danmakuCreds();
     if (!cred || !episodeId) return '';
+    // ★ D4：仅缓存非空成功结果（失败/空串不缓存 → 下次自动重试，不因一次网络抖动整会话空白）
     const hit = this.danmakuCache.get(episodeId);
-    if (hit !== undefined) return hit;
+    if (hit) return hit;
     try {
       const xml = await dandanplayComment(cred.appId, cred.appSecret, episodeId);
-      this.danmakuCache.set(episodeId, xml);
+      if (xml) {
+        // 缓存满 → 淘汰最旧（Map 迭代序 = 插入序，首个即最旧）
+        if (this.danmakuCache.size >= SpiderHost.DANMAKU_CACHE_MAX) {
+          const oldest = this.danmakuCache.keys().next().value;
+          if (oldest !== undefined) this.danmakuCache.delete(oldest);
+        }
+        this.danmakuCache.set(episodeId, xml);
+      }
       return xml;
     } catch (e) {
       this.logger.e('danmaku:comment 失败', e);
@@ -726,7 +736,8 @@ export class SpiderHost {
         const pwdId = m ? m[1] : '';
         if (pwdId) {
           try {
-            const innerFid = (/"fid":\s*"([^"]+)"/.exec(id) || [])[1];
+            // ★ 修复「点第6集落盘第29集」：fid 提取兼容 fid/vfid/file_id/URL 参数（旧正则只认 "fid"）
+            const innerFid = extractEpisodeFid(id);
             const t = await quarkTransfer(pwdId, quarkCookie, { innerFid, logger: fileLogger });
             if (t.ok && t.url) {
               fileLogger.i(`quarkTransfer 直链 ok: ${t.url.slice(0, 90)}...`);

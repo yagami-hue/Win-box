@@ -261,6 +261,10 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   // ★ 弹幕查询剧名：有剧名时自动填入识别名，用户可手动改写后搜索（无剧名也能手动输入）
   const [dmQuery, setDmQuery] = useState('');
   const dmQueryUserRef = useRef(false);
+  // ★ 请求代际（D3/S5 竞态修复）：切集或发起新请求时递增；异步返回后若代际不匹配
+  //   （期间换过集/发过更新请求）→ 丢弃结果，防止旧的弹幕/字幕窜到新集。
+  const dmGenRef = useRef(0);
+  const subGenRef = useRef(0);
   useEffect(() => {
     if (!dmQueryUserRef.current) setDmQuery(resourceName || danmakuTitle || '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -286,7 +290,9 @@ export default function VideoPlayer(props: VideoPlayerProps) {
 
   // 播放/换集（url 变化）→ 仅清空弹幕状态。
   // ★ 不自动搜索：弹幕 API 只在用户显式打开开关/点「匹配弹幕」时才调用，避免资源浪费。
+  // ★ 递增弹幕代际：使换集前在途的搜索/拉取结果全部失效（不落到新集）。
   useEffect(() => {
+    dmGenRef.current++;
     setDmItems([]);
     setDmActiveEp(null);
     setDmMsg('');
@@ -295,10 +301,12 @@ export default function VideoPlayer(props: VideoPlayerProps) {
 
   // 拉取并应用某个候选剧集的弹幕
   const applyDanmaku = async (c: DanmakuCandidate) => {
+    const gen = ++dmGenRef.current; // 本次操作为最新代际，旧的在途请求失效
     setDmSearching(true);
     setDmMsg('');
     try {
       const xml = await client.danmakuFetch(c.episodeId);
+      if (gen !== dmGenRef.current) return; // 已换集/已发起更新拉取 → 丢弃过期结果
       const items = parseDanmakuResponse(xml || '');
       setDmItems(items);
       setDmActiveEp(c.episodeId);
@@ -313,9 +321,10 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           : '该剧集暂无弹幕',
       );
     } catch (e) {
+      if (gen !== dmGenRef.current) return; // 过期错误同样丢弃（避免误导）
       setDmMsg((e as Error).message || '弹幕加载失败');
     } finally {
-      setDmSearching(false);
+      if (gen === dmGenRef.current) setDmSearching(false);
     }
   };
 
@@ -324,11 +333,13 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const matchDanmaku = async (query: string, epSource?: string) => {
     const name = query.trim();
     if (!name) { setDmMsg('请填写要搜索的剧名'); return; }
+    const gen = ++dmGenRef.current; // 本次匹配为最新代际
     setDmSearching(true);
     setDmMsg('');
     setDmCands([]);
     try {
       const list = await searchDanmakuCandidates(name);
+      if (gen !== dmGenRef.current) return; // 期间换集/发起新匹配 → 丢弃
       setDmCands(list || []);
       if (!list || !list.length) {
         setDmMsg(
@@ -342,9 +353,10 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       const preferred = targetEp ? list.find((c) => episodeMatches(c.episodeTitle, targetEp)) : undefined;
       await applyDanmaku(preferred || list[0]);
     } catch (e) {
+      if (gen !== dmGenRef.current) return;
       setDmMsg((e as Error).message || '弹幕匹配失败');
     } finally {
-      setDmSearching(false);
+      if (gen === dmGenRef.current) setDmSearching(false);
     }
   };
 
@@ -379,7 +391,9 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   }, []);
 
   // 切换集时清空旧字幕与候选（subQuery 由 resourceName effect 重填）
+  // ★ 递增字幕代际：使换集前在途的搜索/下载结果全部失效（不落到新集）。
   useEffect(() => {
+    subGenRef.current++;
     setSubCues([]);
     setSubActive('');
     setSubCands([]);
@@ -427,11 +441,13 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const doSearch = async () => {
     const name = subQuery.trim();
     if (!name) { setSubMsg('请填写要搜索的剧名'); setSubSearching(false); return; }
+    const gen = ++subGenRef.current; // 本次搜索为最新代际，旧的在途搜索失效
     setSubSearching(true);
     setSubMsg('');
     setSubCands([]);
     try {
       const list = await client.subtitleSearch(name);
+      if (gen !== subGenRef.current) return; // 期间换集/发起新搜索 → 丢弃
       setSubCands(list || []);
       if (list && list.length && resourceName) {
         // 怪名→真名记忆：用户改写的词命中后记住，下次同资源自动复用（对称弹幕 winbox-dm-mem）
@@ -444,16 +460,18 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       }
       if (!list || !list.length) setSubMsg('未找到匹配字幕');
     } catch (e) {
-      setSubMsg((e as Error).message);
+      if (gen === subGenRef.current) setSubMsg((e as Error).message);
     } finally {
-      setSubSearching(false);
+      if (gen === subGenRef.current) setSubSearching(false);
     }
   };
 
   const selectSub = async (c: SubtitleCandidate) => {
+    const gen = ++subGenRef.current; // 本次下载为最新代际，旧的在途下载失效
     setSubMsg('');
     try {
       const text = await client.subtitleFetch(c);
+      if (gen !== subGenRef.current) return; // 期间换集/发起新下载 → 丢弃
       if (!text) { setSubMsg('字幕下载为空'); return; }
       const cues = parseSubtitleFile(c.subname || '', text);
       if (!cues.length) { setSubMsg('字幕解析失败（空或无有效时间轴）'); return; }
@@ -464,7 +482,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       setSubPanel(false);
       void client.subtitleSet({ enabled: true }).catch(() => undefined);
     } catch (e) {
-      setSubMsg((e as Error).message);
+      if (gen === subGenRef.current) setSubMsg((e as Error).message);
     }
   };
 

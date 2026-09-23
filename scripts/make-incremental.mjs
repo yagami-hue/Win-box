@@ -78,7 +78,11 @@ function sha1(p) {
 }
 
 const version = await readNewVersion(newDir);
-const version4 = version + '.0'; // NSIS VIProductVersion 需要 x.y.z.w
+// ★ win7 等带后缀版本（0.81.2-win7）：NSIS VIProductVersion 只认纯 x.y.z.w，剥掉 -后缀
+const baseVer = version.split('-')[0];
+const vParts = baseVer.split('.').map((s) => /^\d+$/.test(s) ? s : '0'); // 非数字段兜底 0
+while (vParts.length < 4) vParts.push('0');
+const version4 = vParts.slice(0, 4).join('.'); // NSIS VIProductVersion 需要 x.y.z.w
 
 const oldMap = walk(oldDir, oldDir);
 const newMap = walk(newDir, newDir);

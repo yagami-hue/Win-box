@@ -68,6 +68,27 @@ describe('parseDanmakuXml', () => {
     expect(parseDanmakuXml('<i>没有任何弹幕</i>')).toEqual([]);
     expect(parseDanmakuXml('hello')).toEqual([]);
   });
+
+  it('D8：单引号 p 属性', () => {
+    const xml = `<d p='5.5,1,25,16711680,0,0,x,0'>单引号</d>`;
+    const out = parseDanmakuXml(xml);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ time: 5.5, type: 'scroll', text: '单引号', color: '#ff0000' });
+  });
+
+  it('D8：p 属性不在首位（属性顺序任意）', () => {
+    const xml = '<d style="x" user="u" p="2,5,25,0,0,0,x,0">顺序乱</d>';
+    const out = parseDanmakuXml(xml);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ time: 2, type: 'top', text: '顺序乱' });
+  });
+
+  it('D8：自闭合 <d …/> 忽略且不吞后续弹幕', () => {
+    const xml = '<d p="1,1,25,0,0,0,x,0"/>正常<d p="2,1,25,16777215,0,0,x,0"/>好<d p="3,1,25,0,0,0,x,0">真弹幕</d>';
+    const out = parseDanmakuXml(xml);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ time: 3, text: '真弹幕' });
+  });
 });
 
 describe('parseDanmakuJson（B 站新版 JSON 弹幕，弹弹play comment 实测格式）', () => {
