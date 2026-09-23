@@ -12,6 +12,7 @@ import { buildSearchQuery, extractEp, animeTitleForQuery } from '../../engine/su
 import type { SubtitleSettings, SubtitleCandidate } from '../../shared/subtitle';
 import { parseDanmakuResponse } from '../../engine/danmaku/parseDanmakuXml';
 import { danmakuQueryCandidates } from '../../engine/danmaku/normalizeQuery';
+import { resolvePlayTarget } from '../lib/playTarget';
 import { driveProviderFromUrl, driveProviderLabel } from '../../shared/driveProvider';
 import {
   DEFAULT_DANMAKU_SETTINGS,
@@ -572,7 +573,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     }
     (v as unknown as { __flv?: mpegts.Player }).__flv = undefined;
 
-    const low = url.toLowerCase().split('?')[0];
+    // ★ 判型还原：py 蜘蛛中继 URL（/play?url=…）还原为真实 m3u8/flv 目标（见 resolvePlayTarget）
+    const low = resolvePlayTarget(url).toLowerCase().split('?')[0];
     let restored = false;
     // ---- 实时网速：原生直连（无 hls/mpegts 统计）时用 Resource Timing 采样，统一以 KB/s 上报 ----
     let speedTimer: ReturnType<typeof setInterval> | null = null;
