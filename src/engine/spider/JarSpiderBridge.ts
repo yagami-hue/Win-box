@@ -5,7 +5,7 @@
 // 引擎层契约：所有宿主能力经 EngineHost 注入；本文件只做进程编排，不 import electron。
 import { spawn } from 'node:child_process';
 import { mkdirSync, existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import type { EngineHost } from '../ports';
 import { md5Hex } from '../util/md5';
 import { NullLogger } from '../util/logger';
@@ -27,10 +27,9 @@ export interface JarBridgeOptions {
    */
   shellShimClasses?: string;
   /**
-   * ★ jython（.py 蜘蛛运行时）按需下载落盘目录（需可写；安装版建议 userData）。
-   * release76 起 jython-standalone(45MB) 不再打进安装包 —— 瘦身最大单项；
-   * 首次遇到 .py 源时从内置镜像下载到此目录，联网即可用、离线优雅降级。
-   * 缺省 = 随 jvmDir/libs 存在则用 libs，否则 .py 源降级。
+   * ★ 嵌入式 CPython（.py 蜘蛛运行时）按需下载落盘目录（需可写；安装版建议 userData）。
+   * 首次遇到 .py 源时从内置镜像下载 python-3.11.6-embed 并解压第三方库到此处，
+   * 联网即可用、离线降级为 PY_UNSUPPORTED。缺省未配置则 .py 源降级。
    */
   pyRuntimeDir?: string;
 }
@@ -404,68 +403,183 @@ export class JarSpiderBridge {
       ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []),
       'SpiderRunner', jarPaths.join(';'), className, method, ...args,
     ];
-    return this.runJvm(argv, className, method, timeoutMs);
+    return this.runSubprocess(this.javaExe(), argv, className, method, timeoutMs);
   }
 
   /**
-   * ★ 新增：.py 蜘蛛（Jython）调用入口。
-   * spawn PythonRunner 在 JVM 内用 Jython(Py2.7) 执行 .py。
-   * argv 语义与 SpiderRunner 对齐：<pyPath> <className> <method> [ext] [args...]
-   * classpath = stubs（含 PythonRunner）+ libs + jython（见 ensurePythonRuntime）。
+   * .py 蜘蛛（嵌入式 CPython3）调用入口。
+   * spawn <pyRuntimeDir>/<PY_VER>/python.exe runner.py，argv 语义与旧 PythonRunner 对齐：
+   *   <pyPath> <className> <method> [ext] [args...]
+   * runner.py 与 python.exe 同目录（ensurePythonRuntime 落盘），首行注入 sys.path
+   * （Lib/site-packages/base），已处理 embed 包 _pth 隔离。
+   * ★ 中文 Windows Python 默认 stdout GBK → 必须显式 PYTHONIOENCODING=utf-8。
    */
   async callPython(pyPath: string, clsName: string, method: string, args: string[], timeoutMs?: number): Promise<string> {
-    // ★ release76：jython-standalone（45MB）不再打包内置 → 按需下载；失败抛错由上层
-    //   （PySpider）转成 SourceProblemError 上屏，不静默返回空。
-    const pyJar = await this.ensurePythonRuntime();
-    const base = this.classpathJars();
-    const cp = pyJar && !pyJar.startsWith(join(this.jvmDir, 'libs')) ? `${base};${pyJar}` : base;
-    const argv = [
-      ...this.jvmPrefix(cp),
-      'PythonRunner', pyPath, clsName, method, ...args,
-    ];
-    return this.runJvm(argv, clsName, method, timeoutMs ?? 30000);
+    // 运行时缺失/下载失败 → ensurePythonRuntime 抛错，上层（PySpider）转 PY_UNSUPPORTED 上屏
+    const dir = await this.ensurePythonRuntime();
+    const pyExe = join(dir, 'python.exe');
+    const runner = join(dir, 'runner.py');
+    const argv = [runner, pyPath, clsName, method, ...args];
+    return this.runSubprocess(pyExe, argv, clsName, method, timeoutMs ?? 100000, { PYTHONIOENCODING: 'utf-8' });
   }
 
-  /** jython 本地 jar 名（与 Maven Central 产物名一致） */
-  private static readonly PYTHON_JAR = 'jython-standalone-2.7.3.jar';
-  /** 下载源：Maven Central 官方 + 华为云镜像（国内可达性更稳），依次尝试 */
-  private static readonly PYTHON_URLS = [
-    'https://repo1.maven.org/maven2/org/python/jython-standalone/2.7.3/jython-standalone-2.7.3.jar',
-    'https://mirrors.huaweicloud.com/repository/maven/org/python/jython-standalone/2.7.3/jython-standalone-2.7.3.jar',
+  /** python 运行时版本目录（main 用 3.11；win7-legacy 同步时换 3.8.x —— 3.11.2+ 弃 Win7） */
+  private static readonly PY_VER = '3.11.6';
+  /** 嵌入包（embed）下载源：华为云 → npmmirror → python.org，依次尝试（python.org 被墙概率高留最后） */
+  private static readonly PYTHON_EMBED_URLS = [
+    `https://mirrors.huaweicloud.com/python/${JarSpiderBridge.PY_VER}/python-${JarSpiderBridge.PY_VER}-embed-amd64.zip`,
+    `https://registry.npmmirror.com/-/binary/python/${JarSpiderBridge.PY_VER}/python-${JarSpiderBridge.PY_VER}-embed-amd64.zip`,
+    `https://www.python.org/ftp/python/${JarSpiderBridge.PY_VER}/python-${JarSpiderBridge.PY_VER}-embed-amd64.zip`,
+  ];
+  /** 第三方库 wheel（win_amd64，cp311）。lxml 为 C 扩展 wheel（已静态捆绑 libxml2 .pyd）；requests 族纯 py。 */
+  private static readonly PY_WHEELS: Array<{ name: string; file: string; required: boolean }> = [
+    { name: 'lxml', file: 'lxml-4.9.2-cp311-cp311-win_amd64.whl', required: false },
+    { name: 'requests', file: 'requests-2.31.0-py3-none-any.whl', required: true },
+    { name: 'urllib3', file: 'urllib3-1.26.18-py2.py3-none-any.whl', required: true },
+    { name: 'certifi', file: 'certifi-2023.7.22-py2.py3-none-any.whl', required: true },
+    { name: 'charset_normalizer', file: 'charset_normalizer-3.2.0-py3-none-any.whl', required: true },
+    { name: 'idna', file: 'idna-3.4-py3-none-any.whl', required: true },
+  ];
+  /** PyPI simple 镜像根（回退到带 `simple/` 的路径，由其索引解析 wheel 真实地址） */
+  private static readonly PY_WHEEL_SIMPLE = [
+    'https://pypi.tuna.tsinghua.edu.cn/simple/',
+    'https://mirrors.huaweicloud.com/repository/pypi/simple/',
   ];
 
-  /**
-   * 确保 Jython 运行时可用，返回 jython jar 的绝对路径；失败抛错（含可执行提示）。
-   * 优先级：随包 libs（旧安装/开发机仍内置）→ pyRuntimeDir 已下载 → 按需下载。
-   */
   private async ensurePythonRuntime(): Promise<string> {
-    const bundled = join(this.jvmDir, 'libs', JarSpiderBridge.PYTHON_JAR);
-    if (existsSync(bundled)) return bundled;
-    if (!this.pyRuntimeDir) throw new Error('python 源需要 Jython 运行时，但未配置下载目录');
-    const target = join(this.pyRuntimeDir, JarSpiderBridge.PYTHON_JAR);
-    if (existsSync(target) && statSync(target).size > 1024 * 1024) return target;
+    if (!this.pyRuntimeDir) throw new Error('python 源需要嵌入式 Python 运行时，但未配置下载目录');
+    const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
+    const pyExe = join(dir, 'python.exe');
+    if (existsSync(pyExe)) {
+      // 运行时已就绪但第三方库/runner 可能缺失 → 幂等补齐（首次下载中断后重试自愈）
+      await this.ensureRuntimeLibs(dir).catch(() => undefined);
+      this.placeRunnerFiles(dir);
+      return dir;
+    }
     const logger = this.host?.logger;
-    // 下载 45MB 大文件，超时放宽容；buffer:2 拿 base64（宿主 HttpClient）
     let lastErr = '';
-    for (const url of JarSpiderBridge.PYTHON_URLS) {
+    for (const url of JarSpiderBridge.PYTHON_EMBED_URLS) {
       try {
-        logger?.i?.('jython: 首次使用 .py 源，正在下载 Python 运行时（约 45MB）…');
+        logger?.i?.(`python: 首次使用 .py 源，正在下载嵌入式 Python 运行时（约 ${JarSpiderBridge.PY_VER} embed 11MB）…`);
         const res = await this.host!.http.request({ url, method: 'get', timeoutMs: 180000, buffer: 2 });
         const buf = Buffer.from(Array.isArray(res.content) ? res.content as unknown as number[] : Buffer.from(String(res.content), 'base64'));
-        if (buf.length > 1024 * 1024) {
-          mkdirSync(this.pyRuntimeDir!, { recursive: true });
-          writeFileSync(target, buf);
-          logger?.i?.('jython: Python 运行时已下载到 ' + target);
-          return target;
-        }
-        lastErr = `下载内容过小(${buf.length}B)`;
+        if (buf.length < 1024 * 1024) { lastErr = `下载内容过小(${buf.length}B)`; continue; }
+        mkdirSync(dir, { recursive: true });
+        this.unpackZipTo(buf, dir); // embed zip 标准 deflate，readZipEntries 解压（跳过目录条目）
+        if (!existsSync(pyExe)) { lastErr = '下载内容缺少 python.exe（镜像可能返回错误页）'; continue; }
+        await this.ensureRuntimeLibs(dir); // 第三方库失败直接抛（requests 缺失会让 base.spider 全灭）
+        this.placeRunnerFiles(dir);
+        logger?.i?.('python: 嵌入式 Python 运行时已就绪 ' + dir);
+        return dir;
       } catch (e) {
         lastErr = e instanceof Error ? e.message : String(e);
       }
     }
     throw new Error(
-      `python 源需要 Jython 运行时，自动下载失败（${lastErr}）。可手动将 jython-standalone-2.7.3.jar 放入 ${this.pyRuntimeDir} 后重试`,
+      `python 源需要嵌入式 Python 运行时，自动下载失败（${lastErr}）。` +
+      `可手动下载 python-${JarSpiderBridge.PY_VER}-embed-amd64.zip 解压到 ${dir}，` +
+      `并把 lxml/requests/urllib3 的 wheel 解压进 ${join(dir, 'Lib', 'site-packages')} 后重试`,
     );
+  }
+
+  /** 解压 zip 字节到 dir（目录条目跳过；坏条目跳过不抛）。 */
+  private unpackZipTo(buf: Buffer, dir: string): void {
+    const fs = require('node:fs') as typeof import('node:fs');
+    for (const e of readZipEntries(buf)) {
+      if (e.name.endsWith('/')) continue;
+      // 路径穿越防护：拒绝 ../ 与绝对路径（镜像内容不可信）
+      const rel = e.name.replace(/\\/g, '/').split('/').filter((s) => s !== '..' && s !== '.' && s !== '').join('/');
+      const clean = join(dir, rel);
+      if (!clean.startsWith(dir)) continue;
+      try { fs.mkdirSync(dirname(clean), { recursive: true }); } catch { /* ignore */ }
+      fs.writeFileSync(clean, e.bytes);
+    }
+  }
+
+  /** 解压各 wheel 到 site-packages；lxml 失败仅警告，requests 族失败抛错。 */
+  private async ensureRuntimeLibs(dir: string): Promise<void> {
+    const sp = join(dir, 'Lib', 'site-packages');
+    for (const w of JarSpiderBridge.PY_WHEELS) {
+      const pkgDir = join(sp, w.name);
+      if (this.dirNonEmpty(pkgDir)) continue;
+      const ok = await this.downloadWheel(dir, w).catch((e) => {
+        if (w.required) throw e;
+        this.host?.logger?.w?.(`python: 可选依赖 ${w.name} 下载失败（不影响纯 py 源）: ${(e as Error).message}`);
+        return false;
+      });
+      if (ok && !this.dirNonEmpty(pkgDir)) {
+        if (w.required) throw new Error(`python: ${w.name} 解压后为空`);
+        this.host?.logger?.w?.(`python: 可选依赖 ${w.name} 解压后为空（跳过）`);
+      }
+    }
+  }
+
+  private dirNonEmpty(p: string): boolean {
+    try {
+      const fs = require('node:fs') as typeof import('node:fs');
+      return existsSync(p) && fs.readdirSync(p).length > 0;
+    } catch { return false; }
+  }
+
+  /**
+   * 下载单个 wheel 并解压到 site-packages。
+   * wheel URL 不做假设：先从 PyPI simple 索引页（PEP 503）读取该文件名的 href，
+   * 由 href（形如 `../../packages/<hash>/<file>`）按 simple 页基址解析出真实地址；
+   * 依次尝试各镜像，全部失败抛错（保底提示）。
+   */
+  private async downloadWheel(dir: string, w: { name: string; file: string }): Promise<boolean> {
+    const sp = join(dir, 'Lib', 'site-packages');
+    mkdirSync(sp, { recursive: true });
+    const fs = require('node:fs') as typeof import('node:fs');
+    const pushEntries = (buf: Buffer): void => {
+      for (const e of readZipEntries(buf)) {
+        if (e.name.endsWith('/')) continue;
+        const rel = e.name.replace(/\\/g, '/').split('/').filter((s) => s !== '..' && s !== '.' && s !== '').join('/');
+        const clean = join(sp, rel);
+        try { fs.mkdirSync(dirname(clean), { recursive: true }); } catch { /* ignore */ }
+        fs.writeFileSync(clean, e.bytes);
+      }
+    };
+    for (const simpleBase of JarSpiderBridge.PY_WHEEL_SIMPLE) {
+      try {
+        // 1) 索引页 → 找目标文件 href（HttpClient buffer:2 返回 base64 字符串，先解码）
+        const idx = await this.host!.http.request({ url: `${simpleBase}${w.name}/`, method: 'get', timeoutMs: 60000, buffer: 2 });
+        const idxBuf = Buffer.from(Array.isArray(idx.content) ? idx.content as unknown as number[] : Buffer.from(String(idx.content), 'base64'));
+        const html = idxBuf.toString('utf8');
+        // 精确文件名优先（首选版本）；镜像清理旧版时退化为该包任一可用 wheel（版本无关）
+        let href = html.match(new RegExp(`href="([^"]*${escapeRegExp(w.file)}[^"]*)"`))?.[1];
+        if (!href) {
+          const anyWhl = html.match(/href="([^"]+\.whl[^"]*)"/);
+          href = anyWhl?.[1];
+        }
+        if (!href) continue;
+        // href 形如 `../../packages/<hash>/<file>` → 相对 simpleBase 解析
+        const real = new URL(href, simpleBase).href;
+        const res = await this.host!.http.request({ url: real, method: 'get', timeoutMs: 120000, buffer: 2 });
+        const buf = Buffer.from(Array.isArray(res.content) ? res.content as unknown as number[] : Buffer.from(String(res.content), 'base64'));
+        if (buf.length < 1024) continue; // 404/HTML 错误页
+        pushEntries(buf);
+        return true;
+      } catch { /* 换下一个镜像 */ }
+    }
+    throw new Error(`python: wheel ${w.file} 全部镜像下载失败`);
+  }
+
+  /** 把随包的 runner.py + base/ 拷贝进运行时目录（幂等）。 */
+  private placeRunnerFiles(dir: string): void {
+    try {
+      const fs = require('node:fs') as typeof import('node:fs');
+      const src = join(this.jvmDir, 'python-runner');
+      if (!existsSync(src) || !existsSync(join(src, 'runner.py'))) {
+        this.host?.logger?.w?.('python: 随包 runner 缺失（resources/jvm/python-runner），py 源将无法运行');
+        return;
+      }
+      fs.cpSync(join(src, 'runner.py'), join(dir, 'runner.py'), { force: true });
+      const bSrc = join(src, 'base');
+      if (existsSync(bSrc)) fs.cpSync(bSrc, join(dir, 'base'), { recursive: true, force: true });
+    } catch (e) {
+      this.host?.logger?.w?.(`python: runner 落盘失败: ${(e as Error).message}`);
+    }
   }
 
   /** 生成 JVM 子进程的公共前置参数（旗标 + classpath），jar/python 模式共用。 */
@@ -504,13 +618,20 @@ export class JarSpiderBridge {
     ];
   }
 
-  /** 统一 spawn + 收 stdout/stderr + 超时/退出码/lastReason 判定；call / callPython 共用。 */
-  private runJvm(argv: string[], className: string, method: string, timeoutMs?: number): Promise<string> {
-    const jdk = this.javaExe();
+  /** 统一 spawn + 收 stdout/stderr + 超时/退出码/lastReason 判定；jar(JVM) / py(CPython) 共用。 */
+  private runSubprocess(
+    exe: string,
+    argv: string[],
+    className: string,
+    method: string,
+    timeoutMs?: number,
+    env?: Record<string, string>,
+  ): Promise<string> {
     return new Promise<string>((resolve) => {
-      const child = spawn(jdk, argv, {
+      const child = spawn(exe, argv, {
         windowsHide: true,
         timeout: timeoutMs ?? this.callTimeoutMs,
+        ...(env ? { env: { ...process.env, ...env } } : {}),
       });
       let out = '';
       let err = '';
@@ -521,7 +642,7 @@ export class JarSpiderBridge {
       child.stderr.on('data', (d) => (err += d));
       child.on('error', (e) => {
         this.host?.logger.e(`jvm-bridge spawn 失败: ${e.message}`);
-        this.lastSpiderReason = `JVM 进程启动失败：${e.message}`;
+        this.lastSpiderReason = `运行器进程启动失败：${e.message}`;
         resolve('');
       });
       // spawn 的 timeout 是 SIGTERM；用 killed/timedOut 标出，便于给出"超时"而非"空结果"
@@ -715,11 +836,11 @@ export function translateSpiderLog(log: string): string {
     [/bound must be positive/i, '蜘蛛内部参数异常，通常需要为该源补充 ext 配置'],
     [/Index \d+ out of bounds/i, '源站返回的数据结构与蜘蛛预期不符（站点可能已改版）'],
     [/SSLHandshake|PKIX|certificate/i, '与源站建立安全连接失败（证书问题或站点异常）'],
-    // ---- ★ .py 蜘蛛（Jython）专属：Python3-only 语法在 Jython(Py2.7) 下必然失败 ----
-    [/SyntaxError|invalid syntax|NameError|print[ (]|f-string|f['"]|EOL while scanning/i,
-      '该蜘蛛可能为 Python3 语法，Jython 仅支持 Python2.7，桌面版无法 1:1 运行（需端口或脚本兼容 Py2）'],
+    // ---- ★ .py 蜘蛛（嵌入式 CPython3）专属 ----
+    [/SyntaxError|invalid syntax|f-string|EOL while scanning|unexpected EOF|IndentationError/i,
+      'python 蜘蛛脚本本身有语法/编码错误（Python3 解析失败），请检查源脚本'],
     [/ImportError|No module named/i,
-      '该 Python 蜘蛛依赖第三方库（如 requests/lxml），Jython 内置库有限，桌面版无法加载该依赖'],
+      '该 python 蜘蛛依赖未随运行时内置的第三方库（lxml/requests/urllib3 已内置；其余需在嵌入式 Python 中安装）'],
     // ---- 桌面端架构性不兼容（对齐安卓原生能力缺失）----
     // 这一类必须排在通用的 ClassNotFound/NoSuchField 规则之前，否则会被后者吞掉，
     // 用户拿到的是一句"依赖缺失请反馈"，看不出「这个源在桌面端根本不成立」。
@@ -753,6 +874,11 @@ export function translateSpiderLog(log: string): string {
   ];
   for (const [re, human] of rules) if (re.test(s)) return human;
   return s.slice(0, 120);
+}
+
+/** 转义正则特殊字符（文件名用于 RegExp 构造时防误解析） */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**

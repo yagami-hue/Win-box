@@ -13,13 +13,13 @@ export interface SourceAvailability {
 }
 
 export interface SourceAvailabilityOptions {
-  /** python 蜘蛛 Jython 宿主是否可用（缺省 true）。false 时 .py 源报 PY_UNSUPPORTED。 */
+  /** python 蜘蛛嵌入式 CPython 宿主是否可用（缺省 true）。false 时 .py 源报 PY_UNSUPPORTED。 */
   pythonAvailable?: boolean;
 }
 
 /**
  * usable = type ∈ {0,1,4,3(.js/.jar)}；
- *   type=3 的 .py 需 Jython 宿主；csp_/jar(dex) 有 JVM 桥运行时兜底。
+ *   type=3 的 .py 需嵌入式 CPython 宿主（按需下载）；csp_/jar(dex) 有 JVM 桥运行时兜底。
  * type 2 为安卓保留/未知值（上游无分发分支）、-1 为推送源（依赖外部推送）→ 均不可用并给中文 hint。
  */
 export function sourceAvailability(

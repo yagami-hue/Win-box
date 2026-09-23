@@ -1,4 +1,4 @@
-// tests/pySpider.spec.ts — .py 蜘蛛（Jython 宿主 PySpider）适配层单测
+// tests/pySpider.spec.ts — .py 蜘蛛（嵌入式 CPython3 宿主 PySpider）适配层单测
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

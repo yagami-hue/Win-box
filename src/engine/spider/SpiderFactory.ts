@@ -53,7 +53,7 @@ export class SpiderFactory {
       if (api.endsWith('.js') || api.includes('.js?')) {
         return new JsSpider(init);
       }
-      // .py —— Jython 宿主（复用 JVM 子进程）；无桥则降级
+      // .py —— 嵌入式 CPython3 宿主；无桥则降级
       if (api.includes('.py')) {
         if (this.bridge) {
           return new PySpider(init, this.bridge);

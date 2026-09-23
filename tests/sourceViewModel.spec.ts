@@ -674,7 +674,7 @@ describe('sourceAvailability — UI/后端共用状态规则（任务 A2）', ()
     expect(py.usable).toBe(true); // Jython 宿主默认可用
     const noHost = sourceAvailability(b(3, 'http://x/a.py'), { pythonAvailable: false });
     expect(noHost.usable).toBe(false);
-    expect(noHost.hint).toContain('Jython');
+    expect(noHost.hint).toContain('python');
   });
   it('type 2/-1/其它 → 不可用 + 中文 hint', () => {
     for (const type of [2, -1, 99]) {

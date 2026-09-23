@@ -17,7 +17,7 @@ export type SourceProblemCode =
 /** 每个 code 的用户可读中文文案（UI/日志共用，保证提示一致） */
 export const SOURCE_PROBLEM_TEXT: Record<SourceProblemCode, string> = {
   TYPE_UNSUPPORTED: '该源类型在桌面版不可用',
-  PY_UNSUPPORTED: 'type=3 python 蜘蛛需 Jython(Python2.7) 运行时（缺失或 Python3-only 脚本会失败）',
+  PY_UNSUPPORTED: 'python 源需要嵌入式 CPython3 运行时（缺失或下载失败）',
   JAR_NO_RUNTIME: 'jar(dex) 蜘蛛缺少 JVM 桥运行时',
   JAR_DOWNLOAD_FAIL: 'jar(dex) 蜘蛛下载或转换失败',
   JS_FORMAT_UNSUPPORTED: 'JS 蜘蛛导出格式不受支持',

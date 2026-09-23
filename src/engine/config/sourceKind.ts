@@ -72,7 +72,7 @@ const INFO: Record<SourceKind, SourceKindInfo> = {
   'spider-py': {
     kind: 'spider-py',
     label: '蜘蛛·PY',
-    how: 'Python 蜘蛛，经 Jython(Python2.7) 在 JVM 内运行；Python3-only 脚本会失败',
+    how: 'Python 蜘蛛，经嵌入式 CPython3 运行（首次使用自动下载运行时）',
     usesExt: true,
     usesJar: false,
     usesPlayUrl: true,

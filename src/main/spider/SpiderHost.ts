@@ -98,8 +98,8 @@ export class SpiderHost {
         jvmDir: join(resourcesDir(), 'jvm'),
         cacheDir: join(spiderCacheDir(), 'converted'),
         callTimeoutMs: 20000,
-        // ★ jython 按需下载落盘（userData 可写；安装版不放 resources）
-        pyRuntimeDir: join(userDataDir(), 'cache', 'jython'),
+        // ★ 嵌入式 CPython 按需下载落盘（userData 可写；安装版不放 resources）
+        pyRuntimeDir: join(userDataDir(), 'cache', 'python'),
       },
       host,
     );

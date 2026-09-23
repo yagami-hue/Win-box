@@ -1,9 +1,10 @@
 // src/engine/spider/PySpider.ts
-// .py 蜘蛛的引擎适配器：把 Spider 接口调用转发到 JarSpiderBridge.callPython（JVM 内 Jython）。
-// 上游 python 蜘蛛（Chalice/CPython3）在桌面端改用 Jython(Python2.7)：脚本含
+// .py 蜘蛛的引擎适配器：把 Spider 接口调用转发到 JarSpiderBridge.callPython（嵌入式 CPython3）。
+// 上游 python 蜘蛛（Chalice/CPython3）由桌面端内置嵌入式 CPython3 运行时执行：脚本含
 // `class Spider`，方法 homeContent/categoryContent/detailContent/searchContent/playerContent
-// 返回 dict/list，由 PythonRunner 序列化成 JSON 回传。Python3-only 脚本会失败 ——
-// translateSpiderLog 已就这一局限给出诚实文案。
+// 返回 dict/list，由 python-runner/runner.py 序列化成 JSON 回传。依赖 lxml/requests 的源
+// 可运行（运行时随附 wheel）；依赖其他第三方库的源会 ImportError —— translateSpiderLog
+// 已就这一局限给出诚实文案。
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Spider, type SpiderInit } from './Spider';
@@ -72,7 +73,7 @@ export class PySpider extends Spider {
   }
 
   /**
-   * 调用 .py 方法。第一段 arg = ext（PythonRunner 喂给 init），其余为方法实参。
+   * 调用 .py 方法。第一段 arg = ext（runner.py 喂给 init），其余为方法实参。
    * 脚本下载/缓存失败时直接抛 SourceProblemError（A1），不静默返回空串。
    */
   private async call(method: string, ...args: string[]): Promise<string> {
@@ -83,7 +84,7 @@ export class PySpider extends Spider {
     try {
       return await this.bridge.callPython(this.pyPath, this.clsName, method, [this.enrichedExt(), ...args]);
     } catch (e) {
-      // ★ release76：Jython 运行时缺失/按需下载失败 → 明确提示（不静默空结果）
+      // ★ 运行时缺失/下载失败 → 明确提示（不静默空结果）
       throw new SourceProblemError(
         'PY_UNSUPPORTED',
         e instanceof Error ? e.message : String(e),
@@ -112,18 +113,18 @@ export class PySpider extends Spider {
     return this.call('categoryContent', tid, pg, JSON.stringify(extend || {}));
   }
   detailContent(ids: string[]): Promise<string> {
-    // ids 以 JSON 数组字符串传入，PythonRunner 用 json.loads 还原为 Python list
+    // ids 以 JSON 数组字符串传入，runner.py 用 json.loads 还原为 Python list
     return this.call('detailContent', JSON.stringify(ids || []));
   }
   searchContent(key: string, _quick: boolean): Promise<string> {
     return this.call('searchContent', key);
   }
   searchContentPage(key: string, _quick: boolean, pg: string): Promise<string> {
-    // 多占一个空位，让 pg 落到 PythonRunner 的 r2，触发 3 参 search 签名
+    // 多占一个空位，让 pg 落到 runner.py 的 r2，触发 3 参 search 签名
     return this.call('searchContent', key, '', pg);
   }
   playerContent(flag: string, id: string, vipFlags: string[]): Promise<string> {
-    // A2：vipFlags 以 JSON 数组传入，PythonRunner 解析成 list 交给 python 蜘蛛
+    // A2：vipFlags 以 JSON 数组传入，runner.py 解析成 list 交给 python 蜘蛛
     return this.call('playerContent', flag, id, JSON.stringify(vipFlags || []));
   }
   liveContent(url: string): Promise<string> {
