@@ -169,6 +169,11 @@ export interface SearchAllReport {
   hitSources: number; // 命中源数（count>0）
   failedSources: number; // 出错源数
   totalRaw: number; // 汇总前原始命中数
+  /**
+   * ★ 2026-09-23 三轮：本次报告来自**本地缓存**（同关键词 5 分钟内重复搜索 → 秒回）。
+   * 值为缓存写入时间戳；UI 据此提示「本地缓存 · 点『重新搜索』刷新」。
+   */
+  cachedAt?: number;
 }
 
 /**

@@ -21,23 +21,42 @@ export interface SourceStat {
   failStreak: number;
   /** 成功请求的平均耗时（ms，移动平均；0 = 未知） */
   avgMs: number;
+  /**
+   * ★ 连续「空结果」次数（返回命中即清零）。
+   * 用途：反复空的源即使慢，也不值得给它整个 10s 预算 —— 它是搜索尾巴的主因之一。
+   */
+  emptyStreak: number;
 }
 
 /** 「近期失败」判定窗口：窗口外的失败不再降权（源站可能已恢复） */
 export const FAILED_COOLDOWN_MS = 10 * 60 * 1000;
 /** 近期失败源的短预算：快速失败，把时间让给健康源 */
 export const FAILED_SOURCE_BUDGET_MS = 3500;
+/** 历史耗时 → 预算的倍数（2.5：平时 1s 的源给 3.5s，平时 3s 的给 7.5s） */
+export const HIST_BUDGET_FACTOR = 2.5;
+/** 连续空结果的源：预算压到 ≤ 6s（它是搜索尾巴的常客，且本次本来就没贡献结果） */
+export const EMPTY_SLOW_BUDGET_MS = 6000;
 /** 单源预算下限（低于此值正常源来不及返回） */
 export const MIN_SOURCE_BUDGET_MS = 1500;
 
 export function newSourceStat(): SourceStat {
-  return { okAt: 0, failAt: 0, failStreak: 0, avgMs: 0 };
+  return { okAt: 0, failAt: 0, failStreak: 0, avgMs: 0, emptyStreak: 0 };
 }
 
-/** 成功（含合法空结果）→ 记耗时、清连败；平均耗时用 0.4 旧 / 0.6 新 的移动平均抗抖动 */
-export function noteSourceOk(stat: SourceStat, ms: number, now = Date.now()): void {
+/**
+ * 成功（含合法空结果）→ 记耗时、清连败；平均耗时用 0.4 旧 / 0.6 新 的移动平均抗抖动。
+ * @param opts.empty 本次是否为**空结果**（无命中）→ 累计 emptyStreak（命中即清零）
+ * @param opts.now 注入时钟（单测用）
+ */
+export function noteSourceOk(
+  stat: SourceStat,
+  ms: number,
+  opts?: { empty?: boolean; now?: number },
+): void {
+  const now = opts?.now ?? Date.now();
   stat.okAt = now;
   stat.failStreak = 0;
+  stat.emptyStreak = opts?.empty ? stat.emptyStreak + 1 : 0;
   stat.avgMs = stat.avgMs > 0 ? Math.round(stat.avgMs * 0.4 + ms * 0.6) : Math.max(0, Math.round(ms));
 }
 
@@ -89,8 +108,14 @@ export function scheduleOrder(
 }
 
 /**
- * 单源预算（ms）：近期失败源给 FAILED_SOURCE_BUDGET_MS 短预算，其余用源声明 timeout，
- * 统一夹在 [MIN_SOURCE_BUDGET_MS, maxMs] 内。
+ * 单源预算（ms）：
+ *   ① 近期失败源 → FAILED_SOURCE_BUDGET_MS（快速失败，把时间让给健康源）；
+ *   ② **跑过的源**（有平均耗时）→ `avg × HIST_BUDGET_FACTOR`（下限 3.5s）：
+ *      ★ 2026-09-23 三轮真机数据支撑：全源搜索的「尾巴」几乎全是**平时 1~3s、偶发卡到 10s** 的源
+ *      （实测 seed/比特/抠搜 从 1~2s 变成占满 10s 预算）。按历史耗时给预算后，
+ *      这类抖动 ~4s 内就收手，整轮完成时间从 17s 量级压到 10s 量级；而**本来就慢**的源
+ *      取 avg×2.5 后仍接近/达到 10s 上限，不受影响（不误伤）。
+ *   ③ 没跑过的源 → 源声明 timeout（夹在 [MIN, max] 内）。
  */
 export function sourceBudgetMs(
   stat: SourceStat | undefined,
@@ -99,9 +124,17 @@ export function sourceBudgetMs(
   now = Date.now(),
 ): number {
   const recentFail = healthRank(stat, now) === 2;
-  const raw = recentFail
-    ? Math.min(FAILED_SOURCE_BUDGET_MS, declaredMs > 0 ? declaredMs : FAILED_SOURCE_BUDGET_MS)
-    : declaredMs;
+  let raw: number;
+  if (recentFail) {
+    raw = Math.min(FAILED_SOURCE_BUDGET_MS, declaredMs > 0 ? declaredMs : FAILED_SOURCE_BUDGET_MS);
+  } else if (stat && stat.emptyStreak > 0) {
+    // 上一轮空结果的源（不管它多慢）：只给 6s —— 它本来就没贡献命中，不值得占满预算拖长尾巴
+    raw = EMPTY_SLOW_BUDGET_MS;
+  } else if (stat && stat.avgMs > 0) {
+    raw = Math.max(FAILED_SOURCE_BUDGET_MS, Math.round(stat.avgMs * HIST_BUDGET_FACTOR));
+  } else {
+    raw = declaredMs;
+  }
   const v = raw > 0 ? raw : maxMs;
   return Math.max(MIN_SOURCE_BUDGET_MS, Math.min(v, maxMs));
 }

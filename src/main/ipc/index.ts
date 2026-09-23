@@ -174,13 +174,15 @@ export function registerIpc(host: SpiderHost): void {
   registerHandler(IPC.VOD_DETAIL, (_e: any, a: { key: string; ids: string[] }) => host.detail(a.key, a.ids), log);
   registerHandler(IPC.VOD_SEARCH, (_e: any, a: { key: string; wd: string }) => host.search(a.key, a.wd), log);
   // ★ 聚合搜索：逐源进度经 VOD_SEARCH_ALL_PROGRESS 推给发起窗口 → 渲染层边搜边出
-  registerHandler(IPC.VOD_SEARCH_ALL, async (e: any, wd: string) => {
+  //   参数 { wd, refresh }：refresh=true 忽略本地缓存强制重搜（「重新搜索」按钮）
+  registerHandler(IPC.VOD_SEARCH_ALL, async (e: any, a: { wd: string; refresh?: boolean } | string) => {
+    const arg = typeof a === 'string' ? { wd: a, refresh: false } : a || { wd: '', refresh: false };
     const w = winOf(e as IpcMainInvokeEvent);
     host.onSearchAllProgress = (ev) => {
       try { w?.webContents.send(IPC.VOD_SEARCH_ALL_PROGRESS, ev); } catch { /* 窗口已关：忽略 */ }
     };
     try {
-      return await host.searchAll(wd);
+      return await host.searchAll(arg.wd, { refresh: !!arg.refresh });
     } finally {
       host.onSearchAllProgress = undefined;
     }

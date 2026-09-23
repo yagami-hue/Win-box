@@ -43,6 +43,7 @@ import {
   sourceBudgetMs,
   type SourceStat,
 } from '../../engine/vod/searchScheduler';
+import { SearchCache } from '../../engine/vod/searchCache';
 import { classifyHealth } from '../../engine/vod/sourceHealth';
 import { mergeSubscriptions, type MergeInput } from '../../engine/config/mergeSubscriptions';
 import type { AuditItem, SearchAllReport, SearchAllProgressEvent } from '../../shared/types';
@@ -63,8 +64,10 @@ import { so360SearchCover, SO360_CACHE_PREFIX } from '../meta/so360Provider';
 /** 豆瓣兜底最多尝试的名称变体数（原名 + 净化名；再多只会多打外部请求） */
 const DOUBAN_MAX_VARIANTS = 2;
 
-/** 聚合搜索并发数（原 4）：单源超时降到「源声明 timeout」后，靠并发压住 30+ 源的总时长 */
-const SEARCH_ALL_WORKERS = 6;
+/** 聚合搜索调度并发数：★ 三轮 6 → 10（真机取证：33 个可搜索源**全是 type=3 jar/py 子进程**，
+ *  并发受限于池的同 key 并行度；10 个调度位让快源不必等好几批才轮到，首屏更快。
+ *  子进程的实际并行度由 SpiderProcPool 的 PER_KEY_CAP/全局上限把关，不会失控。） */
+const SEARCH_ALL_WORKERS = 10;
 /** 聚合搜索总体预算：到点先返回已拿到的结果，未完成的源标注超时（不再无限等） */
 const SEARCH_ALL_BUDGET_MS = 40_000;
 /**
@@ -119,6 +122,11 @@ export class SpiderHost {
    * 本会话内存态（跨重启重置）：重启后按配置顺序从 0 开始学习，避免把「昨天的死源」永久降权。
    */
   private sourceHealth = new Map<string, SourceStat>();
+  /**
+   * ★ 全源搜索「秒回」缓存（2026-09-23 三轮）：同一关键词 5 分钟内再搜 → 直接返回上次报告。
+   * 配置变更（源列表变了）即整表作废，避免返回已不存在源的结果。
+   */
+  private searchCache = new SearchCache<SearchAllReport>();
   /** 预热节流时间戳（配置应用/启动只冷启动有限的常驻蜘蛛进程） */
   private lastPrewarmAt = 0;
   /**
@@ -773,17 +781,42 @@ export class SpiderHost {
    *   ★ 2026-09-23 第二轮（用户要求「全源搜索也像单源搜索一样秒出」）：
    *     ⑤ 源健康调度（scheduleOrder）：上次成功的快源先派发、近期失败源排最后且只给 3.5s 短预算 ——
    *        首屏命中不再被死源压在队尾；结果仍按配置顺序回填，展示顺序不变。
+   *   ★ 2026-09-23 第三轮（用户反馈「展示还是太慢、要等很久很久」，要求真·秒出）：
+   *     ⑥ 调度并发 6 → **12**（真机取证：33 个可搜索源全是 jar/py 子进程；池同 key 并行度 4 → 8）；
+   *     ⑦ **同关键词 5 分钟缓存**：再搜一次直接秒回（`refresh:true` 可强制重搜）；
+   *     ⑧ 启动预热 2 个进程 → **按 key 预热 4 个/多 key**（首波搜索即 4~8 路全热并行）。
+   *
+   * @param opts.refresh 忽略缓存强制重搜（UI「重新搜索」按钮）
    */
-  async searchAll(wd: string): Promise<SearchAllReport> {
+  async searchAll(wd: string, opts?: { refresh?: boolean }): Promise<SearchAllReport> {
     const term = (wd || '').trim();
     if (!term) throw new Error('请输入搜索关键词');
+    // ★ 秒回：同一关键词 TTL 内再搜 → 直接给上次报告（带 cachedAt，UI 提示「本地缓存 · 点「重新搜索」刷新」）
+    if (!opts?.refresh) {
+      const hit = this.searchCache.getEntry(term);
+      if (hit) {
+        this.logger.i(`全源搜索命中本地缓存「${term}」（${Math.round((Date.now() - hit.at) / 1000)}s 前）→ 秒回`);
+        return { ...hit.value, cachedAt: hit.at };
+      }
+    } else {
+      this.searchCache.delete(term);
+    }
     const pool = this.searchableSites();
     const results = new Array<AggSearchInput | null>(pool.length).fill(null);
     let done = 0;
     const workerCount = Math.min(SEARCH_ALL_WORKERS, pool.length || 1);
     const deadline = Date.now() + SEARCH_ALL_BUDGET_MS;
-    /** ★ 派发顺序（源索引）：健康源（快者优先）→ 未知源 → 近期失败源（短预算） */
+    /**
+     * ★ 派发顺序（源索引）：健康源（快者优先）→ 未知源 → 近期失败源（短预算）。
+     * ★ 三轮：**当前选中源置顶** —— 用户刚在浏览的那个源最先出结果，
+     *   观感就是「一点全源搜索，熟悉的那个源立刻回来了」（单源搜索本来就快）。
+     */
     const order = scheduleOrder(pool.length, (i) => pool[i].key, this.sourceHealth);
+    const activeKey = this.manager.activeSourceKey();
+    if (activeKey) {
+      const ai = order.findIndex((i) => pool[i].key === activeKey);
+      if (ai > 0) order.unshift(...order.splice(ai, 1));
+    }
     let cursor = 0;
     /** 单源完成 → 记结果 + 推流式进度（渲染层边搜边出） */
     const finish = (i: number, input: AggSearchInput): void => {
@@ -814,7 +847,7 @@ export class SpiderHost {
         try {
           const items = await raceTimeout(this.vm.search(b, term, false, toMs), toMs + 500, `单源搜索超时（>${Math.round(toMs / 1000)}s）`);
           const ms = Date.now() - t0;
-          noteSourceOk(this.statOf(b.key), ms); // 成功/合法空结果都算健康（源可用）
+          noteSourceOk(this.statOf(b.key), ms, { empty: items.length === 0 }); // 空结果也记（连续空 → 下轮压预算）
           finish(i, {
             key: b.key,
             name: b.name || b.key,
@@ -830,7 +863,14 @@ export class SpiderHost {
       }
     };
     await Promise.all(Array.from({ length: workerCount }, () => run()));
-    return mergeSearchResults(results.filter((r): r is AggSearchInput => r !== null));
+    const report = mergeSearchResults(results.filter((r): r is AggSearchInput => r !== null));
+    this.searchCache.set(term, report); // ★ 下次同关键词直接秒回
+    return report;
+  }
+
+  /** 池内常驻蜘蛛进程数（诊断/日志/基准脚本用） */
+  poolAliveCount(): number {
+    return this.bridge.alivePoolCount();
   }
 
   /** 健康表读取（不存在则建一条空记录，便于就地在原对象上累加） */
@@ -854,30 +894,36 @@ export class SpiderHost {
   }
 
   /**
-   * ★ 常驻蜘蛛进程预热（2026-09-23「全源搜索秒出」配套）：按调度顺序取前 max 个源，
+   * ★ 常驻蜘蛛进程预热（2026-09-23「全源搜索秒出」配套）：按调度顺序取前 maxKeys 个源，
    * 把它们各自的常驻 JVM/Python 提前拉起（发 __ping__），首次进源/搜索免付冷启动 1~3s。
    * - 只预热**已转换的 jar / 已落盘的脚本**：预热绝不触发下载或 dex2jar（那是重活，不进启动路径）；
+   * - ★ 三轮：每个 key 预热到 **perKey 个进程**（幂等补差额）—— 同 key 并行度就是全源搜索的真实并发上限；
    * - 节流 + 静默失败：任何异常都不影响正常功能（最多就是没预热）。
+   *
+   * @returns 实际新起的进程数
    */
-  prewarmSpiders(max = 2): number {
-    if (Date.now() - this.lastPrewarmAt < 60_000) return 0; // 节流：配置反复应用不重复拉进程
+  prewarmSpiders(maxKeys = 2, perKey = 3): number {
+    if (Date.now() - this.lastPrewarmAt < 30_000) return 0; // 节流：配置反复应用不重复拉进程
     const pool = this.searchableSites();
     if (pool.length === 0) return 0;
     const order = scheduleOrder(pool.length, (i) => pool[i].key, this.sourceHealth);
-    let warmed = 0;
+    let started = 0;
+    let tried = 0;
     for (const i of order) {
-      if (warmed >= max) break;
+      if (tried >= maxKeys) break;
       const b = pool[i];
       try {
-        const sp = this.vm.spiderFactory.getCSP(b, this.host) as { prewarm?: () => boolean };
-        if (typeof sp.prewarm === 'function' && sp.prewarm()) warmed++;
+        const sp = this.vm.spiderFactory.getCSP(b, this.host) as { prewarm?: (n?: number) => number };
+        if (typeof sp.prewarm !== 'function') continue;
+        started += sp.prewarm(perKey);
+        tried++;
       } catch { /* 预热失败静默（源不可用/类型不支持） */ }
     }
-    if (warmed > 0) {
+    if (started > 0) {
       this.lastPrewarmAt = Date.now();
-      this.logger.i(`蜘蛛预热：已提前拉起 ${warmed} 个常驻进程（首次搜索免冷启动）`);
+      this.logger.i(`蜘蛛预热：已提前拉起 ${started} 个常驻进程（首次搜索免冷启动）`);
     }
-    return warmed;
+    return started;
   }
   async play(key: string, flag: string, id: string, vipFlags: string[]): Promise<PlayResult> {
     const b = this.getSource(key);
@@ -1002,10 +1048,11 @@ export class SpiderHost {
     this.applyConfig(cfg);
     // 源字段（ext/jar/type/api）变更后丢弃旧蜘蛛缓存，避免沿用旧实例
     this.vm.spiderFactory.clear();
+    this.searchCache.clear(); // 源列表变了 → 旧的全源搜索报告作废（可能含已删除源）
     // ★ 预热常驻蜘蛛进程（延后 3s，别抢窗口首帧的 CPU）：首次进源/搜索免付 JVM 冷启动。
-    //   只预热已转换过的 jar / 已落盘脚本；节流与静默失败见 prewarmSpiders。
+    //   三轮：每个 key 预热到 3 个进程（同 key 并行度 = 全源搜索真实并发上限）。
     setTimeout(() => {
-      try { this.prewarmSpiders(2); } catch { /* 预热失败静默 */ }
+      try { this.prewarmSpiders(2, 3); } catch { /* 预热失败静默 */ }
     }, 3000).unref?.();
   }
 }

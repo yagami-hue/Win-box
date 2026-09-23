@@ -33,6 +33,12 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const [aggScope, setAggScope] = useState<'current' | 'all'>('current');
   /** ★ 全源搜索进度（已完成/总源数）：让用户看到「边搜边出」的推进，而不是干等 */
   const [aggProgress, setAggProgress] = useState<{ done: number; total: number } | null>(null);
+  /**
+   * ★ 结果网格一次渲染多少张卡（默认 240，可「显示更多」追加）：
+   *   33 源全源搜索常出上千条，若一次全渲染，每个进度事件都要重排几百个 <img>（几百 ms/次 ×33）
+   *   —— 用户看到的就是「结果明明在出，界面却卡着不动」。分页渲染后每次刷新都是毫秒级。
+   */
+  const [aggCap, setAggCap] = useState(240);
   const keyRef = useRef('');
   const contentRef = useRef<HTMLDivElement>(null);
   const filtersRef = useRef<Record<string, string>>({});
@@ -143,6 +149,11 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   //   按归一化片名去重（每页 ≤30 唯一名、6 并发分波），命中覆盖整组；补图失败移除覆盖。
   const aggKeyOf = (it: AggVodItem) => `${it.sourceKey}\u0000${it.id}`;
   useEffect(() => {
+    // ★ 2026-09-23 三轮：**搜索进行中不做元数据补图**（loading 为真时直接跳过）。
+    //   原因：全源搜索常出 200~300 条，补图会打上百次 TMDB/豆瓣/360（每次还带一次图床校验 GET），
+    //   全部发生在主进程 —— 与搜索共用的网络与事件循环被它挤占，用户侧就是「结果在出但界面发木」。
+    //   搜索结果落定后再补图（源封面本身照常立即显示，不影响首屏观感）。
+    if (loading) return;
     if (!aggMode || !agg || agg.items.length === 0 || aggBusyRef.current) return;
     const missing = agg.items.filter((it) => !aggPicOver[aggKeyOf(it)]);
     if (missing.length === 0) return;
@@ -174,13 +185,16 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       if (Object.keys(next).length) setAggPicOver((prev) => ({ ...prev, ...next }));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agg, aggMode]);
+  }, [agg, aggMode, loading]);
   const aggPicOf = (it: AggVodItem) => aggPicOver[aggKeyOf(it)] || aggPicRelay[aggKeyOf(it)] || it.pic;
   /** ★ 聚合搜索的源封面失败 → 与浏览态同款兜底（中继重试 + 单条 TMDB 补查，各一次） */
   const aggMetaRetried = useRef<Set<string>>(new Set());
   const ensureAggMetaSingle = (it: AggVodItem) => {
     const k = aggKeyOf(it);
     if (aggMetaRetried.current.has(k)) return;
+    // ★ 三轮：搜索进行中不做单条补图（几百张卡的图错会瞬间打几十上百次元数据查询，
+    //   与搜索挤同一个主进程/网络）；结果落定后由上面的批量补图统一处理。
+    if (loading) return;
     const name = (it.name || '').split(' - ')[0]?.trim() || '';
     if (!name) return;
     aggMetaRetried.current.add(k);
@@ -429,7 +443,9 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    * 搜索。
    * - 默认（searchAllSources=false）：只搜当前选中源 —— 快，行为与上游 TVBox 的
    *   `filter__home` 模式一致（切换源即切换搜索范围）。
-   * - 勾选「全源搜索」：遍历全部可搜索源并发检索（≤4），慢，适合找不到片时扩大范围。
+   * - 勾选「全源搜索」：遍历全部可搜索源并发检索（调度位 12 + 池并行 8），结果**边搜边出**。
+   * - ★ 2026-09-23 三轮：同关键词 5 分钟内再搜 → 主进程直接返回本地缓存（**秒回**）；
+   *   `force=true`（「重新搜索」按钮）忽略缓存强制重搜。
    */
   /** 保存搜索态到 uiMem（搜索 → 详情 → 返回时恢复搜索结果界面） */
   function saveSearchMem(term: string, agg: SearchAllReport | null, scope: 'current' | 'all') {
@@ -437,7 +453,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     schedulePersist();
   }
 
-  async function doSearch() {
+  async function doSearch(force = false) {
     const term = wd.trim();
     if (!term) return;
     const k = keyRef.current;
@@ -453,19 +469,35 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       //   进度事件带 wd 用于丢弃过期事件（用户已经改了关键词/换了范围）。
       const acc: AggSearchInput[] = [];
       setAggProgress(null);
+      setAggCap(240); // 新搜索：结果网格重新分页
+      // ★ 进度节流（200ms 合并刷新）：33 个源逐条 setState 会让整屏结果重排几十次，
+      //   「边搜边出」反而变成「界面卡着不动」——累计 + 定时合并，首屏仍是首个源完成即出。
+      let progressed: { done: number; total: number } | null = null;
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      const flush = (): void => {
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        setAgg(mergeSearchResults(acc));
+        if (progressed) setAggProgress(progressed);
+      };
       const off = client.onSearchAllProgress((ev) => {
         if (ev.wd !== term) return;
         acc.push(ev.source);
-        setAgg(mergeSearchResults(acc));
-        setAggProgress({ done: ev.done, total: ev.total });
+        progressed = { done: ev.done, total: ev.total };
+        setAggProgress(progressed); // 进度文字实时（极轻量）
+        if (!flushTimer) flushTimer = setTimeout(flush, 200);
       });
       try {
-        const r = await client.searchAll(term);
+        const r = await client.searchAll(term, { refresh: force });
+        flush(); // 收尾：把节流窗口里最后一批结果落屏
         setAgg(r);
         saveSearchMem(term, r, 'all');
       } catch (e) {
         setErr(`聚合搜索失败：${(e as Error).message}`);
       } finally {
+        if (flushTimer) clearTimeout(flushTimer);
         off();
         setAggProgress(null);
         setLoading(false);
@@ -543,7 +575,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           ))}
         </select>
         <input
-          placeholder={searchAllSources ? '全源搜索：一次搜遍所有源（较慢）…' : '搜索当前源…'}
+          placeholder={searchAllSources ? '全源搜索：一次搜遍所有源（结果边搜边出）…' : '搜索当前源…'}
           value={wd}
           onChange={(e) => setWd(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && doSearch()}
@@ -558,14 +590,14 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           />
           全源搜索
         </label>
-        <button className="primary" onClick={doSearch} disabled={loading || !wd.trim()}>
+        <button className="primary" onClick={() => void doSearch()} disabled={loading || !wd.trim()}>
           {searchAllSources ? '全源搜索' : '搜索'}
         </button>
         {aggMode && <button onClick={exitSearch}>返回浏览</button>}
         <span className="status" style={{ marginLeft: 'auto' }}>
           {loading
             ? aggScope === 'all'
-              ? `全源搜索中…${aggProgress ? `已完成 ${aggProgress.done}/${aggProgress.total} 个源（结果边搜边出）` : '（遍历全部源，结果边搜边出）'}`
+              ? `全源搜索中…${aggProgress ? `已完成 ${aggProgress.done}/${aggProgress.total} 个源 · 还在搜 ${Math.max(0, aggProgress.total - aggProgress.done)} 个（结果边搜边出）` : '（遍历全部源，结果边搜边出）'}`
               : '搜索中…'
             : aggMode
               ? `命中 ${agg?.items.length ?? 0} 条`
@@ -591,6 +623,13 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                   <>
                     「{wd}」共搜 {sites.length} 个源：命中 {agg.hitSources} 个 · 共 {agg.items.length} 条（各源分别列出，不合并）
                     {agg.failedSources > 0 ? ` · ⚠ ${agg.failedSources} 个源出错（见下）` : ''}
+                    {/* ★ 缓存秒回提示：这次结果是本机缓存（5 分钟内搜过同一关键词）→ 给一个「重新搜索」 */}
+                    {agg.cachedAt ? (
+                      <span className="muted">
+                        {' '}· 本地缓存（{Math.max(1, Math.round((Date.now() - agg.cachedAt) / 60000))} 分钟前）
+                        <button className="linkbtn" style={{ marginLeft: 6 }} onClick={() => void doSearch(true)}>重新搜索</button>
+                      </span>
+                    ) : null}
                   </>
                 ) : (
                   <>
@@ -604,8 +643,11 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
 
               {agg.items.length > 0 ? (
                 <>
+                  {/* 结果网格：★ 默认只渲染前 aggCap 张卡（33 源全源搜索常出上千条，
+                      整屏 DOM 一多，每次进度刷新都要重排几百个 <img> → 界面「卡着不动」）；
+                      「显示更多」按需追加，保证边搜边出的每次刷新都是毫秒级。 */}
                   <div className="grid">
-                    {agg.items.map((it) => (
+                    {agg.items.slice(0, aggCap).map((it) => (
                       <AggCard
                         key={`${it.sourceKey}-${it.id}`}
                         it={it}
@@ -615,6 +657,11 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                       />
                     ))}
                   </div>
+                  {agg.items.length > aggCap && (
+                    <div style={{ textAlign: 'center', marginTop: 12 }}>
+                      <button onClick={() => setAggCap((n) => n + 600)}>显示更多（还有 {agg.items.length - aggCap} 条）</button>
+                    </div>
+                  )}
                 </>
               ) : (
                 <div className="empty">

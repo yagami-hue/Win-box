@@ -76,7 +76,8 @@ declare global {
         category: (a: { key: string; tid: string; pg: string; extend?: Record<string, string> }) => Promise<IpcResult<HomeResult>>;
         detail: (a: { key: string; ids: string[] }) => Promise<IpcResult<VodDetail | null>>;
         search: (a: { key: string; wd: string }) => Promise<IpcResult<VodItem[]>>;
-        searchAll: (wd: string) => Promise<IpcResult<SearchAllReport>>;
+        /** ★ 全源搜索：refresh=true 忽略本地缓存强制重搜（「重新搜索」按钮）；默认命中缓存即秒回 */
+        searchAll: (wd: string, opts?: { refresh?: boolean }) => Promise<IpcResult<SearchAllReport>>;
         /** ★ 聚合搜索逐源进度（边搜边出）：返回退订函数 */
         onSearchAllProgress: (cb: (ev: SearchAllProgressEvent) => void) => () => void;
         play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => Promise<IpcResult<PlayResult>>;
@@ -217,7 +218,7 @@ export const client = {
   category: (a: { key: string; tid: string; pg: string; extend?: Record<string, string> }) => unwrap(window.api.vod.category(a)),
   detail: (a: { key: string; ids: string[] }) => unwrap(window.api.vod.detail(a)),
   search: (a: { key: string; wd: string }) => unwrap(window.api.vod.search(a)),
-  searchAll: (wd: string) => unwrap(window.api.vod.searchAll(wd)),
+  searchAll: (wd: string, opts?: { refresh?: boolean }) => unwrap(window.api.vod.searchAll(wd, opts)),
   onSearchAllProgress: (cb: (ev: SearchAllProgressEvent) => void) => window.api.vod.onSearchAllProgress(cb as (ev: unknown) => void),
   play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => unwrap(window.api.vod.play(a)),
   loadLive: (index: number) => unwrap(window.api.live.load(index)),

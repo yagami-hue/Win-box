@@ -110,13 +110,15 @@ export class JarSpider extends Spider {
   /**
    * ★ 预热常驻 JVM（由 SpiderHost.prewarmSpiders 调度）：仅当本源的 jar 转换产物**已在磁盘上**时生效。
    * 预热是启动路径上的"锦上添花"，绝不触发下载 / dex2jar 这类重活。
+   * @param count 期望的**同 key 热进程数**（多源共用一只 jar 时，全源搜索的真实并发上限就是它）
+   * @returns 实际新起的进程数
    */
-  prewarm(): boolean {
+  prewarm(count = 1): number {
     const urls = this.jarUrls();
-    if (urls.length === 0) return false;
+    if (urls.length === 0) return 0;
     const paths = urls.map((u) => this.bridge.peekConverted(u)).filter((p) => !!p);
-    if (paths.length !== urls.length) return false; // 有 jar 还没转换过 → 跳过（不下载）
-    return this.bridge.prewarmJar(paths, this.clsName);
+    if (paths.length !== urls.length) return 0; // 有 jar 还没转换过 → 跳过（不下载）
+    return this.bridge.prewarmJar(paths, this.clsName, count);
   }
 
   /**

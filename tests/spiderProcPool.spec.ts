@@ -9,7 +9,7 @@
 //   池按物理换行分帧 —— 假子进程必须带 '\n'，否则帧永不收敛（测试挂起）。
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { SpiderProcPool, PER_KEY_CAP, IDLE_RECLAIM_MS } from '../src/engine/spider/SpiderProcPool';
+import { SpiderProcPool, PER_KEY_CAP, IDLE_RECLAIM_MS, effectiveGlobalCap } from '../src/engine/spider/SpiderProcPool';
 
 type FakeChild = ReturnType<typeof fakeChild>;
 
@@ -98,20 +98,22 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
 
   it('达 PER_KEY_CAP 后排队：进程一空闲即派发（不丢请求、不额外 spawn）', async () => {
     const { pool, spawned } = makeEnv(false); // 手动回行，制造"全部忙"的状态
-    const reqs = ['a', 'b', 'c', 'd', 'e'].map((id) => pool.submit('k1', SPEC, REQ(id)));
-    expect(spawned.length).toBe(PER_KEY_CAP); // 前 4 个各占一个进程
-    // 第 5 个（e）排在第一个进程队列里 → 让该进程空闲后即被派发
+    // ★ 2026-09-23 三轮：PER_KEY_CAP 8（同 key 并行度 = 全源搜索真实并发上限），
+    //   但实际并发还受**内存自适应全局上限**约束 → 用例取两者较小值。
+    const cap = Math.min(PER_KEY_CAP, effectiveGlobalCap());
+    const ids = Array.from({ length: cap + 1 }, (_, i) => `id${i}`);
+    const reqs = ids.map((id) => pool.submit('k1', SPEC, REQ(id)));
+    expect(spawned.length).toBe(cap); // 前 cap 个各占一个进程
+    // 最后一个（队列里的那个）在第一个进程空闲后被派发
     const childA = spawned[0].child;
-    reply(childA, 'a', 'A');
+    reply(childA, 'id0', 'OK0');
     await new Promise((r) => setTimeout(r, 5));
-    reply(childA, 'e', 'E');
-    reply(spawned[1].child, 'b', 'B');
-    reply(spawned[2].child, 'c', 'C');
-    reply(spawned[3].child, 'd', 'D');
+    reply(childA, ids[cap], 'LAST');
+    for (let i = 1; i < cap; i++) reply(spawned[i].child, ids[i], `OK${i}`);
     const done = await Promise.all(reqs);
-    expect(done.map((r) => r.data).sort()).toEqual(['A', 'B', 'C', 'D', 'E'].sort());
     expect(done.every((r) => r.ok)).toBe(true);
-    expect(spawned.length).toBe(PER_KEY_CAP); // 排队请求未额外 spawn
+    expect(done.map((r) => r.data).sort()[0]).toBe('LAST');
+    expect(spawned.length).toBe(cap); // 排队请求未额外 spawn
   });
 
   it('空结果是合法结果（ok:true + data:""）→ 调用方不会回退一次性', async () => {
@@ -130,13 +132,18 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
       children.push(c);
       return c as never;
     });
-    const busy = ['a', 'b', 'c', 'd'].map((id) => pool.submit('k1', SPEC, REQ(id))); // 占满 PER_KEY_CAP
+    // ★ 三轮：排队等待上限 15s → 25s（宁可等，也不要在排队超时后回退冷启动一次性进程），
+    //   占满的进程数 = min(PER_KEY_CAP, 全局上限)。
+    const cap = Math.min(PER_KEY_CAP, effectiveGlobalCap());
+    const ids = Array.from({ length: cap }, (_, i) => `b${i}`);
+    // 占用者给足超时（60s），保证先触发的是**排队超时**而不是"占用者执行超时被 kill"
+    const busy = ids.map((id) => pool.submit('k1', SPEC, REQ(id), 60_000));
     const queued = pool.submit('k1', SPEC, REQ('q'));
-    await vi.advanceTimersByTimeAsync(16_000); // 排队等待上限 15s
+    await vi.advanceTimersByTimeAsync(26_000); // 排队等待上限 25s
     expect(await queued).toEqual({ ok: false, data: '', reason: 'queue-timeout' });
     expect(killed).toHaveLength(0); // 排队超时不牵连进程
     // 收尾：进程仍在跑（各自等待自己的请求超时）→ 清理避免悬挂
-    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.advanceTimersByTimeAsync(70_000);
     await Promise.all(busy);
   });
 
@@ -183,17 +190,20 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
 
   it('全局上限：额度用尽时回收最久空闲进程（LRU）后再复用额度', async () => {
     const { pool, spawned } = makeEnv();
-    // 用 6 个不同 key 各占 1 个进程（= GLOBAL_CAP），全部转入空闲
-    for (let i = 0; i < 6; i++) {
+    // ★ 2026-09-23 三轮：全局上限改为**内存自适应**（空闲 >2GB → 12，否则 6），
+    //   用例按 effectiveGlobalCap() 动态构造「刚好占满 + 1」的场景。
+    const cap = effectiveGlobalCap();
+    // 用 cap 个不同 key 各占 1 个进程（= 全局上限），全部转入空闲
+    for (let i = 0; i < cap; i++) {
       const r = await pool.submit('k' + i, { ...SPEC, key: 'k' + i }, REQ('r' + i));
       expect(r.ok).toBe(true);
     }
-    expect(pool.aliveCount).toBe(6);
-    // 第 7 个 key：额度满 → 回收最久空闲的 k0 进程，再为 k6 spawn
-    const r7 = await pool.submit('k6', { ...SPEC, key: 'k6' }, REQ('r6'));
+    expect(pool.aliveCount).toBe(cap);
+    // 第 cap+1 个 key：额度满 → 回收最久空闲的 k0 进程，再为新 key spawn
+    const r7 = await pool.submit('k' + cap, { ...SPEC, key: 'k' + cap }, REQ('r' + cap));
     expect(r7.ok).toBe(true);
-    expect(pool.aliveCount).toBeLessThanOrEqual(6); // ★ 不会无限增长
-    expect(spawned.length).toBe(7); // 新进程确实起来了（额度靠回收腾出）
+    expect(pool.aliveCount).toBeLessThanOrEqual(cap); // ★ 不会无限增长
+    expect(spawned.length).toBe(cap + 1); // 新进程确实起来了（额度靠回收腾出）
     expect(spawned[0].child.kill).toHaveBeenCalled(); // 最久空闲者被回收
   });
 
@@ -215,10 +225,11 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
   });
 
   // ★ 2026-09-23 预热（warm）：启动/配置应用后先付掉 JVM 冷启动（发 __ping__），
-  //   首次搜索/进主页直接复用这个热进程 —— 「全源搜索也像单源搜索一样秒出」的配套。
+  //   首次搜索/进主页直接复用这些热进程 —— 「全源搜索也像单源搜索一样秒出」的配套。
+  //   三轮增强：count 可一次预热多个同 key 进程（同 key 并行度 = 全源搜索真实并发上限）。
   it('预热：先 spawn 进程并发 __ping__ 探针，随后请求复用该进程（不再冷启动）', async () => {
     const { pool, spawned } = makeEnv();
-    expect(pool.warm('k1', SPEC)).toBe(true);
+    expect(pool.warm('k1', SPEC)).toBe(1);
     expect(spawned).toHaveLength(1);
     expect(spawned[0].child.stdin.write).toHaveBeenCalledTimes(1);
     const ping = JSON.parse(String((spawned[0].child.stdin.write as unknown as { mock: { calls: string[][] } }).mock.calls[0][0]));
@@ -229,10 +240,25 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
     expect(spawned).toHaveLength(1); // ★ 复用：预热进程直接承接首个真实请求
   });
 
+  it('预热多进程：count=4 一次拉起 4 个同 key 热进程（幂等补差额）', async () => {
+    const { pool, spawned } = makeEnv();
+    expect(pool.warm('k1', SPEC, 4)).toBe(4);
+    expect(spawned).toHaveLength(4);
+    expect(pool.aliveForKey('k1')).toBe(4);
+    await new Promise((r) => setTimeout(r, 5));
+    // 再来一次：已有 4 个 → 补差额为 0（不重复堆进程）
+    expect(pool.warm('k1', SPEC, 4)).toBe(0);
+    expect(spawned).toHaveLength(4);
+    // 4 个请求可直接并行（不排队）
+    const rs = await Promise.all([0, 1, 2, 3].map((i) => pool.submit('k1', SPEC, REQ('p' + i))));
+    expect(rs.every((r) => r.ok)).toBe(true);
+    expect(spawned).toHaveLength(4);
+  });
+
   it('预热幂等：同一 key 已有热进程时不重复 spawn，后续请求照常复用', async () => {
     const { pool, spawned } = makeEnv();
-    expect(pool.warm('k1', SPEC)).toBe(true);
-    expect(pool.warm('k1', SPEC)).toBe(false); // 已有热进程 → 不重复占额度
+    expect(pool.warm('k1', SPEC)).toBe(1);
+    expect(pool.warm('k1', SPEC)).toBe(0); // 已有热进程（count=1）→ 无需再起
     expect(spawned).toHaveLength(1);
     // 假子进程对 __ping__ 也会回（makeEnv 默认回应）→ 进程转空闲，正常请求照常复用
     await new Promise((r) => setTimeout(r, 5));

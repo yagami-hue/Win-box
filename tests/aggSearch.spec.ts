@@ -26,6 +26,35 @@ describe('mergeSearchResults — 汇总不去重', () => {
     expect(r.hitSources).toBe(2);
   });
 
+  // ★ 2026-09-23 三轮：同一源重复出现（进度事件重放 / 缓存预填后的实时更新）→ 以最后一条为准，
+  //   否则同一个源的结果会重复上屏、perSource 出现两条同名项（展示「越搜越多」的假象）。
+  it('同一源出现多次：以最后一条为准（不重复计数、位置保持首次出现处）', () => {
+    const inputs = [
+      src('a', '源A', [v('1', '流浪地球', 'a')]),
+      src('b', '源B', [v('2', '独行月球', 'b')]),
+      src('a', '源A', [v('1', '流浪地球', 'a'), v('3', '流浪地球2', 'a')]), // 源A 的更新（多了一条）
+    ];
+    const r = mergeSearchResults(inputs);
+    expect(r.perSource.length).toBe(2);
+    expect(r.perSource[0].key).toBe('a');
+    expect(r.perSource[0].count).toBe(2);
+    expect(r.items.filter((i) => i.sourceKey === 'a').length).toBe(2); // 不重复：只算最后一条
+    expect(r.items.filter((i) => i.sourceKey === 'b').length).toBe(1);
+    expect(r.totalRaw).toBe(3);
+    expect(r.hitSources).toBe(2);
+  });
+
+  it('同一源的更新可以把 ok 改成 error（失败覆盖成功）', () => {
+    const r = mergeSearchResults([
+      src('a', '源A', [v('1', '片', 'a')]),
+      { key: 'a', name: '源A', status: 'error', error: '超时' },
+    ]);
+    expect(r.perSource).toHaveLength(1);
+    expect(r.perSource[0].status).toBe('error');
+    expect(r.items).toHaveLength(0);
+    expect(r.failedSources).toBe(1);
+  });
+
   it('来源标注到每条结果', () => {
     const r = mergeSearchResults([src('a', '源A', [v('1', '片', 'a'), v('2', '剧', 'a')])]);
     expect(r.items.every((i) => i.sourceName === '源A' && i.sourceKey === 'a')).toBe(true);

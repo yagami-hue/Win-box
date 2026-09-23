@@ -51,7 +51,8 @@ const api = {
     category: (a: { key: string; tid: string; pg: string; extend?: Record<string, string> }) => invoke(IPC.VOD_CATEGORY, a),
     detail: (a: { key: string; ids: string[] }) => invoke(IPC.VOD_DETAIL, a),
     search: (a: { key: string; wd: string }) => invoke(IPC.VOD_SEARCH, a),
-    searchAll: (wd: string) => invoke(IPC.VOD_SEARCH_ALL, wd),
+    /** ★ opts.refresh=true 忽略本地缓存强制重搜（UI「重新搜索」）；缺省命中 5 分钟缓存即秒回 */
+    searchAll: (wd: string, opts?: { refresh?: boolean }) => invoke(IPC.VOD_SEARCH_ALL, { wd, refresh: !!opts?.refresh }),
     play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => invoke(IPC.VOD_PLAY, a),
   },
   live: {

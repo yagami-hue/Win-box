@@ -15,6 +15,8 @@ export interface AggSearchInput {
 /**
  * 把各源原始搜索结果汇总：
  * - **不去重**：每个源的所有命中原样保留，逐条标注 sourceKey/sourceName；
+ * - ★ 同一源出现多次（流式进度事件重放 / 缓存预填后的实时更新）→ **以最后一条为准**，
+ *   避免同一个源的结果重复上屏、perSource 出现两条同名项（Map 保持首次出现的位置，展示顺序稳定）；
  * - 生成 perSource 状态与汇总统计（totalRaw = 汇总后条目总数）。
  */
 export function mergeSearchResults(inputs: AggSearchInput[]): SearchAllReport {
@@ -25,7 +27,10 @@ export function mergeSearchResults(inputs: AggSearchInput[]): SearchAllReport {
   let failedSources = 0;
   let totalRaw = 0;
 
-  for (const inp of inputs) {
+  const dedup = new Map<string, AggSearchInput>();
+  for (const inp of inputs) dedup.set(inp.key, inp);
+
+  for (const inp of dedup.values()) {
     const ps: SearchPerSource = { key: inp.key, name: inp.name, status: inp.status, error: inp.error, count: inp.items?.length ?? 0, ms: inp.ms };
     perSource.push(ps);
     if (inp.status === 'error') {

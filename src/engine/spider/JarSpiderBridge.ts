@@ -360,9 +360,15 @@ export class JarSpiderBridge {
     return existsSync(p) ? p : '';
   }
 
-  /** ★ 预热：提前 spawn 常驻 SpiderRunner --serve（详见 SpiderProcPool.warm）。 */
-  prewarmJar(jarPaths: string[], className: string): boolean {
-    if (!this.pool || jarPaths.length === 0 || !jarPaths.every((p) => existsSync(p))) return false;
+  /**
+   * ★ 预热：提前 spawn `count` 个常驻 SpiderRunner --serve（详见 SpiderProcPool.warm）。
+   * count>1 的意义：同 key 的多进程并行是全源搜索的真实并发上限（见 PER_KEY_CAP 注释），
+   * 预热 N 个 = 首波搜索直接 N 路并行且全热。
+   *
+   * @returns 实际新起的进程数（0 = 未预热：池禁用/路径缺失/已热/额度不足）
+   */
+  prewarmJar(jarPaths: string[], className: string, count = 1): number {
+    if (!this.pool || jarPaths.length === 0 || !jarPaths.every((p) => existsSync(p))) return 0;
     const shimClasses = this.shimWithFoni(className, this.shellShimClassesPath() || this.autoShellShim(jarPaths));
     const shimJar = this.shellShimJarPath();
     const cpParts = [this.classpathJars(), ...jarPaths];
@@ -376,23 +382,35 @@ export class JarSpiderBridge {
       cp,
     ];
     const key = servePoolKey(this.javaExe(), serveArgv);
-    return this.pool.warm(key, { exe: this.javaExe(), serveArgv, key });
+    return this.pool.warm(key, { exe: this.javaExe(), serveArgv, key }, count);
   }
 
   /**
    * ★ 预热：提前 spawn 常驻 Python runner（-serve）。
-   * 运行时/脚本任一未落盘 → 直接 false：预热**绝不触发**嵌入式 Python 下载（那是 11MB 级重活）。
+   * 运行时/脚本任一未落盘 → 直接 0：预热**绝不触发**嵌入式 Python 下载（那是 11MB 级重活）。
    */
-  prewarmPython(pyPath: string, clsName: string): boolean {
-    if (!this.pool || !this.pyRuntimeDir) return false;
+  prewarmPython(pyPath: string, clsName: string, count = 1): number {
+    if (!this.pool || !this.pyRuntimeDir) return 0;
     const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
     const pyExe = join(dir, 'python.exe');
     const runner = join(dir, 'runner.py');
-    if (!existsSync(pyPath) || !existsSync(pyExe) || !existsSync(runner)) return false;
+    if (!existsSync(pyPath) || !existsSync(pyExe) || !existsSync(runner)) return 0;
     const serveArgv = [runner, '-serve', pyPath, clsName];
     const env = { PYTHONIOENCODING: 'utf-8' };
     const key = servePoolKey(pyExe, serveArgv, env);
-    return this.pool.warm(key, { exe: pyExe, serveArgv, env, key });
+    return this.pool.warm(key, { exe: pyExe, serveArgv, env, key }, count);
+  }
+
+  /**
+   * 某 key 已热进程数（诊断/预热去重用）。池禁用时返回 0。
+   */
+  warmCount(poolKey: string): number {
+    return this.pool?.aliveForKey(poolKey) ?? 0;
+  }
+
+  /** 池内常驻进程总数（诊断/日志/基准脚本用） */
+  alivePoolCount(): number {
+    return this.pool?.aliveCount ?? 0;
   }
 
   /**
@@ -545,6 +563,14 @@ export class JarSpiderBridge {
         if (r.reason === 'timeout') {
           this.lastSpiderReason = `蜘蛛调用超时（>${Math.round(tmo / 1000)}s），源站可能无响应`;
           this.host?.logger.i(`jvm-bridge ${className}.${method} 失败原因: ${this.lastSpiderReason}`);
+          return '';
+        }
+        // ★ 2026-09-23 三轮：**排队超时也不回退一次性** —— 排队长说明「同时查询的源太多」，
+        //   再 spawn 一个冷启动 JVM 只会让队列更长（用户侧表现为「越搜越慢」）。
+        //   直接按「本源本次未取到」返回，并记下可读原因（健康调度会把该源排序到队尾+短预算）。
+        if (r.reason === 'queue-timeout') {
+          this.lastSpiderReason = '并发排队超时（同时查询的源太多），稍后重试该源即可';
+          this.host?.logger.w(`jvm-bridge ${className}.${method}: ${this.lastSpiderReason}`);
           return '';
         }
       } catch {
