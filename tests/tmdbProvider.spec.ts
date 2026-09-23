@@ -1,6 +1,6 @@
 // tests/tmdbProvider.spec.ts — TMDB 元数据补全的纯函数测试（解析/缓存键/名称规范化，不依赖网络）
 import { describe, expect, it } from 'vitest';
-import { parseTmdbSearch, metaCacheKey, metaQueryName } from '../src/main/meta/tmdbProvider';
+import { parseTmdbSearch, metaCacheKey, metaQueryName, metaQueryVariants } from '../src/main/meta/tmdbProvider';
 
 describe('parseTmdbSearch', () => {
   const sample = {
@@ -51,5 +51,38 @@ describe('metaCacheKey / metaQueryName', () => {
   it('缓存键空名容忍', () => {
     expect(metaCacheKey('', '')).toBe('|');
     expect(metaCacheKey('  ', undefined)).toBe('|');
+  });
+});
+
+// ★ 2026-09-23：查询名变体 —— 「封面总有几个补不上」的治因之一
+//   （源站把「第1季/更新至N集/4K」等标记拼进片名时，原名查 TMDB/豆瓣必然 miss）
+describe('metaQueryVariants', () => {
+  it('原名优先，且首个变体与 metaQueryName 一致', () => {
+    expect(metaQueryVariants('狂飙')[0]).toBe('狂飙');
+  });
+
+  it('剥尾部集数/季数/更新至/完结等噪声（可叠加）', () => {
+    expect(metaQueryVariants('斗罗大陆 第1季')).toContain('斗罗大陆');
+    expect(metaQueryVariants('斗罗大陆 更新至123集')).toContain('斗罗大陆');
+    expect(metaQueryVariants('狂飙 全39集 4K')).toContain('狂飙');
+    expect(metaQueryVariants('庆余年 第1季 1080P 国语')).toContain('庆余年');
+  });
+
+  it('去括号标签 / 取主标题', () => {
+    expect(metaQueryVariants('斗罗大陆（4K）')).toContain('斗罗大陆');
+    expect(metaQueryVariants('【狂飙】')).toContain('狂飙');
+    expect(metaQueryVariants('斗罗大陆Ⅱ绝世唐门·第一季')).toContain('斗罗大陆Ⅱ绝世唐门');
+  });
+
+  it('不误伤真实片名（第X季是片名的一部分时不猜）', () => {
+    // 无噪声 → 不产生多余变体
+    expect(metaQueryVariants('欢乐颂2')).toEqual(['欢乐颂2']);
+    expect(metaQueryVariants('狂飙')).toEqual(['狂飙']);
+  });
+
+  it('空/过短输入 → 空数组（不打 API）', () => {
+    expect(metaQueryVariants('')).toEqual([]);
+    expect(metaQueryVariants('  ')).toEqual([]);
+    expect(metaQueryVariants('A')).toEqual([]);
   });
 });

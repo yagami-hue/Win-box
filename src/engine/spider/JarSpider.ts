@@ -78,18 +78,23 @@ export class JarSpider extends Spider {
       //   避免上层误走「homeVideoContent/分类兜底」浪费一次 JVM 调用再报空结果。
       throw new SourceProblemError('SPIDER_ERROR', this.loadError, { sourceKey: this.siteKey });
     }
-    const paths = this.bridge.resolvePaths(this.jarUrls());
-    // ★ 解析不到任何本地 jar 路径时**绝对不要继续调用**。
-    //   继续下去 SpiderRunner 会收到空的 jar 参数，于是所有蜘蛛类都报
-    //   `ClassNotFoundException: com.github.catvod.spider.Xxx` ——
-    //   看起来像"桌面版缺接口"，实际是"这只 jar 根本没准备好"，
-    //   会把排查方向带偏（实测 95 个源集体报这句）。这里拦下并给出准确原因。
+    let paths = this.bridge.resolvePaths(this.jarUrls());
+    // ★ 解析不到本地 jar 路径 → **就地重建一次**（重新下载+转换）再试：
+    //   `ready` 是进程内一次性标记，而转换产物随时可能被「清理缓存」按钮/杀软/外部清理删掉；
+    //   不重置 ready 就会**永远**报「jar 本地路径不可用（缓存可能已被清理），请重试」——
+    //   用户"重试"也没用，只能重启应用或重新导入配置（0.84.0 实机日志里出现过这一串）。
+    if (paths.length === 0) {
+      this.ready = false;
+      if (await this.ensureReady()) paths = this.bridge.resolvePaths(this.jarUrls());
+    }
+    // 重建后仍拿不到路径 → 绝不继续调用（否则 SpiderRunner 收到空 jar 参数，
+    // 所有蜘蛛类都报 ClassNotFoundException，看起来像"桌面版缺接口"，把排查方向带偏）。
     if (paths.length === 0) {
       this.loadError = 'jar 本地路径不可用（缓存可能已被清理），请重试；若持续出现请重新导入配置';
       this.host.logger.w(`jar-spider ${this.siteKey}: ${this.loadError}`);
       throw new SourceProblemError('SPIDER_ERROR', this.loadError, { sourceKey: this.siteKey });
     }
-    return this.bridge.call(paths, this.clsName, method, [this.enrichedExt(), ...args]);
+    return this.bridge.call(paths, this.clsName, method, [this.enrichedExt(), ...args], this.timeoutMs);
   }
 
   /**

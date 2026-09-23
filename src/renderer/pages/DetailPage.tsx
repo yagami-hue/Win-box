@@ -5,6 +5,7 @@ import { client } from '../api/client';
 import BackButton from '../components/BackButton';
 import { uiMem, schedulePersist } from '../lib/uiMemory';
 import type { Episode, MetaHit, VodDetail } from '../../shared/types';
+import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 
 export default function DetailPage({
   onPlay,
@@ -59,6 +60,8 @@ export default function DetailPage({
   const [metaHit, setMetaHit] = useState<MetaHit | null>(null);
   /** ★ 源封面（detail.pic / fromListPic）onError 证明是坏图 → 维持 TMDB 优先 */
   const [srcPicBad, setSrcPicBad] = useState(false);
+  /** ★ 源封面经本地 /play 中继重试（注入同源 Referer 破防盗链）的地址；只试一次 */
+  const [srcPicRelay, setSrcPicRelay] = useState('');
   useEffect(() => {
     if (!detail) { setMetaHit(null); return; }
     const name = (detail.name || '').trim().split(' - ')[0]?.trim();
@@ -82,21 +85,29 @@ export default function DetailPage({
     const src = el.currentSrc || el.src || '';
     if (/\/img\?/.test(src)) {
       if (metaHit) setMetaHit(null);
-    } else {
-      setSrcPicBad(true);
-      // ★ 源封面坏了而 TMDB 尚未命中 → 主动再查一次（幂等，仅一次）
-      if (!metaHit && !metaRetried.current) {
-        metaRetried.current = true;
-        const name = (detail?.name || '').trim().split(' - ')[0]?.trim();
-        if (name) {
-          const y = /((?:19|20)\d{2})/.exec(`${detail?.name || ''} ${detail?.year || ''} ${detail?.remarks || ''}`);
-          client.metaSearch(name, y ? y[1] : undefined)
-            .then((h) => { if (h) setMetaHit(h); })
-            .catch(() => undefined);
-        }
+      return;
+    }
+    if (/\/play\?/.test(src)) {
+      // 中继重试也失败 → 置灰（TMDB 兜底已尽力，不再反复重试）
+      el.style.opacity = '0.2';
+      return;
+    }
+    setSrcPicBad(true);
+    // ★ 源封面失败 → 先经本地 /play 中继重试一次（同源 Referer，破防盗链 403）
+    const relay = wrapImageUrlForRelay(src, navigator.userAgent);
+    if (relay) setSrcPicRelay((prev) => prev || relay);
+    else el.style.opacity = '0.2';
+    // ★ 源封面坏了而 TMDB 尚未命中 → 主动再查一次（幂等，仅一次）
+    if (!metaHit && !metaRetried.current) {
+      metaRetried.current = true;
+      const name = (detail?.name || '').trim().split(' - ')[0]?.trim();
+      if (name) {
+        const y = /((?:19|20)\d{2})/.exec(`${detail?.name || ''} ${detail?.year || ''} ${detail?.remarks || ''}`);
+        client.metaSearch(name, y ? y[1] : undefined)
+          .then((h) => { if (h) setMetaHit(h); })
+          .catch(() => undefined);
       }
     }
-    el.style.opacity = '0.2';
   };
 
   // 滚动位置记忆
@@ -182,9 +193,9 @@ export default function DetailPage({
         ) : (
           <>
             <div className="row" style={{ alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
-              {/** 封面（★ TMDB 优先）：metaHit.poster(中继图) > 源自带 > 列表带入；TMDB miss 才落到源图 */}
-              {metaHit?.poster || detail.pic || fromListPic ? (
-                <img src={metaHit?.poster || detail.pic || fromListPic || ''} style={{ width: 120, aspectRatio: '2/3', objectFit: 'cover', borderRadius: 8, background: 'var(--bg-elev2)' }} onError={coverErr} />
+              {/** 封面（★ TMDB 优先）：metaHit.poster(中继图) > 源图中继重试 > 源自带 > 列表带入；TMDB miss 才落到源图 */}
+              {metaHit?.poster || srcPicRelay || detail.pic || fromListPic ? (
+                <img src={metaHit?.poster || srcPicRelay || detail.pic || fromListPic || ''} style={{ width: 120, aspectRatio: '2/3', objectFit: 'cover', borderRadius: 8, background: 'var(--bg-elev2)' }} onError={coverErr} />
               ) : (
                 <div style={{
                   width: 120, aspectRatio: '2/3', borderRadius: 8, background: 'var(--bg-elev2)', flex: 'none',

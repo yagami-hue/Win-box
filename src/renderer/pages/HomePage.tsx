@@ -5,6 +5,7 @@ import { sourceAvailability } from '../../engine/vod/sourceAvailability';
 import { mergeSearchResults } from '../../engine/vod/aggSearch';
 import { uiMem, schedulePersist } from '../lib/uiMemory';
 import { getSessionSort, setSessionSort } from '../lib/sessionSort';
+import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 
 type SortClassView = { id: string; name: string; flag?: string; filters?: FilterGroup[] };
 
@@ -48,6 +49,9 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const aggBusyRef = useRef(false);
   /** ★ 源自带图已证明是坏图（onError）→ 交回 TMDB 再补（坏图不残留界面） */
   const [badPics, setBadPics] = useState<Record<string, boolean>>({});
+  /** ★ 源封面经本地 /play 中继重试（同源 Referer 破防盗链）的地址；每个 id 只试一次 */
+  const [picRelay, setPicRelay] = useState<Record<string, string>>({});
+  const [aggPicRelay, setAggPicRelay] = useState<Record<string, string>>({});
   const tmdbTitleOf = (it: VodItem) => (it.name || '').split(' - ')[0]?.trim() || '';
   const tmdbYearOf = (it: VodItem) => /((?:19|20)\d{2})/.exec(`${it.name} ${it.remarks || ''}`)?.[1];
   useEffect(() => {
@@ -85,8 +89,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items]);
-  // 封面取值：TMDB 补全优先，源自带 pic 只作占位/兜底
-  const picOf = (it: VodItem) => picOver[it.id] || it.pic;
+  // 封面取值：TMDB 补全优先，其次「源图中继重试（防盗链兜底）」，最后源图
+  const picOf = (it: VodItem) => picOver[it.id] || picRelay[it.id] || it.pic;
   /** ★ 源封面加载失败/为空 → 显式触发一次单条 TMDB 查询覆盖（原逻辑只置透明，从不重查 TMDB） */
   const retryMetaFor = useRef<Set<string>>(new Set());
   const ensureMetaSingle = (it: VodItem) => {
@@ -115,12 +119,22 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           return n;
         });
       }
-    } else {
-      // ★ 失败的是源封面 → 标坏 + 显式触发 TMDB 重查（此前版本仅 opacity 置灰，坏图永不换掉）
-      setBadPics((prev) => (prev[it.id] ? prev : { ...prev, [it.id]: true }));
-      ensureMetaSingle(it);
+      return;
     }
-    el.style.opacity = '0.15';
+    // ★ 源封面失败（防盗链 403/坏图）→ 先经本地 /play 中继重试一次（注入同源 Referer），
+    //   同时触发 TMDB 幂等补查；中继也失败就置灰交占位，不再反复重试。
+    if (/\/play\?/.test(src)) {
+      el.style.opacity = '0.15';
+      return;
+    }
+    setBadPics((prev) => (prev[it.id] ? prev : { ...prev, [it.id]: true }));
+    ensureMetaSingle(it);
+    const relay = wrapImageUrlForRelay(src, navigator.userAgent);
+    if (relay) {
+      setPicRelay((prev) => (prev[it.id] === undefined ? { ...prev, [it.id]: relay } : prev));
+    } else {
+      el.style.opacity = '0.15';
+    }
   };
   // ★★ 聚合搜索结果 TMDB 补全（release76 新接入）：与浏览态同机制 —— 未补过的一律查，
   //   按归一化片名去重（每页 ≤30 唯一名、6 并发分波），命中覆盖整组；补图失败移除覆盖。
@@ -158,19 +172,47 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agg, aggMode]);
-  const aggPicOf = (it: AggVodItem) => aggPicOver[aggKeyOf(it)] || it.pic;
+  const aggPicOf = (it: AggVodItem) => aggPicOver[aggKeyOf(it)] || aggPicRelay[aggKeyOf(it)] || it.pic;
+  /** ★ 聚合搜索的源封面失败 → 与浏览态同款兜底（中继重试 + 单条 TMDB 补查，各一次） */
+  const aggMetaRetried = useRef<Set<string>>(new Set());
+  const ensureAggMetaSingle = (it: AggVodItem) => {
+    const k = aggKeyOf(it);
+    if (aggMetaRetried.current.has(k)) return;
+    const name = (it.name || '').split(' - ')[0]?.trim() || '';
+    if (!name) return;
+    aggMetaRetried.current.add(k);
+    const y = /((?:19|20)\d{2})/.exec(`${it.name} ${it.remarks || ''}`)?.[1];
+    client
+      .metaSearch(name, y)
+      .then((h) => {
+        if (h && h.poster) setAggPicOver((prev) => (prev[k] === undefined ? { ...prev, [k]: h.poster } : prev));
+      })
+      .catch(() => undefined);
+  };
   const aggPicErr = (it: AggVodItem) => (e: React.SyntheticEvent<HTMLImageElement>) => {
     const el = e.target as HTMLImageElement;
-    if (/\/img\?/.test(el.currentSrc || el.src || '')) {
+    const src = el.currentSrc || el.src || '';
+    const k = aggKeyOf(it);
+    if (/\/img\?/.test(src)) {
       setAggPicOver((prev) => {
-        const k = aggKeyOf(it);
         if (prev[k] === undefined) return prev;
         const n = { ...prev };
         delete n[k];
         return n;
       });
+      return;
     }
-    el.style.opacity = '0.15';
+    if (/\/play\?/.test(src)) {
+      el.style.opacity = '0.15';
+      return;
+    }
+    ensureAggMetaSingle(it);
+    const relay = wrapImageUrlForRelay(src, navigator.userAgent);
+    if (relay) {
+      setAggPicRelay((prev) => (prev[k] === undefined ? { ...prev, [k]: relay } : prev));
+    } else {
+      el.style.opacity = '0.15';
+    }
   };
   // 滚动/浏览状态记忆：卸载(返回)时存档，回来恢复列表定位
   useEffect(() => {

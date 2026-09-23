@@ -1,6 +1,29 @@
 // tests/driveProvider.spec.ts — 网盘播放 URL → provider 关联（cookie 型网盘）
 import { describe, it, expect } from 'vitest';
-import { matchDriveCookieProvider, wrapPlayUrl, driveUrlHost } from '../src/shared/driveProvider';
+import { matchDriveCookieProvider, wrapPlayUrl, driveUrlHost, wrapImageUrlForRelay } from '../src/shared/driveProvider';
+
+// ★ 2026-09-23：源封面防盗链兜底 —— 图裂的源图经本地 /play 中继重试（注入同源 Referer）
+describe('wrapImageUrlForRelay', () => {
+  it('http(s) 源图 → 中继 URL（url + 同源 Referer）', () => {
+    const r = wrapImageUrlForRelay('http://wim.xzjykj.com/upload/vod/a.jpg');
+    expect(r.startsWith('http://127.0.0.1:9978/play?')).toBe(true);
+    const q = new URLSearchParams(r.split('?')[1]);
+    expect(q.get('url')).toBe('http://wim.xzjykj.com/upload/vod/a.jpg');
+    expect(q.get('referer')).toBe('http://wim.xzjykj.com/');
+  });
+
+  it('携带 UA（渲染层传 navigator.userAgent）', () => {
+    const r = wrapImageUrlForRelay('https://img.example.com/a.png', 'Mozilla/5.0 X');
+    expect(new URLSearchParams(r.split('?')[1]).get('ua')).toBe('Mozilla/5.0 X');
+  });
+
+  it('非 http(s) / 空 / 非法 → 空串（调用方保持原图）', () => {
+    expect(wrapImageUrlForRelay('')).toBe('');
+    expect(wrapImageUrlForRelay('data:image/png;base64,AAA')).toBe('');
+    expect(wrapImageUrlForRelay('/relative/a.jpg')).toBe('');
+    expect(wrapImageUrlForRelay('http://127.0.0.1:9978/play?url=x')).toContain('/play?');
+  });
+});
 
 describe('driveUrlHost', () => {
   it('提取小写 hostname', () => {

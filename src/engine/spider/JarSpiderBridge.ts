@@ -10,7 +10,7 @@ import type { EngineHost } from '../ports';
 import { md5Hex } from '../util/md5';
 import { NullLogger } from '../util/logger';
 import { buildZip, listZipEntries, looksLikeZip, readZipEntries, type ZipEntryData } from '../util/syncZip';
-import { SpiderProcPool, poolEnabled, servePoolKey } from './SpiderProcPool';
+import { SpiderProcPool, poolEnabled, servePoolKey, type PoolResult } from './SpiderProcPool';
 
 export interface JarBridgeOptions {
   /** resources/jvm 目录（含 jre/d2j/stubs/libs） */
@@ -53,6 +53,8 @@ export class JarSpiderBridge {
    * 成功或无线索时为空串。
    */
   private lastSpiderReason = '';
+  /** 常驻 serve 进程 stderr 的尾部窗口（采集 SpiderLog 失败原因用，见 collectServeLog） */
+  private serveLogTail = '';
   /** 当前存活的 JVM 子进程（退出时统一终止，防止残留） */
   private activeChildren = new Set<import('node:child_process').ChildProcess>();
   /** ★ 子进程常驻复用池（--serve/-serve；进程复用加速首页/搜索；单测与显式关闭时禁用） */
@@ -73,20 +75,32 @@ export class JarSpiderBridge {
       this.pool = new SpiderProcPool((spec) => {
         const child = spawn(spec.exe, spec.serveArgv, {
           windowsHide: true,
-          // ★ serve 进程只读 stdout（池按物理行分帧）；stderr 无人消费会阻塞蜘蛛
-          //   （大量源往 stderr 打日志可写满 64KB 管道 → 子进程挂死）→ 直接丢弃
-          stdio: ['pipe', 'pipe', 'ignore'],
+          // ★ serve 进程 stdout 走行协议（池按物理行分帧），stderr 必须**消费**而不是 'ignore'：
+          //   一是防 64KB 管道写满挂死蜘蛛，二是采集 SpiderLog 失败原因（空结果时上屏的人话提示）。
+          stdio: ['pipe', 'pipe', 'pipe'],
           ...(spec.env ? { env: { ...process.env, ...spec.env } } : {}),
         });
+        child.stderr?.setEncoding('utf-8');
+        child.stderr?.on('data', (d: string) => this.collectServeLog(String(d)));
         this.activeChildren.add(child);
         child.on('exit', () => this.activeChildren.delete(child));
         return child;
       });
-      // 空闲进程每 15s 回收一次（30s 无请求即杀，保留每 key 1 个热进程）
+      // 空闲进程每 15s 回收一次（同 key 只保留 1 个热进程，并行期多开的进程 30s 后回收）
       this.poolReclaimTimer = this.pool.startReclaimTimer();
     } else {
       this.pool = null;
     }
+  }
+
+  /**
+   * 采集常驻 serve 进程 stderr 里的蜘蛛失败原因（与一次性路径同款抽取/翻译）。
+   * 只保留尾部窗口：常驻进程跨请求存活，日志会长时间累积。
+   */
+  private collectServeLog(chunk: string): void {
+    this.serveLogTail = (this.serveLogTail + chunk).slice(-8192);
+    const reason = extractSpiderReason(this.serveLogTail);
+    if (reason) this.lastSpiderReason = translateSpiderLog(reason);
   }
 
   get defaultJar(): string {
@@ -428,14 +442,14 @@ export class JarSpiderBridge {
     ];
     // ★ 进程池：常驻 JVM（--serve）跨请求复用 → 二次调用跳过冷启动。
     //   serve argv = javaPrefix + [SpiderRunner, --serve, cp]（cp 已含 shim jar）。
-    //   失败（进程崩溃/超时/传输错误 → resolve('')）回退一次性路径保底。
+    //   ★ 仅**传输层失败**（进程崩溃/超时/写入失败）才回退一次性保底；
+    //     蜘蛛合法返回空串（空搜索）不再误判失败去多打一次冷启动。
     if (this.pool) {
       const serveArgv = [...this.jvmPrefix(cp), ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []), 'SpiderRunner', '--serve', cp];
       const key = servePoolKey(this.javaExe(), serveArgv);
       try {
-        const out = await this.poolSubmit(this.javaExe(), key, serveArgv, className, method, args);
-        if (out !== '') return out; // 进程可复用且正常返回
-        // out==='' 可能是蜘蛛空结果或进程失效；为保语义一致回退一次性（空结果场景一次性也会返回 ''）→ 安全
+        const r = await this.poolSubmit(this.javaExe(), key, serveArgv, className, method, args, undefined, timeoutMs ?? this.callTimeoutMs);
+        if (r.ok) return r.data;
       } catch {
         /* 池异常 → 回退一次性 */
       }
@@ -458,12 +472,13 @@ export class JarSpiderBridge {
     const runner = join(dir, 'runner.py');
     const argv = [runner, pyPath, clsName, method, ...args];
     // ★ 进程池：常驻 Python（-serve）跨请求复用（服务端循环；env 带 PYTHONIOENCODING）
+    //   语义同 JVM：仅传输层失败回退一次性，空结果是合法结果。
     if (this.pool) {
       const serveArgv = [runner, '-serve', pyPath, clsName];
       const key = servePoolKey(pyExe, serveArgv, { PYTHONIOENCODING: 'utf-8' });
       try {
-        const out = await this.poolSubmit(pyExe, key, serveArgv, clsName, method, args, { PYTHONIOENCODING: 'utf-8' });
-        if (out !== '') return out;
+        const r = await this.poolSubmit(pyExe, key, serveArgv, clsName, method, args, { PYTHONIOENCODING: 'utf-8' }, timeoutMs ?? 100000);
+        if (r.ok) return r.data;
       } catch {
         /* 池异常 → 回退一次性 */
       }
@@ -471,7 +486,7 @@ export class JarSpiderBridge {
     return this.runSubprocess(pyExe, argv, clsName, method, timeoutMs ?? 100000, { PYTHONIOENCODING: 'utf-8' });
   }
 
-  /** 进程池提交：同类请求复用同一 serve 进程。返回蜘蛛结果字符串（进程失效/超时 → ''）。 */
+  /** 进程池提交：同类请求复用同一 serve 进程。ok=false 仅表示进程/传输层失败（调用方回退一次性）。 */
   private async poolSubmit(
     exe: string,
     key: string,
@@ -480,14 +495,15 @@ export class JarSpiderBridge {
     method: string,
     args: string[],
     env?: Record<string, string>,
-  ): Promise<string> {
-    if (!this.pool) return '';
+    timeoutMs?: number,
+  ): Promise<PoolResult> {
+    if (!this.pool) return { ok: false, data: '' };
     const id = `${exe.includes('python') ? 'py' : 'jvm'}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    return new Promise<string>((resolve) => {
+    return new Promise<PoolResult>((resolve) => {
       void this.pool!
-        .submit(key, { exe, serveArgv, env, key }, { id, className, method, args })
+        .submit(key, { exe, serveArgv, env, key }, { id, className, method, args }, timeoutMs)
         .then(resolve)
-        .catch(() => resolve(''));
+        .catch(() => resolve({ ok: false, data: '' }));
     });
   }
 

@@ -1,6 +1,7 @@
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
+import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -29,11 +30,17 @@ import java.util.LinkedHashMap;
 public class SpiderRunner {
 
   public static void main(String[] args) {
+    // ★ stdout 专供「结果/信封」：蜘蛛自己的 System.out.println 会与结果/信封共用同一管道，
+    //   打印碎片（不带换行的半行）+ 信封 → 整行 JSON 解析失败 → 常驻池侧挂起到超时
+    //   （用户侧表现「半天搜不出来」）。这里把 System.out 重定向到 stderr，
+    //   结果与信封一律走 realOut（stderr 由宿主消费，既防管道写满也保留 SpiderLog 诊断）。
+    PrintStream realOut = System.out;
+    System.setOut(System.err);
     int code = 0;
     try {
       // ★ 常驻模式：--serve <jars;...>（环境只初始化一次，服务多请求）
       if (args.length >= 2 && "--serve".equals(args[0])) {
-        serve(args[1].split(";"));
+        serve(args[1].split(";"), realOut);
         return; // serve 靠 EOF / quit 自然返回，不 System.exit（保持 JVM 退出码 0）
       }
       if (args.length < 3) throw new IllegalArgumentException("usage: SpiderRunner <jars;...> <className> <method> [args...]");
@@ -41,7 +48,7 @@ public class SpiderRunner {
       Env env = setupEnv(jars);
       String result = dispatch(env, args[1], args[2],
           args.length > 3 ? Arrays.copyOfRange(args, 3, args.length) : new String[0], null);
-      System.out.println(result == null ? "" : result);
+      realOut.println(result == null ? "" : result);
     } catch (Throwable t) {
       Throwable cause = unwrap(t);
       System.err.println("[SpiderRunner.ERROR] " + cause.getClass().getName() + ": " + cause.getMessage());
@@ -52,8 +59,8 @@ public class SpiderRunner {
     System.exit(code);
   }
 
-  /** 常驻服务：读 stdin JSON 行 → 每请求新蜘蛛实例 → 单行 JSON 信封应答。 */
-  private static void serve(String[] jars) throws Exception {
+  /** 常驻服务：读 stdin JSON 行 → 每请求新蜘蛛实例 → 单行 JSON 信封应答（realOut 专用，见 main 注释）。 */
+  private static void serve(String[] jars, PrintStream realOut) throws Exception {
     Env env = setupEnv(jars);
     com.google.gson.Gson gson = new com.google.gson.Gson();
     BufferedReader in = new BufferedReader(new InputStreamReader(System.in, "UTF-8"));
@@ -86,8 +93,8 @@ public class SpiderRunner {
       out.put("id", reqId);
       out.put("ok", ok);
       out.put("data", data == null ? "" : data);
-      System.out.println(gson.toJson(out));
-      System.out.flush();
+      realOut.println(gson.toJson(out));
+      realOut.flush();
     }
   }
 

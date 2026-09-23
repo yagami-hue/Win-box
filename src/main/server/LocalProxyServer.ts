@@ -13,7 +13,7 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join, normalize, sep } from 'node:path';
 import { decodeUrlSafe } from '../../engine/util/base64';
 import type { Logger } from '../../shared/types';
-import { LOCAL_PROXY_PORT } from '../../shared/constants';
+import { LOCAL_PROXY_BASE, LOCAL_PROXY_PORT } from '../../shared/constants';
 import { userDataDir, cacheDir } from '../util/paths';
 import { createDohAgent } from '../net/DnsResolver';
 
@@ -534,19 +534,51 @@ export class LocalProxyServer {
   }
 }
 
+/** 带 URI 属性的 HLS 标签（密钥/初始化段/子清单/备用音轨/低延迟分片…） */
+const URI_ATTR_TAGS = /^#EXT-X-(KEY|SESSION-KEY|MAP|MEDIA|I-FRAME-STREAM-INF|PART|PRELOAD-HINT|RENDITION-REPORT)\b/i;
+
+/** 相对 URI → 绝对；已是绝对地址或已在本中继 → 返回 ''（调用方保持原样，重写幂等） */
+function absolutize(raw: string, baseUrl: string): string {
+  const v = (raw || '').trim();
+  if (!v) return '';
+  try {
+    const abs = /^https?:\/\//i.test(v) ? v : new URL(v, baseUrl).toString();
+    return abs.startsWith(LOCAL_PROXY_BASE) ? '' : abs;
+  } catch {
+    return '';
+  }
+}
+
 /** 把 m3u8 的片段/子清单 URI（绝对或相对）重写到本中继，使每个段请求都带上 Cookie/UA/Referer */
-function rewriteM3u8(body: Buffer, baseUrl: string, ua: string, referer: string, cookie: string): Buffer {
+export function rewriteM3u8(body: Buffer, baseUrl: string, ua: string, referer: string, cookie: string): Buffer {
   const lines = body.toString('utf-8').split(/\r?\n/);
   const out: string[] = [];
   for (const line of lines) {
     const t = line.trim();
-    if (!t || t.startsWith('#')) { out.push(line); continue; }
-    let abs: string;
-    if (/^https?:\/\//i.test(t)) abs = t;
-    else { try { abs = new URL(t, baseUrl).toString(); } catch { out.push(line); continue; } }
+    if (!t) { out.push(line); continue; }
+    if (t.startsWith('#')) {
+      // ★ 2026-09-23 修复「HLS播放失败：KeyLoadError」：AES-128 加密流的密钥地址写在
+      //   `#EXT-X-KEY:...URI="..."`（初始化段 #EXT-X-MAP、备用音轨 #EXT-X-MEDIA 同理），
+      //   它们都是**注释行**、此前被原样透传 —— 相对 URI 会被 hls.js 按中继地址解析成
+      //   http://127.0.0.1:9978/<key>（404），绝对 URI 又缺 Referer/UA/Cookie 被源站 403，
+      //   于是 hls.js 抛 keyLoadError 致命错误 → 直接「播放失败」。这里让这些 URI 一并走中继。
+      out.push(URI_ATTR_TAGS.test(t) && t.includes('URI="') ? rewriteUriAttrs(line, baseUrl, ua, referer, cookie) : line);
+      continue;
+    }
+    const abs = absolutize(t, baseUrl);
+    if (!abs) { out.push(line); continue; }
     out.push(wrapSegment(abs, ua, referer, cookie));
   }
   return Buffer.from(out.join('\n'), 'utf-8');
+}
+
+/** 重写一行带 URI 属性的标签（如 `#EXT-X-KEY:METHOD=AES-128,URI="k"`）→ 中继地址 */
+export function rewriteUriAttrs(line: string, baseUrl: string, ua: string, referer: string, cookie: string): string {
+  return line.replace(/URI="([^"]*)"/gi, (whole, uri: string) => {
+    const abs = absolutize(uri, baseUrl);
+    if (!abs) return whole;
+    return `URI="${wrapSegment(abs, ua, referer, cookie)}"`;
+  });
 }
 
 function wrapSegment(url: string, ua: string, referer: string, cookie: string): string {
@@ -554,7 +586,7 @@ function wrapSegment(url: string, ua: string, referer: string, cookie: string): 
   if (ua) q += `&ua=${encodeURIComponent(ua)}`;
   if (referer) q += `&referer=${encodeURIComponent(referer)}`;
   if (cookie) q += `&cookie=${encodeURIComponent(cookie)}`;
-  return `http://127.0.0.1:9978/play?${q}`;
+  return `${LOCAL_PROXY_BASE}/play?${q}`;
 }
 
 /**

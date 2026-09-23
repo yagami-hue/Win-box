@@ -33,6 +33,33 @@ export function wrapPlayUrl(url: string, provider: string): string {
   return `http://127.0.0.1:9978/play?url=${encodeURIComponent(url)}&ck=${encodeURIComponent(provider)}`;
 }
 
+/**
+ * 把**源站封面图**包装成经本地 /play 中继的地址（注入「图片自身站点」作 Referer）。
+ *
+ * ★ 2026-09-23「封面总有几个补不上」的一个真实成因：源站图床普遍有防盗链
+ *   （无 Referer / 跨站 Referer / 桌面 UA 缺失 → 403 或空响应），渲染层直连必然图裂。
+ *   同源 Referer 是能救回这类图的最小代价方案：绝大多数防盗链只校验「Referer 是不是本站」。
+ *   失败（仍 403/404）时调用方维持 TMDB/豆瓣补图与占位逻辑，不做无限重试。
+ * @param url 源站给的封面地址（仅 http(s) 可中继）
+ * @param ua  可选的浏览器 UA（渲染层传 navigator.userAgent；主进程不必传）
+ * @returns 中继 URL；非法/不可中继 → 空串（调用方保持原图）
+ */
+export function wrapImageUrlForRelay(url: string, ua?: string): string {
+  const v = (url || '').trim();
+  if (!/^https?:\/\//i.test(v)) return '';
+  let origin = '';
+  try {
+    origin = new URL(v).origin + '/';
+  } catch {
+    return '';
+  }
+  const p = new URLSearchParams();
+  p.set('url', v);
+  p.set('referer', origin);
+  if (ua) p.set('ua', ua);
+  return `http://127.0.0.1:9978/play?${p.toString()}`;
+}
+
 /** provider → 中文展示名（提示「去配置页绑定」文案用）；未收录回退原 provider 名 */
 export const DRIVE_PROVIDER_LABELS: Record<string, string> = {
   quark: '夸克',

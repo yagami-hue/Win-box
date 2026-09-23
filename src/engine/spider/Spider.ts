@@ -10,7 +10,15 @@ export interface SpiderInit {
   ext: string;
   jar: string;
   host: EngineHost;
+  /**
+   * 源级调用超时（ms）：来自配置 `timeout`（秒）。JVM/CPython 子进程调用按它设超时，
+   * 与聚合搜索的单源超时对齐（「源声明多久就该多久内出结果」）。缺省 20s。
+   */
+  timeoutMs?: number;
 }
+
+/** 蜘蛛调用的兜底超时（源未声明 timeout 时用；与 JarSpiderBridge.callTimeoutMs 默认一致） */
+export const DEFAULT_SPIDER_TIMEOUT_MS = 20_000;
 
 /** 爬虫返回的 JSON 字符串契约（与安卓一致：所有方法返回 String） */
 export abstract class Spider {
@@ -19,6 +27,8 @@ export abstract class Spider {
   protected ext = '';
   protected jar = '';
   protected host!: EngineHost;
+  /** 源级调用超时（ms），子进程调用用（见 SpiderInit.timeoutMs） */
+  readonly timeoutMs: number;
 
   constructor(init: SpiderInit) {
     this.siteKey = init.key;
@@ -26,6 +36,7 @@ export abstract class Spider {
     this.ext = init.ext;
     this.jar = init.jar;
     this.host = init.host;
+    this.timeoutMs = init.timeoutMs && init.timeoutMs > 0 ? init.timeoutMs : DEFAULT_SPIDER_TIMEOUT_MS;
   }
 
   /** init(Context, extend) —— 安卓用 extend 做站点私有配置 */

@@ -38,6 +38,11 @@ for _p in [
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
+# ★ stdout 专供「结果/信封」：蜘蛛自己的 print()（base.spider.log 等）会与结果/信封
+#   拼进同一行 → 宿主侧按行分帧解析失败 → 常驻池挂起到超时（用户侧「半天搜不出来」）。
+#   这里先抓住真正的 stdout 句柄，main() 里再把 sys.stdout 换成 stderr。
+_REAL_OUT = sys.stdout
+
 
 def _fail(err):
     sys.stderr.write('[SpiderRunner.ERROR] %s: %s\n' % (type(err).__name__, err))
@@ -118,8 +123,13 @@ def _call_method(sp, method, rest):
     raise SystemExit('unknown method: %s' % method)
 
 
-def _serialize(result):
-    """结果序列化：dict/list → json；已 JSON 字符串原样透传；末尾换行。"""
+def _serialize(result, real_out=_REAL_OUT):
+    """结果序列化：dict/list → json；已 JSON 字符串原样透传；末尾换行。
+
+    ★ 一律写 real_out（真正的 stdout 句柄）：蜘蛛自己的 print() 已被重定向到 stderr
+    （见 main），否则它的日志碎片会与结果/信封拼成同一行 → 宿主侧 JSON 解析失败 →
+    常驻池挂起到超时（用户侧表现「半天搜不出来」）。
+    """
     out = result
     if isinstance(out, str):
         try:
@@ -128,9 +138,9 @@ def _serialize(result):
             out = parsed
         except (ValueError, TypeError):
             pass  # 非 JSON 字符串，交给 dumps 兜底
-    sys.stdout.write(json.dumps(out, ensure_ascii=False) if not isinstance(out, str) else out)
-    sys.stdout.write('\n')
-    sys.stdout.flush()
+    real_out.write(json.dumps(out, ensure_ascii=False) if not isinstance(out, str) else out)
+    real_out.write('\n')
+    real_out.flush()
 
 
 def _serve(py_path, class_name):
@@ -172,8 +182,8 @@ def _serve(py_path, class_name):
         except Exception as e:
             data = '%s: %s' % (type(e).__name__, e)
         # ★ 单行 JSON 信封（data 内嵌 \n 由 json.dumps 转义）
-        sys.stdout.write(json.dumps({'id': req_id, 'ok': ok, 'data': data}, ensure_ascii=False) + '\n')
-        sys.stdout.flush()
+        _REAL_OUT.write(json.dumps({'id': req_id, 'ok': ok, 'data': data}, ensure_ascii=False) + '\n')
+        _REAL_OUT.flush()
 
 
 def _serialize_raw(result):
@@ -184,6 +194,8 @@ def _serialize_raw(result):
 
 
 def main():
+    # ★ 蜘蛛 print() → stderr（结果/信封走 _REAL_OUT，见其注释）：行协议不被日志碎片打穿
+    sys.stdout = sys.stderr
     # ★ 常驻模式：runner.py -serve <pyPath> <className>
     if len(sys.argv) >= 4 and sys.argv[1] == '-serve':
         _serve(sys.argv[2], sys.argv[3])

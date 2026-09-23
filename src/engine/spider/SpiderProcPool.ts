@@ -1,13 +1,18 @@
 // src/engine/spider/SpiderProcPool.ts
-// ★ 蜘蛛子进程常驻复用池（进程池）：JVM(--serve)/Python(-serve) 同一进程跨请求复用，
+// ★ 蜘蛛子进程常驻复用池（进程池 v2）：JVM(--serve)/Python(-serve) 同一进程跨请求复用，
 //   摊销每次冷启动（JVM 1~3s / Python 0.5~1s）—— 源主页/单源搜索/全源搜索提速的核心。
 //
 // 设计要点：
-//  - 分组 key = 固定 argv 前缀（exe + serve 头 + classpath/env 差异段）的组合；同 key 共享进程。
-//  - 进程串行处理请求（同一时刻 1 个 in-flight；其余排队），行协议保证无交错。
-//  - 全局进程上限 4（同 key 只 spawn 首个时冷启动 1 次，后续请求复用/排队）。
-//  - 空闲 30s 无请求回收（保留每个 key 至少 1 个热进程，减少重建）。
-//  - 传输层失败（进程退出/写入 EPIPE/单请求超时）→ 杀进程 + 拒绝其 pending；调用方回退一次性路径。
+//  - 分组 key = 固定 argv 前缀（exe + serve 头 + classpath/env 差异段）的组合；同 key 共享进程池。
+//  - ★ v2 同 key 可开多进程并行：一份配置里几十个源常共用同一只 jar（同一个 key），
+//    全源搜索的并发请求若只能排在一个进程后面 → 串行 30+ 次 → 「搜半天搜不出来」。
+//    因此单请求占一个进程（进程内串行行协议不变），同 key 最多 PER_KEY_CAP 个进程并行。
+//  - 全局上限 GLOBAL_CAP：超限不再无脑 spawn，而是回收「最久空闲」的进程（LRU）后复用额度。
+//  - 请求超时 = 调用方给的源 timeout（源级语义），排队等待另有 QUEUE_WAIT_MS 上限：
+//    排队超时只失败该请求（不杀进程），执行超时才 kill 进程；两者都让调用方回退一次性路径。
+//  - ★ 空结果与失败必须区分：蜘蛛成功返回 '' 是合法结果（空搜索），不再误判失败去回退一次性
+//    （旧实现让每个空结果都多打一次冷启动进程，正是「慢」的来源之一）。
+//  - 空闲 30s 回收冗余进程（保留每 key 1 个热进程，减少重建）。
 //  - 单测默认禁用（VITEST）或 TVBOX_DISABLE_SPIDER_POOL=1 关闭。
 import { spawn, type ChildProcess } from 'node:child_process';
 
@@ -18,17 +23,30 @@ export interface ServeRequest {
   args: string[];
 }
 
+/** 池的结果：ok=false 仅表示进程/传输层失败（调用方应回退一次性）；ok=true + data='' 是合法空结果 */
+export interface PoolResult {
+  ok: boolean;
+  data: string;
+}
+
 export interface PendingEntry {
   req: ServeRequest;
-  resolve: (data: string) => void;
+  resolve: (r: PoolResult) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface QueuedEntry {
+  req: ServeRequest;
+  resolve: (r: PoolResult) => void;
+  timer: ReturnType<typeof setTimeout>;
+  timeoutMs: number;
 }
 
 interface Proc {
   key: string;
   child: ChildProcess;
   pending: Map<string, PendingEntry>;
-  queue: ServeRequest[];
+  queue: QueuedEntry[];
   busy: boolean;
   lastUsed: number;
   dead: boolean;
@@ -45,7 +63,14 @@ export interface SpawnFn {
   (spec: SpawnSpec): ChildProcess;
 }
 
-const GLOBAL_CAP = 4;
+/** 全局存活进程上限：超限回收最久空闲进程（LRU）而不是拒绝 spawn */
+const GLOBAL_CAP = 6;
+/** 同 key 并行进程上限（≈ 聚合搜索 worker 数；再多也只会排队） */
+export const PER_KEY_CAP = 4;
+/** 排队等待上限：超过即失败该请求（进程本身可能仍在跑长任务） */
+const QUEUE_WAIT_MS = 15_000;
+/** 单请求默认超时（调用方一般会传源 timeout；Python 侧会传更长值） */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 export const IDLE_RECLAIM_MS = 30_000;
 const RECLAIM_INTERVAL_MS = 15_000;
 
@@ -64,7 +89,6 @@ function hashStr(s: string): string {
 
 export class SpiderProcPool {
   private groups = new Map<string, Proc[]>();
-  private nextId = 0;
 
   constructor(private readonly spawnFn: SpawnFn) {}
 
@@ -74,63 +98,77 @@ export class SpiderProcPool {
     return n;
   }
 
-  /** 提交 serve 请求；spec 供池按需 spawn（组空且全局未满时）。返回蜘蛛结果（进程失效/超时 → ''）。 */
-  submit(key: string, spec: SpawnSpec, req: ServeRequest): Promise<string> {
-    return new Promise<string>((resolve) => {
+  /**
+   * 提交 serve 请求；spec 供池按需 spawn。
+   * @param timeoutMs 单请求执行超时（= 源 timeout）；排队等待另有 QUEUE_WAIT_MS 上限。
+   */
+  submit(key: string, spec: SpawnSpec, req: ServeRequest, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<PoolResult> {
+    return new Promise<PoolResult>((resolve) => {
       let group = this.groups.get(key);
       if (!group) {
         group = [];
         this.groups.set(key, group);
       }
-      const hasProc = group.some((p) => !p.dead);
-      // ★ 组内已有存活进程（忙或空闲）→ 排队复用该进程，不新 spawn（保证同 key 串行行协议安全）
-      if (!hasProc && this.aliveCount < GLOBAL_CAP) {
-        this.spawnProc(key, spec);
-        group = this.groups.get(key) ?? group;
-      }
-      const target = group.find((p) => !p.busy && !p.dead);
-      if (target) {
-        this.dispatch(target, req, resolve);
-      } else {
-        // 全部忙 → 排到组首进程队列（同进程串行）
-        const head = group[0];
-        if (!head) {
-          this.spawnProc(key, spec);
+      // 1) 组内有空闲进程 → 直接派发（进程内串行，行协议安全）
+      let target = group.find((p) => !p.dead && !p.busy && p.queue.length === 0);
+      // 2) 无空闲：额度允许就再开一个同 key 进程并行
+      if (!target && group.filter((p) => !p.dead).length < PER_KEY_CAP) {
+        if (this.aliveCount < GLOBAL_CAP || this.reapOneLru(group)) {
+          target = this.spawnProc(key, spec);
           group = this.groups.get(key) ?? group;
-          const head2 = group[0];
-          if (head2) this.dispatch(head2, req, resolve);
-          else resolve('');
-          return;
         }
-        head.queue.push(req);
-        this.queuedResolvers.set(req.id, resolve);
-        this.drainQueue(head);
       }
+      if (target) {
+        this.dispatch(target, req, resolve, timeoutMs);
+        return;
+      }
+      // 3) 额度用尽/同 key 已满 → 排队到组内队列最短的进程（负载均衡，行协议串行）
+      const live = group.filter((p) => !p.dead);
+      const head = live.sort((a, b) => a.queue.length - b.queue.length)[0];
+      if (!head) {
+        // 组内进程全死（竞态兜底）：额度允许才补一个，否则按失败交调用方回退一次性
+        if (this.aliveCount < GLOBAL_CAP || this.reapOneLru(group)) {
+          this.dispatch(this.spawnProc(key, spec), req, resolve, timeoutMs);
+        } else {
+          resolve({ ok: false, data: '' });
+        }
+        return;
+      }
+      this.enqueue(head, req, resolve, timeoutMs);
     });
   }
 
-  private pendingSpecs = new Map<string, SpawnSpec>();
-  private queuedResolvers = new Map<string, (v: string) => void>();
-
-  private drainQueue(proc: Proc): void {
-    while (proc.queue.length > 0 && !proc.dead && !proc.busy) {
-      const req = proc.queue.shift()!;
-      const r = this.queuedResolvers.get(req.id);
-      if (r) {
-        this.queuedResolvers.delete(req.id);
-        this.dispatch(proc, req, r);
-        return; // 一次只派一个（busy 置位后下个循环继续）
-      }
-    }
+  /** 排队：等待期上限 QUEUE_WAIT_MS（排队超时只失败该请求，不牵连进程） */
+  private enqueue(proc: Proc, req: ServeRequest, resolve: (r: PoolResult) => void, timeoutMs: number): void {
+    const entry: QueuedEntry = {
+      req,
+      resolve,
+      timeoutMs,
+      timer: setTimeout(() => {
+        const i = proc.queue.indexOf(entry);
+        if (i >= 0) proc.queue.splice(i, 1);
+        resolve({ ok: false, data: '' }); // 排队超时 → 调用方回退一次性
+      }, QUEUE_WAIT_MS),
+    };
+    proc.queue.push(entry);
+    this.drainQueue(proc);
   }
 
-  private dispatch(proc: Proc, req: ServeRequest, resolve: (v: string) => void): void {
+  private drainQueue(proc: Proc): void {
+    if (proc.dead || proc.busy) return;
+    const entry = proc.queue.shift();
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.dispatch(proc, entry.req, entry.resolve, entry.timeoutMs);
+  }
+
+  private dispatch(proc: Proc, req: ServeRequest, resolve: (r: PoolResult) => void, timeoutMs: number): void {
     proc.busy = true;
     proc.lastUsed = Date.now();
     const timer = setTimeout(() => {
-      // 单请求超时 → kill 进程（其 pending 全部按失败处理）→ 调用方回退一次性
+      // 执行超时 → kill 进程（其 pending 全部按失败处理）→ 调用方回退一次性
       this.kill(proc, 'timeout');
-    }, 120_000); // serve 进程不设 20s（蜘蛛可能长任务）；120s 兜底防悬挂
+    }, Math.max(3000, timeoutMs));
     proc.pending.set(req.id, { req, resolve, timer });
     const line = JSON.stringify({ id: req.id, className: req.className, method: req.method, args: req.args });
     try {
@@ -141,7 +179,22 @@ export class SpiderProcPool {
     }
   }
 
-  private spawnProc(key: string, spec: SpawnSpec): void {
+  /** 回收最久空闲的进程（优先其它 key；同 key 的冗余进程也可回收）→ 腾出全局额度 */
+  private reapOneLru(keepGroup: Proc[]): boolean {
+    let victim: Proc | null = null;
+    for (const procs of this.groups.values()) {
+      for (const p of procs) {
+        if (p.dead || p.busy || p.queue.length > 0) continue;
+        if (procs.length === 1 && procs === keepGroup) continue; // 本组唯一进程不可回收（还要用它排队）
+        if (!victim || p.lastUsed < victim.lastUsed) victim = p;
+      }
+    }
+    if (!victim) return false;
+    this.kill(victim, 'lru');
+    return true;
+  }
+
+  private spawnProc(key: string, spec: SpawnSpec): Proc {
     const child = this.spawnFn(spec);
     const proc: Proc = {
       key,
@@ -170,7 +223,8 @@ export class SpiderProcPool {
             proc.pending.delete(env.id ?? '');
             proc.busy = false;
             proc.lastUsed = Date.now();
-            p.resolve(typeof env.data === 'string' ? env.data : '');
+            // ★ ok:true 且 data 为空串 = 蜘蛛合法空结果（不触发调用方回退）
+            p.resolve({ ok: true, data: typeof env.data === 'string' ? env.data : '' });
             this.drainQueue(proc);
           }
         } catch {
@@ -183,6 +237,7 @@ export class SpiderProcPool {
     const group = this.groups.get(key) ?? [];
     group.push(proc);
     this.groups.set(key, group);
+    return proc;
   }
 
   /** 进程失效：拒绝 pending + 清队列 + 移除组；调用方按失败回退一次性路径 */
@@ -191,16 +246,13 @@ export class SpiderProcPool {
     proc.dead = true;
     for (const p of proc.pending.values()) {
       clearTimeout(p.timer);
-      // 传输层失败：resolve('') → 上层空结果 + lastReason（调用方也会回退一次性再试）
-      p.resolve('');
+      // 传输层失败：ok=false → 上层回退一次性再试
+      p.resolve({ ok: false, data: '' });
     }
     proc.pending.clear();
-    for (const req of proc.queue) {
-      const r = this.queuedResolvers.get(req.id);
-      if (r) {
-        this.queuedResolvers.delete(req.id);
-        r('');
-      }
+    for (const q of proc.queue) {
+      clearTimeout(q.timer);
+      q.resolve({ ok: false, data: '' });
     }
     proc.queue = [];
     try {
@@ -214,13 +266,17 @@ export class SpiderProcPool {
     }
   }
 
-  /** 空闲回收 + 全局上限守卫（每 key 保留 1 个热进程） */
+  /** 空闲回收：同 key 只保留 1 个热进程（并行期多开的进程 30s 无请求即回收） */
   private reclaim(): void {
     const now = Date.now();
     for (const [key, procs] of this.groups) {
-      const hot = procs.filter((p) => !p.dead && (p.busy || p.queue.length > 0 || procs.length === 1));
-      const idleList = procs.filter((p) => !p.dead && !p.busy && p.queue.length === 0 && now - p.lastUsed > IDLE_RECLAIM_MS && procs.length > 1);
-      for (const p of idleList) if (!hot.includes(p)) this.kill(p, 'idle');
+      const idleList = procs.filter(
+        (p) => !p.dead && !p.busy && p.queue.length === 0 && procs.length > 1 && now - p.lastUsed > IDLE_RECLAIM_MS,
+      );
+      // 保留组内最近使用的那一个（并行期的其它进程回收）
+      const sorted = [...procs].filter((p) => !p.dead).sort((a, b) => b.lastUsed - a.lastUsed);
+      const keep = sorted[0];
+      for (const p of idleList) if (p !== keep) this.kill(p, 'idle');
       if (procs.every((p) => p.dead)) this.groups.delete(key);
     }
   }

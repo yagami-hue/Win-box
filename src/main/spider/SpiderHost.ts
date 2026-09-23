@@ -33,6 +33,7 @@ import { matchDriveCookieProvider, wrapPlayUrl, wrapPlayUrlWithHeaders } from '.
 import { join, dirname } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { JarSpiderBridge, normalizeJarUrl } from '../../engine/spider/JarSpiderBridge';
+import { sourceTimeoutMs } from '../../engine/spider/SpiderFactory';
 import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSearch';
 import { classifyHealth } from '../../engine/vod/sourceHealth';
 import { mergeSubscriptions, type MergeInput } from '../../engine/config/mergeSubscriptions';
@@ -47,8 +48,27 @@ import { getDanmakuCredentials } from '../danmaku/credentials';
 import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
 import type { MetaHit } from '../../shared/types';
 import { MetaStore } from '../meta/MetaStore';
-import { tmdbSearchTitle, metaCacheKey } from '../meta/tmdbProvider';
+import { tmdbSearchTitle, metaCacheKey, metaQueryVariants } from '../meta/tmdbProvider';
 import { doubanSearchTitle, isCjkName, DOUBAN_CACHE_PREFIX } from '../meta/doubanProvider';
+
+/** 豆瓣兜底最多尝试的名称变体数（原名 + 净化名；再多只会多打外部请求） */
+const DOUBAN_MAX_VARIANTS = 2;
+
+/** 聚合搜索并发数（原 4）：单源超时降到「源声明 timeout」后，靠并发压住 30+ 源的总时长 */
+const SEARCH_ALL_WORKERS = 6;
+/** 聚合搜索总体预算：到点先返回已拿到的结果，未完成的源标注超时（不再无限等） */
+const SEARCH_ALL_BUDGET_MS = 40_000;
+
+/** Promise 竞速超时（超时即拒；落地后清掉计时器，避免残留定时器） */
+function raceTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
 
 export interface LiveLoadResult {
   groups: LiveGroup[];
@@ -193,7 +213,7 @@ export class SpiderHost {
   async auditAll(): Promise<AuditItem[]> {
     const pool = (this.config?.sites ?? []).filter((b) => {
       if (b.type === 0 || b.type === 1) return true;
-      if (b.type === 3) return !String(b.api || '').toLowerCase().endsWith('.py');
+      if (b.type === 3) return true; // jar / .js / .py 均已支持（体检同样覆盖 .py 源）
       return false;
     });
     const out: AuditItem[] = [];
@@ -215,10 +235,7 @@ export class SpiderHost {
         const t0 = Date.now();
         const kind = kindOf(b);
         try {
-          const r = await Promise.race([
-            this.vm.home(b),
-            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('主页加载超时（>30s）')), 30000)),
-          ]);
+          const r = await raceTimeout(this.vm.home(b), 30000, '主页加载超时（>30s）');
           const h = classifyHealth({ kind, items: r.items.length, classes: r.sortClasses.length, extEmpty: !String(b.ext || '').trim() });
           out.push({
             key: b.key, name: b.name || b.key, type: b.type, kind,
@@ -406,13 +423,21 @@ export class SpiderHost {
       if (tmdb) return tmdb;
       // ★ 仅中文片名才兜底豆瓣（日/韩/欧美片名 TMDB 覆盖已够，少一次外部请求）
       if (!isCjkName(n)) return null;
-      const dbKey = `${DOUBAN_CACHE_PREFIX}${metaCacheKey(n, year || '')}`;
-      const diskDb = this.metaStore.cacheGet(dbKey);
-      if (diskDb) return diskDb.hit; // hit 或 miss 均命中缓存（miss 短 TTL 自动过期重查）
-      const db = await doubanSearchTitle(this.logger, n);
-      // 命中写缓存（long TTL）；miss 也写（短 TTL）——复用 MetaStore 的 hit/miss 双 TTL 语义
-      this.metaStore.cacheSet(dbKey, db, Date.now());
-      return db;
+      // ★ 变体退让（与 TMDB 同规则）：原名 miss 时用「去噪净化名」再试一次（源站常把
+      //   「第1季/更新至N集/4K」拼进片名，直接查豆瓣同样查不到 → 封面补不上的主因）
+      for (const v of metaQueryVariants(n).slice(0, DOUBAN_MAX_VARIANTS)) {
+        const dbKey = `${DOUBAN_CACHE_PREFIX}${metaCacheKey(v, year || '')}`;
+        const diskDb = this.metaStore.cacheGet(dbKey);
+        if (diskDb) {
+          if (diskDb.hit) return diskDb.hit; // 命中缓存（miss 短 TTL 自动过期重查 → 继续试下一个变体）
+          continue;
+        }
+        const db = await doubanSearchTitle(this.logger, v);
+        // 命中写缓存（long TTL）；miss 也写（短 TTL）——复用 MetaStore 的 hit/miss 双 TTL 语义
+        this.metaStore.cacheSet(dbKey, db, Date.now());
+        if (db) return db;
+      }
+      return null;
     } catch (e) {
       this.logger.e('meta:搜索失败', e);
       return null;
@@ -697,8 +722,14 @@ export class SpiderHost {
 
   /**
    * ★ 聚合搜索：遍历当前配置里全部"可搜索"源（searchable=1 且类型可用），
-   * 并发（≤4）执行关键词查询，逐个收集成功/空/出错状态，汇总去重后返回。
-   * 单源超时 25s；某源失败不影响其它源。
+   * 并发（≤SEARCH_ALL_WORKERS）执行关键词查询，逐个收集成功/空/出错状态，汇总后返回。
+   *
+   * ★ 2026-09-23 提速三改（用户反馈「搜索半天搜不出来」）：
+   *   ① 并发 4 → 6：单源超时降下来后，靠并发压住「30+ 源」的总时长；
+   *   ② 单源超时 = **源声明 timeout**（原固定 25s）：卡死的源最多只占一个 worker 一次源级超时；
+   *   ③ 总体预算 SEARCH_ALL_BUDGET_MS：到点先返回**已拿到的结果**，未完成的源标注超时错误
+   *      （原行为是一直等所有 worker 跑完，最坏 N/4 × 25s → 分钟级无响应）。
+   *   ④ .py 源纳入（此前被排除，是嵌入式 CPython3 接入前的历史遗留）。
    */
   async searchAll(wd: string): Promise<SearchAllReport> {
     const term = (wd || '').trim();
@@ -706,23 +737,33 @@ export class SpiderHost {
     const pool = (this.config?.sites ?? []).filter((b) => {
       if (Number(b.searchable) !== 1) return false;
       if (b.type === 0 || b.type === 1) return true;
-      if (b.type === 3) return !String(b.api || '').toLowerCase().endsWith('.py');
+      if (b.type === 3) return true; // jar / .js / .py 均已支持（py：嵌入式 CPython3 运行时）
       return false;
     });
     const results = new Array<AggSearchInput | null>(pool.length).fill(null);
     let cursor = 0;
-    const workerCount = Math.min(4, pool.length || 1);
+    const workerCount = Math.min(SEARCH_ALL_WORKERS, pool.length || 1);
+    const deadline = Date.now() + SEARCH_ALL_BUDGET_MS;
     const run = async (): Promise<void> => {
       for (;;) {
         const i = cursor++;
         if (i >= pool.length) return;
         const b = pool[i];
         const t0 = Date.now();
+        const budget = deadline - Date.now();
+        if (budget <= 500) {
+          results[i] = {
+            key: b.key,
+            name: b.name || b.key,
+            status: 'error',
+            error: `总体搜索已超时（>${Math.round(SEARCH_ALL_BUDGET_MS / 1000)}s），该源未执行`,
+            ms: 0,
+          };
+          continue;
+        }
+        const toMs = Math.min(sourceTimeoutMs(b), budget);
         try {
-          const items = await Promise.race([
-            this.vm.search(b, term),
-            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('单源搜索超时（>25s）')), 25000)),
-          ]);
+          const items = await raceTimeout(this.vm.search(b, term), toMs, `单源搜索超时（>${Math.round(toMs / 1000)}s）`);
           results[i] = {
             key: b.key,
             name: b.name || b.key,

@@ -72,6 +72,52 @@ export function metaQueryName(name: string): string {
   return (name || '').trim().replace(/[\s.,，。:：\-—]+$/g, '');
 }
 
+/** 单次 metaSearch 最多尝试的名称变体数（防个别查不到的名字把 API 打爆） */
+const MAX_QUERY_VARIANTS = 3;
+/** 单次 metaSearch 最多查询轮数（每轮 = movie+tv 两个请求） */
+const MAX_QUERY_ROUNDS = 3;
+
+/**
+ * 查询名变体（按优先级，已去重）：
+ *   ① 原串（仅清尾部标点）；
+ *   ② 去掉**尾部噪声**：「第1季 / 更新至12集 / 全40集 / 41集 / 4K / 1080P / 国语 / 完结…」
+ *      —— 源站把这类标记拼进片名很常见，直接查必然 miss（"封面总有几个补不上"的主因之一）；
+ *   ③ 再去掉【…】(…)〔…〕括号标签（「斗罗大陆（4K）」「斗罗大陆【全集】」）；
+ *   ④ 主标题：'·' / ':' 前的部分（「斗罗大陆Ⅱ绝世唐门·第一季」→「斗罗大陆Ⅱ绝世唐门」）。
+ */
+export function metaQueryVariants(name: string): string[] {
+  const out: string[] = [];
+  const push = (s: string): void => {
+    const t = s.trim();
+    if (t.length >= 2 && !out.includes(t)) out.push(t);
+  };
+  const base = metaQueryName(name);
+  push(base);
+  const NOISE =
+    /[\s·\-—_]*(第\s*\d+\s*[季部集话話期章]|全\s*\d+\s*[集话話]|更新至\s*\d+\s*[集话話]?|共\s*\d+\s*[集话話]|\d+\s*[集话話]|完结|連載|连载|已完结|4K|FHD|UHD|HDTV|BluRay|BD|HD|WEB-?DL|1080[Pp]|720[Pp]|2160[Pp]|国语|國語|粤语|粵語|中字|双字|雙字|中英双字|无删减|未删减|修复版|高清版|抢先版|完整版)\s*$/i;
+  let s = base;
+  // 噪声可能叠着写（「斗罗大陆 第1季 4K」）→ 循环剥到不动为止
+  for (let i = 0; i < 4; i++) {
+    const next = s.replace(NOISE, '');
+    if (next === s) break;
+    s = next;
+  }
+  push(s);
+  // ③ 括号：整体被括号包住（「【狂飙】」）→ **拆括号保留内容**；尾部标签（「斗罗大陆（4K）」「…【全集】」）→ 逐层剥离
+  const unwrapped = /^[【(\[〔（]\s*(.+?)\s*[】)\]〕）]$/.exec(s)?.[1]?.trim() ?? s;
+  push(unwrapped);
+  let noTags = s;
+  for (let i = 0; i < 4; i++) {
+    const next = noTags.replace(/[【(\[〔（][^】)\]〕）]*[】)\]〕）]\s*$/, '').trim();
+    if (next === noTags) break;
+    noTags = next;
+  }
+  push(noTags);
+  const main = (noTags || unwrapped).split(/[·:：]/)[0].trim();
+  push(main);
+  return out;
+}
+
 interface TmdbSearchResp {
   status: number;
   text: string;
@@ -136,8 +182,13 @@ async function verifyPoster(url: string): Promise<boolean> {
 /**
  * 按名称查询 TMDB（movie + tv 并行），返回最优 MetaHit 或 null。
  * - 内置凭据缺失 → 立即返回 null（不请求）；
+ * - ★ 查询计划（2026-09-23 提升命中率，「封面总有几个补不上」的主要治因）：
+ *     ① 原名 + 年份（年份可能是源站 remarks 误判 → 单独一轮去年份重试）
+ *     ② 原名不带年份
+ *     ③ 净化名（去「第1季/更新至N集/4K…」等尾部噪声、括号标签、取主标题）逐轮退让
+ *   轮数上限 MAX_QUERY_ROUNDS，避免个别查不到的名字把 API 打爆；
  * - 命中的封面必须经 verifyPoster 真实可读；坏图跳过该候选，找到下一个可用的；
- * - 命中/未命中都写缓存（MetaStore；命中带 vv=校验时间，超 24h 自动重新校验）。
+ * - 命中写缓存（主键 + 本轮键，带 vv=校验时间，超 24h 自动重新校验）；全 miss 写短 TTL miss。
  */
 export async function tmdbSearchTitle(
   store: MetaStore,
@@ -146,65 +197,84 @@ export async function tmdbSearchTitle(
   year?: string,
 ): Promise<MetaHit | null> {
   const cred = getTmdbCredentials();
-  const qName = metaQueryName(name || '');
-  if (!cred || !qName) return null;
-  const cacheKey = metaCacheKey(qName, year);
+  const variants = metaQueryVariants(name || '').slice(0, MAX_QUERY_VARIANTS);
+  if (!cred || variants.length === 0) return null;
+  const primaryKey = metaCacheKey(variants[0], year);
 
   // 内存 LRU
-  if (memCache.has(cacheKey)) return memCache.get(cacheKey) ?? null;
+  if (memCache.has(primaryKey)) return memCache.get(primaryKey) ?? null;
 
   // 磁盘缓存（命中且 vv 未过期才直接返回；旧/过期缓存返回 undefined 触发重查+重校验）
-  const disk = store.cacheGet(cacheKey);
+  const disk = store.cacheGet(primaryKey);
   if (disk && disk.hit) {
-    memSet(cacheKey, disk.hit);
+    memSet(primaryKey, disk.hit);
     return disk.hit;
   }
 
-  const q = encodeURIComponent(qName);
   const y0 = (year || '').trim().replace(/\D/g, '');
-  const y = /^\d{4}$/.test(y0) ? y0 : '';
-  const movieUrl = `${TMDB_API}/search/movie?query=${q}&language=zh-CN${y ? `&year=${y}` : ''}&include_adult=false`;
-  const tvUrl = `${TMDB_API}/search/tv?query=${q}&language=zh-CN${y ? `&first_air_date_year=${y}` : ''}&include_adult=false`;
-
-  const [mv, tv] = await Promise.all([getJson(movieUrl, cred.accessToken, 12000), getJson(tvUrl, cred.accessToken, 12000)]);
-
-  // ★ 2026-09-19 修复：HTTP 非 200 的「服务端错误」（401/403/429/5xx/网络失败）**不写 miss 缓存**。
-  //   此前一律当"查询无结果"缓存 1 天 → 限流/凭据抖动会让整批资源封面白等一天（"大部分资源缺封面"的常见根因）。
-  //   只有「至少一个请求 200 且解析出空结果」才是真 miss（可缓存）；错误类返回 null 但不落缓存，下次翻页自动重试。
-  const candidates: MetaHit[] = [];
-  for (const resp of [mv, tv]) {
-    if (resp.status === 200) {
-      try {
-        const kind = resp === mv ? 'movie' : 'tv';
-        candidates.push(...parseTmdbSearch(JSON.parse(resp.text), kind as 'movie' | 'tv'));
-      } catch { /* json 异常忽略 */ }
-    } else if (resp.status === 404) {
-      // 404 视为真无结果（罕见），按 miss 缓存
-    } else if (resp.status !== 0) {
-      logger.w(`meta:TMDB ${resp === mv ? 'movie' : 'tv'} 失败 status=${resp.status} ${resp.text.slice(0, 200)}`);
-    }
+  const year4 = /^\d{4}$/.test(y0) ? y0 : '';
+  // 查询计划：带年份 → 去年份 → 净化名（净化名不再带年份：此时更可能是源站标记串，年份多半也不准）
+  const plan: Array<{ q: string; y: string }> = [];
+  if (year4) plan.push({ q: variants[0], y: year4 });
+  plan.push({ q: variants[0], y: '' });
+  for (const v of variants.slice(1)) {
+    if (plan.length >= MAX_QUERY_ROUNDS) break;
+    plan.push({ q: v, y: '' });
   }
-  // 错误类（非 200/404）出现 → 本次不落缓存，返回 null 让调用方下次重试
-  const hasErrorOnly = mv.status !== 200 && tv.status !== 200 && (mv.status !== 404 || tv.status !== 404);
 
-  let hit: MetaHit | null = null;
+  let anyError = false;
   const verifiedAt = Date.now();
-  for (const cand of candidates.slice(0, 6)) {
-    // 封面经本地 /img 中继出图（渲染层直连 image.tmdb.org 可能被污染）；先校验原始图真实可读
-    if (await verifyPoster(cand.poster)) {
-      hit = { ...cand, poster: `${IMG_PROXY}?u=${encodeURIComponent(cand.poster)}` };
-      break;
+  for (const round of plan) {
+    const q = encodeURIComponent(round.q);
+    const movieUrl = `${TMDB_API}/search/movie?query=${q}&language=zh-CN${round.y ? `&year=${round.y}` : ''}&include_adult=false`;
+    const tvUrl = `${TMDB_API}/search/tv?query=${q}&language=zh-CN${round.y ? `&first_air_date_year=${round.y}` : ''}&include_adult=false`;
+    const [mv, tv] = await Promise.all([getJson(movieUrl, cred.accessToken, 12000), getJson(tvUrl, cred.accessToken, 12000)]);
+
+    // ★ 2026-09-19 修复：HTTP 非 200 的「服务端错误」（401/403/429/5xx/网络失败）**不写 miss 缓存**。
+    //   此前一律当"查询无结果"缓存 1 天 → 限流/凭据抖动会让整批资源封面白等一天（"大部分资源缺封面"的常见根因）。
+    //   只有「至少一个请求 200 且解析出空结果」才是真 miss（可缓存）；错误类返回 null 但不落缓存，下次翻页自动重试。
+    const candidates: MetaHit[] = [];
+    for (const resp of [mv, tv]) {
+      if (resp.status === 200) {
+        try {
+          const kind = resp === mv ? 'movie' : 'tv';
+          candidates.push(...parseTmdbSearch(JSON.parse(resp.text), kind as 'movie' | 'tv'));
+        } catch { /* json 异常忽略 */ }
+      } else if (resp.status === 404) {
+        // 404 视为真无结果（罕见），按 miss 缓存
+      } else if (resp.status !== 0) {
+        anyError = true;
+        logger.w(`meta:TMDB ${resp === mv ? 'movie' : 'tv'} 失败 status=${resp.status} ${resp.text.slice(0, 200)}`);
+      }
+    }
+    // 错误类（非 200/404）出现 → 本轮不落缓存，返回 null 让调用方下次重试
+    if (mv.status !== 200 && tv.status !== 200 && (mv.status !== 404 || tv.status !== 404)) anyError = true;
+
+    let hit: MetaHit | null = null;
+    for (const cand of candidates.slice(0, 6)) {
+      // 封面经本地 /img 中继出图（渲染层直连 image.tmdb.org 可能被污染）；先校验原始图真实可读
+      if (await verifyPoster(cand.poster)) {
+        hit = { ...cand, poster: `${IMG_PROXY}?u=${encodeURIComponent(cand.poster)}` };
+        break;
+      }
+    }
+    if (hit) {
+      const roundKey = metaCacheKey(round.q, round.y);
+      memSet(primaryKey, hit);
+      store.cacheSet(primaryKey, hit, verifiedAt);
+      if (roundKey !== primaryKey) store.cacheSet(roundKey, hit, verifiedAt); // 该变体下次直接命中
+      return hit;
     }
   }
 
-  if (hasErrorOnly) {
-    // 服务端错误 → 记内存（防本页重复打），但不写磁盘（TTL 短也尽量让下次可重试）
-    memSet(cacheKey, null);
+  if (anyError) {
+    // 服务端错误 → 只记内存（防本页重复打），不写磁盘（TTL 短也尽量让下次可重试）
+    memSet(primaryKey, null);
     return null;
   }
-  memSet(cacheKey, hit);
-  store.cacheSet(cacheKey, hit, verifiedAt); // hit=null 也缓存（miss，短 TTL）
-  return hit;
+  memSet(primaryKey, null);
+  store.cacheSet(primaryKey, null, verifiedAt); // hit=null 也缓存（miss，短 TTL）
+  return null;
 }
 
 function memSet(cacheKey: string, hit: MetaHit | null): void {
