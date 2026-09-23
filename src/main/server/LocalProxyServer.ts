@@ -80,14 +80,18 @@ export class LocalProxyServer {
   }
 
   /**
-   * /img?u=<encoded image URL> —— TMDB 封面出图中继。
-   * ★ 渲染层（Chromium）直连 image.tmdb.org 在本机常被 DNS 污染 → 图裂；
+   * /img?u=<encoded image URL> —— TMDB/豆瓣封面出图中继。
+   * ★ 渲染层（Chromium）直连 image.tmdb.org / doubanio.com 在本机常被 DNS 污染/无 Referer → 图裂；
    *   本地代理经 DoH 主进程拉取后透传字节，保证补全封面真实可显示。
-   * 安全：仅放行 image.tmdb.org（白名单），避免成为任意 URL 开放代理。
+   * 安全：仅放行 TMDB 图床与豆瓣图床（白名单），避免成为任意 URL 开放代理。
    */
   private imgProxy(u: URL, res: ServerResponse): void {
     const target = u.searchParams.get('u') || '';
-    if (!/^https:\/\/image\.tmdb\.org\//i.test(target)) {
+    // 白名单：TMDB（image.tmdb.org）+ 豆瓣（*.doubanio.com，2026-09-23 兜底接入）
+    const allowed =
+      /^https:\/\/image\.tmdb\.org\//i.test(target) ||
+      /^https:\/\/[^/]+\.doubanio\.com\//i.test(target);
+    if (!allowed) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('bad request');
       return;

@@ -47,7 +47,8 @@ import { getDanmakuCredentials } from '../danmaku/credentials';
 import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
 import type { MetaHit } from '../../shared/types';
 import { MetaStore } from '../meta/MetaStore';
-import { tmdbSearchTitle } from '../meta/tmdbProvider';
+import { tmdbSearchTitle, metaCacheKey } from '../meta/tmdbProvider';
+import { doubanSearchTitle, isCjkName, DOUBAN_CACHE_PREFIX } from '../meta/doubanProvider';
 
 export interface LiveLoadResult {
   groups: LiveGroup[];
@@ -393,14 +394,27 @@ export class SpiderHost {
   }
 
   // ---- TMDB 元数据补全（源缺封面/缺简介时的兜底；凭据为内置密文，用户无需配置） ----
+  // ★ 豆瓣兜底（2026-09-23）：中文片名 TMDB miss 时查豆瓣（国产/冷门片 TMDB 覆盖差，
+  //   豆瓣命中率显著更高）。命中写磁盘缓存（MetaStore，key 带 DOUBAN_CACHE_PREFIX 与 TMDB 区隔）；
+  //   再次查询直接命中缓存，不再打豆瓣。
   /** 按名称查询 TMDB（失败/无内置凭据/无命中 → null，绝不抛错；命中与 miss 都会缓存） */
   async metaSearch(name: string, year?: string): Promise<MetaHit | null> {
     const n = (name || '').trim();
     if (!n) return null;
     try {
-      return await tmdbSearchTitle(this.metaStore, this.logger, n, year || undefined);
+      const tmdb = await tmdbSearchTitle(this.metaStore, this.logger, n, year || undefined);
+      if (tmdb) return tmdb;
+      // ★ 仅中文片名才兜底豆瓣（日/韩/欧美片名 TMDB 覆盖已够，少一次外部请求）
+      if (!isCjkName(n)) return null;
+      const dbKey = `${DOUBAN_CACHE_PREFIX}${metaCacheKey(n, year || '')}`;
+      const diskDb = this.metaStore.cacheGet(dbKey);
+      if (diskDb) return diskDb.hit; // hit 或 miss 均命中缓存（miss 短 TTL 自动过期重查）
+      const db = await doubanSearchTitle(this.logger, n);
+      // 命中写缓存（long TTL）；miss 也写（短 TTL）——复用 MetaStore 的 hit/miss 双 TTL 语义
+      this.metaStore.cacheSet(dbKey, db, Date.now());
+      return db;
     } catch (e) {
-      this.logger.e('meta:TMDB 搜索失败', e);
+      this.logger.e('meta:搜索失败', e);
       return null;
     }
   }
