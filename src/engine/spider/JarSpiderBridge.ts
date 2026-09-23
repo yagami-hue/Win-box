@@ -35,6 +35,9 @@ export interface JarBridgeOptions {
   pyRuntimeDir?: string;
 }
 
+/** 类缺失兜底重试时最多追加的缓存 jar 数（防一次拼进几十只 jar 把类加载顺序搅乱） */
+const MAX_FALLBACK_JARS = 8;
+
 
 export class JarSpiderBridge {
   private readonly jvmDir: string;
@@ -344,6 +347,55 @@ export class JarSpiderBridge {
   }
 
   /**
+   * ★ 预热候选解析：jar URL → **磁盘上已存在的**转换产物路径（空串 = 还没转换过）。
+   * 与 resolvePaths 的区别：不下载、不转换 —— 预热是启动路径上的"锦上添花"，
+   * 绝不能把 jar 下载 + dex2jar 的重活压到启动阶段（真机启动体验优先）。
+   */
+  peekConverted(jarUrl: string): string {
+    const url = normalizeJarUrl(jarUrl);
+    if (!url) return '';
+    const cached = this.converted.get(url);
+    if (cached && existsSync(cached)) return cached;
+    const p = join(this.cacheDir, `${md5Hex(url)}.jar`);
+    return existsSync(p) ? p : '';
+  }
+
+  /** ★ 预热：提前 spawn 常驻 SpiderRunner --serve（详见 SpiderProcPool.warm）。 */
+  prewarmJar(jarPaths: string[], className: string): boolean {
+    if (!this.pool || jarPaths.length === 0 || !jarPaths.every((p) => existsSync(p))) return false;
+    const shimClasses = this.shimWithFoni(className, this.shellShimClassesPath() || this.autoShellShim(jarPaths));
+    const shimJar = this.shellShimJarPath();
+    const cpParts = [this.classpathJars(), ...jarPaths];
+    if (shimClasses && existsSync(shimJar)) cpParts.unshift(shimJar);
+    const cp = cpParts.join(';');
+    const serveArgv = [
+      ...this.jvmPrefix(cp),
+      ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []),
+      'SpiderRunner',
+      '--serve',
+      cp,
+    ];
+    const key = servePoolKey(this.javaExe(), serveArgv);
+    return this.pool.warm(key, { exe: this.javaExe(), serveArgv, key });
+  }
+
+  /**
+   * ★ 预热：提前 spawn 常驻 Python runner（-serve）。
+   * 运行时/脚本任一未落盘 → 直接 false：预热**绝不触发**嵌入式 Python 下载（那是 11MB 级重活）。
+   */
+  prewarmPython(pyPath: string, clsName: string): boolean {
+    if (!this.pool || !this.pyRuntimeDir) return false;
+    const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
+    const pyExe = join(dir, 'python.exe');
+    const runner = join(dir, 'runner.py');
+    if (!existsSync(pyPath) || !existsSync(pyExe) || !existsSync(runner)) return false;
+    const serveArgv = [runner, '-serve', pyPath, clsName];
+    const env = { PYTHONIOENCODING: 'utf-8' };
+    const key = servePoolKey(pyExe, serveArgv, env);
+    return this.pool.warm(key, { exe: pyExe, serveArgv, env, key });
+  }
+
+  /**
    * shell-shim（方案 A 影子类）真实实现路径；非空 = 启用，空串 = 默认关闭。
    * 优先级：构造参数 shellShimClasses > 环境变量 TVBOX_SHELL_SHIM_CLASSES。
    * Java 侧 DexNative 影子类自身也认这个环境变量（见 stubs-src/shell-shim/DexNative.java），
@@ -417,13 +469,41 @@ export class JarSpiderBridge {
     return `${foni};${baseShim}`;
   }
 
-  /** 调用蜘蛛方法。jarPaths 为转换后的本地 jar 路径。className 形如 com.github.catvod.spider.Doll */
+  /**
+   * 调用蜘蛛方法（jarPaths 为转换后的本地 jar 路径；className 形如 com.github.catvod.spider.Doll）。
+   *
+   * ★ 2026-09-23「源加载问题」通解之一：**类缺失 → 缓存 jar 并集兜底重试**。
+   *   真机分布里 `ClassNotFoundException: com.github.catvod.spider.Xxx`（配置里的 jar 与 api 不匹配、
+   *   或该配置引用的 jar 与手里这只 jar 不是同一构建）并不罕见。此前只能报错认栽；
+   *   现在自动用「缓存目录里其它已转换的 spider jar」拼一份并集 classpath 再试一次 ——
+   *   对用户是「这个源也能打开了」，对代码是零配置的通用兜底（声明 jar 仍排在最前，不改变正常源的类加载顺序）。
+   */
   async call(
     jarPaths: string[],
     className: string,
     method: string,
     args: string[],
     timeoutMs?: number,
+  ): Promise<string> {
+    this.lastSpiderReason = '';
+    const out = await this.callImpl(jarPaths, className, method, args, timeoutMs);
+    if (!isSpiderClassMissing(this.lastSpiderReason)) return out;
+    const extra = this.otherConvertedJars(jarPaths);
+    if (extra.length === 0) return out;
+    this.host?.logger.i(
+      `jvm-bridge ${className}: 声明的 jar 内无此类，追加 ${extra.length} 个缓存 jar 兜底重试（配置与 jar 不匹配的通用兜底）`,
+    );
+    this.lastSpiderReason = '';
+    return this.callImpl(jarPaths, className, method, args, timeoutMs, extra);
+  }
+
+  private async callImpl(
+    jarPaths: string[],
+    className: string,
+    method: string,
+    args: string[],
+    timeoutMs?: number,
+    extraJars: string[] = [],
   ): Promise<string> {
     // ★ shell-shim（方案 A 影子类，见 stubs-src/shell-shim/DexNative.java）——
     //   遇到加固/壳 jar（内含 native 版 DexNative）时，把 shell-shim.jar 排在
@@ -435,7 +515,7 @@ export class JarSpiderBridge {
     // ★ AppSx/AppTT/AppSK 系追加完整构建 foni-spider.jar（优先加载，见 shimWithFoni 注释）
     const shimClasses = this.shimWithFoni(className, shimClasses0);
     const shimJar = this.shellShimJarPath();
-    const cpParts = [this.classpathJars(), ...jarPaths];
+    const cpParts = [this.classpathJars(), ...jarPaths, ...extraJars];
     if (shimClasses && existsSync(shimJar)) cpParts.unshift(shimJar);
     else if (shimClasses) {
       this.host?.logger.w(`jvm-bridge 已启用 shell-shim（${shimClasses}），但未找到 shell-shim.jar: ${shimJar}，影子类不会生效`);
@@ -447,7 +527,7 @@ export class JarSpiderBridge {
       //   DexNative 优先读系统属性 tvbox.shellShimClasses，其次环境变量）。
       //   仅在 shimClasses 非空时追加，默认关闭下 argv 形态与历史完全一致。
       ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []),
-      'SpiderRunner', jarPaths.join(';'), className, method, ...args,
+      'SpiderRunner', [...jarPaths, ...extraJars].join(';'), className, method, ...args,
     ];
     // ★ 进程池：常驻 JVM（--serve）跨请求复用 → 二次调用跳过冷启动。
     //   serve argv = javaPrefix + [SpiderRunner, --serve, cp]（cp 已含 shim jar）。
@@ -810,6 +890,22 @@ export class JarSpiderBridge {
     });
   }
 
+  /** 缓存目录里「其它已转换的 spider jar」（类缺失兜底用），按修改时间新→旧取前 N 只 */
+  private otherConvertedJars(declared: string[]): string[] {
+    const skip = new Set(declared.map((p) => p.toLowerCase()));
+    const out: Array<{ p: string; m: number }> = [];
+    try {
+      const fs = require('node:fs') as typeof import('node:fs');
+      for (const f of fs.readdirSync(this.cacheDir)) {
+        if (!f.endsWith('.jar') || f.endsWith('.raw.jar')) continue; // raw jar 是未转换的 dex 容器，加载不了
+        const p = join(this.cacheDir, f);
+        if (skip.has(p.toLowerCase())) continue;
+        try { out.push({ p, m: statSync(p).mtimeMs }); } catch { /* 文件消失忽略 */ }
+      }
+    } catch { /* 缓存目录不存在 → 无兜底候选 */ }
+    return out.sort((a, b) => b.m - a.m).slice(0, MAX_FALLBACK_JARS).map((x) => x.p);
+  }
+
   /** 预热：下载+转换（导入配置后后台跑，避免首次点开卡住） */
   async warmup(jarUrl: string): Promise<void> {
     try {
@@ -919,6 +1015,17 @@ export function copyJarResources(rawJar: string, convertedJar: string, host?: En
   }
 }
 
+
+/**
+ * 「蜘蛛类缺失」判定 —— 类缺失兜底重试的触发条件。
+ * 原始英文（`ClassNotFoundException: com.github.catvod.spider.Xxx`）与 translateSpiderLog
+ * 翻译后的中文（「蜘蛛类未找到…」）两种形态都认。
+ */
+export function isSpiderClassMissing(reason: string): boolean {
+  const s = reason || '';
+  if (!s) return false;
+  return /ClassNotFoundException:\s*com\.github\.catvod\.spider\./.test(s) || s.includes('蜘蛛类未找到');
+}
 
 /**
  * 把蜘蛛自己抛出的行话翻译成用户能懂的中文。

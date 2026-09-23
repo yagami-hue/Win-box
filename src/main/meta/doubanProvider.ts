@@ -70,6 +70,45 @@ interface RexxarResp {
   text: string;
 }
 
+/**
+ * ★ 2026-09-23 豆瓣熔断：rexxar 接口有风控，真机日志实测一次会话刷出 43 条
+ *   `meta:豆瓣 搜索失败 status=403` —— 每次补封面都要串行白等（每片名 2 个请求）。
+ *   连续 BREAKER_THRESHOLD 次 403/429 → 本会话内暂停豆瓣兜底 BREAKER_COOLDOWN_MS，
+ *   链路自动退到「TMDB → 360 图片」，风控解除后（冷却到期）自动恢复。
+ */
+const BREAKER_THRESHOLD = 3;
+const BREAKER_COOLDOWN_MS = 10 * 60 * 1000;
+let consecutiveBlocked = 0;
+let breakerUntil = 0;
+
+/** 熔断是否生效（生效期间 doubanSearchTitle 立即返回 null，不发请求、不写日志） */
+export function doubanBreakerOpen(now = Date.now()): boolean {
+  return now < breakerUntil;
+}
+
+/** 记录一次响应状态：403/429 累加，200 复位。返回「本次是否刚刚触发熔断」。 */
+export function noteDoubanStatus(status: number, now = Date.now()): boolean {
+  if (status === 200) {
+    consecutiveBlocked = 0;
+    breakerUntil = 0;
+    return false;
+  }
+  if (status === 403 || status === 429) {
+    consecutiveBlocked++;
+    if (consecutiveBlocked >= BREAKER_THRESHOLD) {
+      breakerUntil = now + BREAKER_COOLDOWN_MS;
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 测试用：复位熔断状态 */
+export function __resetDoubanBreakerForTest(): void {
+  consecutiveBlocked = 0;
+  breakerUntil = 0;
+}
+
 async function getJson(url: string, headersTimeoutMs: number): Promise<RexxarResp> {
   for (const dispatcher of [agent, dohFallback]) {
     try {
@@ -132,12 +171,14 @@ async function verifyDoubanPoster(url: string): Promise<boolean> {
  * 按中文片名查询豆瓣（rexxar 搜索，movie/tv 并行），返回最优 MetaHit 或 null。
  * - 名称不含 CJK → 不查（调用方已按 isCjkName 前置过滤，此处再兜一层）；
  * - HTTP 非 200 → 不写缓存、返回 null（服务端抖动/风控：下次重试，不误缓存 miss）；
+ *   ★ 2026-09-23：403/429 连续 3 次触发熔断，冷却期内直接返回 null（不发请求）。
  * - 命中封面必须 verifyDoubanPoster 真实可读；
  * - 结果直接以经 /img 中继的 URL 存入 hit.poster（渲染层可直接显示）。
  * 注意：本模块不做磁盘缓存（缓存归 MetaStore，key 带 DOUBAN_CACHE_PREFIX 由调用方写入）。
  */
 export async function doubanSearchTitle(logger: Logger, name: string): Promise<MetaHit | null> {
   if (!isCjkName(name || '')) return null;
+  if (doubanBreakerOpen()) return null; // 风控熔断中：不发请求（链路自动退到 360 图片兜底）
   const q = encodeURIComponent((name || '').trim());
   if (!q) return null;
 
@@ -147,24 +188,24 @@ export async function doubanSearchTitle(logger: Logger, name: string): Promise<M
   ];
   // 顺序请求（省得同时打两个；豆瓣无需年份参数——按片名即召回，结果含年份供消歧）
   const candidates: MetaHit[] = [];
-  let errStatus = 0;
   for (const url of urls) {
     const resp = await getJson(url, 12000);
     if (resp.status === 200) {
+      noteDoubanStatus(200);
       try {
         candidates.push(...parseDoubanSearch(JSON.parse(resp.text)));
       } catch { /* json 异常忽略 */ }
       if (candidates.length > 0) break; // 首个有结果的类型即用（movie 优先）
-    } else if (resp.status !== 0 && errStatus === 0) {
-      errStatus = resp.status;
+    } else if (resp.status !== 0) {
+      // 403/429 计熔断（日志只在未熔断期间打印，避免风控期刷屏 —— 实测曾一次会话 43 条）
+      if (noteDoubanStatus(resp.status)) {
+        logger.w(`meta:豆瓣 连续 ${BREAKER_THRESHOLD} 次风控(status=${resp.status})，暂停豆瓣兜底 ${Math.round(BREAKER_COOLDOWN_MS / 60000)} 分钟`);
+      } else {
+        logger.w(`meta:豆瓣 搜索失败 status=${resp.status}`);
+      }
     }
   }
-  if (candidates.length === 0) {
-    if (errStatus !== 0 && errStatus !== 404) {
-      logger.w(`meta:豆瓣 搜索失败 status=${errStatus}`);
-    }
-    return null;
-  }
+  if (candidates.length === 0) return null;
   for (const cand of candidates.slice(0, 6)) {
     if (await verifyDoubanPoster(cand.poster)) {
       return { ...cand, poster: `${IMG_PROXY}?u=${encodeURIComponent(cand.poster)}` };

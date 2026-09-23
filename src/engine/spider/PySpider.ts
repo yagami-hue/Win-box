@@ -42,6 +42,22 @@ export class PySpider extends Spider {
     this.clsName = cls;
   }
 
+  /**
+   * ★ 预热常驻 Python（由 SpiderHost.prewarmSpiders 调度）：仅当脚本**已落盘**
+   * （本地 .py 或已缓存的下载脚本）且嵌入式运行时已就绪时生效 —— 预热不触发任何下载。
+   */
+  prewarm(): boolean {
+    const base = (this.api || '').split('?')[0];
+    let path = '';
+    if (base.startsWith('file://')) {
+      try { path = fileURLToPath(base); } catch { return false; }
+    } else if (/^https?:\/\//i.test(base)) {
+      path = join(this.bridge.pyCacheDir, `${md5Hex(base)}.py`);
+    }
+    if (!path || !existsSync(path)) return false;
+    return this.bridge.prewarmPython(path, this.clsName);
+  }
+
   /** 下载/定位 .py 到本地并按 URL md5 缓存；失败置 loadError 并返回 false。 */
   private async ensureReady(): Promise<boolean> {
     if (this.ready) return true;

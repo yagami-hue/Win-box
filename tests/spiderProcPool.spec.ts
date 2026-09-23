@@ -213,4 +213,31 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
     expect(pool.aliveCount).toBe(1); // 保留最近使用的那一个
     clearInterval(timer);
   });
+
+  // ★ 2026-09-23 预热（warm）：启动/配置应用后先付掉 JVM 冷启动（发 __ping__），
+  //   首次搜索/进主页直接复用这个热进程 —— 「全源搜索也像单源搜索一样秒出」的配套。
+  it('预热：先 spawn 进程并发 __ping__ 探针，随后请求复用该进程（不再冷启动）', async () => {
+    const { pool, spawned } = makeEnv();
+    expect(pool.warm('k1', SPEC)).toBe(true);
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0].child.stdin.write).toHaveBeenCalledTimes(1);
+    const ping = JSON.parse(String((spawned[0].child.stdin.write as unknown as { mock: { calls: string[][] } }).mock.calls[0][0]));
+    expect(ping.method).toBe('__ping__'); // 探针只确认环境就绪，不实例化蜘蛛
+    await new Promise((r) => setTimeout(r, 5)); // 等假子进程回信封 → 进程转空闲
+    const r = await pool.submit('k1', SPEC, REQ('a'));
+    expect(r.ok).toBe(true);
+    expect(spawned).toHaveLength(1); // ★ 复用：预热进程直接承接首个真实请求
+  });
+
+  it('预热幂等：同一 key 已有热进程时不重复 spawn，后续请求照常复用', async () => {
+    const { pool, spawned } = makeEnv();
+    expect(pool.warm('k1', SPEC)).toBe(true);
+    expect(pool.warm('k1', SPEC)).toBe(false); // 已有热进程 → 不重复占额度
+    expect(spawned).toHaveLength(1);
+    // 假子进程对 __ping__ 也会回（makeEnv 默认回应）→ 进程转空闲，正常请求照常复用
+    await new Promise((r) => setTimeout(r, 5));
+    const r = await pool.submit('k1', SPEC, REQ('a'));
+    expect(r.ok).toBe(true);
+    expect(spawned).toHaveLength(1);
+  });
 });

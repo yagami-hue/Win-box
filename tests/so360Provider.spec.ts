@@ -1,6 +1,6 @@
 // tests/so360Provider.spec.ts — 360 图片兜底（TMDB/豆瓣都查不到的中文短剧封面）纯函数回归
 import { describe, it, expect } from 'vitest';
-import { parseSo360, isRelevantHit, SO360_CACHE_PREFIX, SO360_REFERER } from '../src/main/meta/so360Provider';
+import { parseSo360, isRelevantHit, seasonNo, SO360_CACHE_PREFIX, SO360_REFERER } from '../src/main/meta/so360Provider';
 
 describe('parseSo360', () => {
   it('取 img/thumb 与 title（img 优先）', () => {
@@ -46,5 +46,20 @@ describe('isRelevantHit（宁缺勿错图）', () => {
   it('缓存前缀与 Referer 常量（出图必需）', () => {
     expect(SO360_CACHE_PREFIX).toBe('so:');
     expect(SO360_REFERER).toBe('https://image.so.com/');
+  });
+
+  // ★ 2026-09-23 收紧：季号必须一致（实测反例：「侠探杰克第四季」命中过《侠探杰克》第三季的文章）
+  it('seasonNo：识别阿拉伯/中文季部号，无标记为 0', () => {
+    expect(seasonNo('侠探杰克第四季')).toBe(4);
+    expect(seasonNo('无耻之徒 第二季')).toBe(2);
+    expect(seasonNo('庆余年第十二部')).toBe(12);
+    expect(seasonNo('狂飙')).toBe(0);
+  });
+
+  it('季号冲突/缺失 → 拒绝（宁可不出封面，也不给错图）', () => {
+    expect(isRelevantHit('侠探杰克第四季', '侠探杰克 第三季 剧情解析')).toBe(false);
+    expect(isRelevantHit('侠探杰克第四季', '侠探杰克 剧照合集')).toBe(false); // 结果无季号 = 基础剧集文章
+    expect(isRelevantHit('侠探杰克第四季', '侠探杰克第四季 剧照')).toBe(true);
+    expect(isRelevantHit('狂飙', '《狂飙》剧照')).toBe(true); // 查询无季号 → 仍按共同子串规则（不受本条影响）
   });
 });

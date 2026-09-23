@@ -169,14 +169,19 @@ def _serve(py_path, class_name):
             if not isinstance(args, list):
                 args = [args]
             rest = [str(a) for a in args]
-            sp = _new_instance(ns, class_name)
-            ext = rest[0] if len(rest) > 0 else ''
-            try:
-                sp.init(ext)
-            except (AttributeError, TypeError):
-                pass
-            data = _serialize_raw(_call_method(sp, method, rest[1:] if len(rest) > 1 else []))
-            ok = True
+            # ★ 预热探针（池 warm）：脚本已在 _serve 入口编译完成，无需实例化蜘蛛
+            if method == '__ping__':
+                ok = True
+                data = ''
+            else:
+                sp = _new_instance(ns, class_name)
+                ext = rest[0] if len(rest) > 0 else ''
+                try:
+                    sp.init(ext)
+                except (AttributeError, TypeError):
+                    pass
+                data = _serialize_raw(_call_method(sp, method, rest[1:] if len(rest) > 1 else []))
+                ok = True
         except SystemExit as e:
             data = 'SystemExit: %s' % e
         except Exception as e:

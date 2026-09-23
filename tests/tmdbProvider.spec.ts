@@ -1,6 +1,6 @@
 // tests/tmdbProvider.spec.ts — TMDB 元数据补全的纯函数测试（解析/缓存键/名称规范化，不依赖网络）
 import { describe, expect, it } from 'vitest';
-import { parseTmdbSearch, metaCacheKey, metaQueryName, metaQueryVariants } from '../src/main/meta/tmdbProvider';
+import { parseTmdbSearch, metaCacheKey, metaQueryName, metaQueryVariants, truncAtYear } from '../src/main/meta/tmdbProvider';
 
 describe('parseTmdbSearch', () => {
   const sample = {
@@ -84,5 +84,33 @@ describe('metaQueryVariants', () => {
     expect(metaQueryVariants('')).toEqual([]);
     expect(metaQueryVariants('  ')).toEqual([]);
     expect(metaQueryVariants('A')).toEqual([]);
+  });
+
+  // ★ 2026-09-23 二轮：真机实测 miss 的三个名字（中文数字季号 / 版本语言标签 / 年份+演员串）
+  it('中文数字季号（此前 NOISE 只认阿拉伯数字 → 「第一季」查不到）', () => {
+    expect(metaQueryVariants('权力的游戏第一季')).toContain('权力的游戏');
+    expect(metaQueryVariants('无耻之徒美版第一季')).toContain('无耻之徒');
+    expect(metaQueryVariants('海贼王动漫合集日语')).toContain('海贼王');
+    expect(metaQueryVariants('庆余年 第二部')).toContain('庆余年');
+  });
+
+  it('版本/语言/合集标签（美版/日语版/原声版/合集…）', () => {
+    expect(metaQueryVariants('棋魂 日语版')).toContain('棋魂');
+    expect(metaQueryVariants('甄嬛传 国语版 全集')).toContain('甄嬛传');
+    expect(metaQueryVariants('琅琊榜 原声版')).toContain('琅琊榜');
+  });
+
+  it('首个 4 位年份处截断（「神雕侠侣1995古天乐·国语版」→「神雕侠侣」）', () => {
+    const vs = metaQueryVariants('神雕侠侣1995古天乐·国语版');
+    expect(vs[0]).toBe('神雕侠侣1995古天乐·国语版');
+    expect(vs).toContain('神雕侠侣');
+    expect(vs.length).toBeLessThanOrEqual(4); // 变体数受 MAX_QUERY_VARIANTS 限制
+  });
+
+  it('年份开头的片名不截断（「2001太空漫游」前缀不足 2 字）', () => {
+    expect(truncAtYear('2001太空漫游')).toBe('');
+    expect(metaQueryVariants('2001太空漫游')).toEqual(['2001太空漫游']);
+    expect(truncAtYear('神雕侠侣1995古天乐')).toBe('神雕侠侣');
+    expect(truncAtYear('狂飙')).toBe('');
   });
 });

@@ -38,9 +38,13 @@ export function onPlayerWindowClosed(cb: () => void): void {
 }
 
 // ---- 小窗口模式状态 ----
-// 小窗尺寸：宽 480 × 高 300（含标题栏），远小于播放器默认 1040×640
-const MINI_W = 480;
-const MINI_H = 300;
+// 小窗尺寸：宽 384 × 高 216（16:9，无标题栏 —— 渲染层 mini 态改用一条 18px 细拖拽条），
+// 远小于播放器默认 1040×640；用户还可继续拖到最小 240×135。
+const MINI_W = 384;
+const MINI_H = 216;
+/** 小窗最小尺寸（16:9）：再小于这个尺寸控制条就点不到了 */
+const MINI_MIN_W = 240;
+const MINI_MIN_H = 135;
 let mini = false; // 是否处于小窗口模式
 /** 进入小窗口前的正常窗口 bounds（含用户拖拽后的位置，move/resize 时保持最新） */
 let normalBounds: Electron.Rectangle | null = null;
@@ -89,7 +93,7 @@ export function playerSetMini(isMini: boolean): void {
       ? { x: Math.max(ax, Math.min(miniBounds.x, ax + aw - MINI_W)), y: Math.max(ay, Math.min(miniBounds.y, ay + ah - MINI_H)) }
       : { x: Math.round(ax + (aw - MINI_W) / 2), y: Math.round(Math.max(ay, ay + (ah - MINI_H) / 2)) };
     mini = true; // ★ 先置位再改边界：move/resize 追踪器在 mini 态下只记 miniBounds，避免覆盖 normalBounds
-    w.setMinimumSize(300, 200);
+    w.setMinimumSize(MINI_MIN_W, MINI_MIN_H);
     w.setFullScreenable(false);
     w.setBounds({ ...mb, width: MINI_W, height: MINI_H });
     w.webContents.send('player:mini', true);

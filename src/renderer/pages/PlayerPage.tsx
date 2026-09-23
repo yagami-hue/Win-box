@@ -170,12 +170,35 @@ export default function PlayerPage() {
 
   return (
     <>
-      <TitleBar
-        title={curName || 'Win-Box'}
-        showMini
-        mini={mini}
-        onMiniToggle={() => void client.playerSetMini(!mini)}
-      />
+      {/* ★ 小窗口模式：不再渲染完整标题栏（那是用户看到的"边框"）——
+          改用一条 18px 细拖拽条：拖窗口、双击还原；按钮悬停才显形，最大限度让画面占满 */}
+      {mini ? (
+        <div className="mini-strip" onDoubleClick={() => void client.playerSetMini(false)}>
+          <span className="mini-strip-title" title={curName || 'Win-Box'}>{curName || 'Win-Box'}</span>
+          <div className="mini-strip-btns">
+            <button className="mini-btn" title="恢复原窗口" onClick={() => void client.playerSetMini(false)}>
+              <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden="true">
+                <rect x="2.5" y="2.5" width="11" height="11" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                <path d="M6.5 9.5V6.5h3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M6.5 6.5l3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button className="mini-btn mini-strip-close" title="关闭" onClick={() => void client.winClose()}>
+              <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden="true">
+                <line x1="4" y1="4" x2="12" y2="12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                <line x1="12" y1="4" x2="4" y2="12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      ) : (
+        <TitleBar
+          title={curName || 'Win-Box'}
+          showMini
+          mini={mini}
+          onMiniToggle={() => void client.playerSetMini(!mini)}
+        />
+      )}
       <div style={{ flex: 1, display: 'flex' }}>
         {activeUrl && !loadingRef.current ? (
           <VideoPlayer

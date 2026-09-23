@@ -73,17 +73,33 @@ export function metaQueryName(name: string): string {
 }
 
 /** 单次 metaSearch 最多尝试的名称变体数（防个别查不到的名字把 API 打爆） */
-const MAX_QUERY_VARIANTS = 3;
+const MAX_QUERY_VARIANTS = 4;
 /** 单次 metaSearch 最多查询轮数（每轮 = movie+tv 两个请求） */
-const MAX_QUERY_ROUNDS = 3;
+const MAX_QUERY_ROUNDS = 4;
+
+/**
+ * 取「首个 4 位年份」之前的部分。
+ * 源站常把年份+演员/版本拼进片名：「神雕侠侣1995古天乐·国语版」→「神雕侠侣」；
+ * 名字本身就是年份开头（「2001太空漫游」）时前缀不足 2 字 → 返回空串（不生成变体）。
+ */
+export function truncAtYear(s: string): string {
+  const m = /^(.*?)(?:19|20)\d{2}/.exec(s || '');
+  if (!m) return '';
+  const head = m[1].replace(/[\s·\-—_.,，。:：;；]+$/, '').trim();
+  return head.length >= 2 ? head : '';
+}
 
 /**
  * 查询名变体（按优先级，已去重）：
  *   ① 原串（仅清尾部标点）；
- *   ② 去掉**尾部噪声**：「第1季 / 更新至12集 / 全40集 / 41集 / 4K / 1080P / 国语 / 完结…」
+ *   ② 去掉**尾部噪声**：「第1季 / 第一季 / 更新至12集 / 全40集 / 41集 / 4K / 1080P / 国语 /
+ *      国语版 / 美版 / 日语版 / 动漫合集 / 完结…」
  *      —— 源站把这类标记拼进片名很常见，直接查必然 miss（"封面总有几个补不上"的主因之一）；
+ *      ★ 2026-09-23：噪声含**中文数字季号**（「权力的游戏第一季」「无耻之徒美版第一季」实测 miss）
+ *      与「版本/语言/合集」后缀（「海贼王动漫合集日语」）；
  *   ③ 再去掉【…】(…)〔…〕括号标签（「斗罗大陆（4K）」「斗罗大陆【全集】」）；
- *   ④ 主标题：'·' / ':' 前的部分（「斗罗大陆Ⅱ绝世唐门·第一季」→「斗罗大陆Ⅱ绝世唐门」）。
+ *   ④ 主标题：'·' / ':' 前的部分（「斗罗大陆Ⅱ绝世唐门·第一季」→「斗罗大陆Ⅱ绝世唐门」）；
+ *   ⑤ 首个 4 位年份处截断（「神雕侠侣1995古天乐」→「神雕侠侣」）。
  */
 export function metaQueryVariants(name: string): string[] {
   const out: string[] = [];
@@ -94,10 +110,10 @@ export function metaQueryVariants(name: string): string[] {
   const base = metaQueryName(name);
   push(base);
   const NOISE =
-    /[\s·\-—_]*(第\s*\d+\s*[季部集话話期章]|全\s*\d+\s*[集话話]|更新至\s*\d+\s*[集话話]?|共\s*\d+\s*[集话話]|\d+\s*[集话話]|完结|連載|连载|已完结|4K|FHD|UHD|HDTV|BluRay|BD|HD|WEB-?DL|1080[Pp]|720[Pp]|2160[Pp]|国语|國語|粤语|粵語|中字|双字|雙字|中英双字|无删减|未删减|修复版|高清版|抢先版|完整版)\s*$/i;
+    /[\s·\-—_]*(?:第\s*[\d一二三四五六七八九十百零]+\s*[季部集话話期章]|全\s*[\d一二三四五六七八九十百零]*\s*[集话話季]|更新至\s*[\d一二三四五六七八九十百零]+\s*[集话話]?|共\s*[\d一二三四五六七八九十百零]+\s*[集话話]|\d+\s*[集话話]|完结|連載|连载|已完结|4K|FHD|UHD|HDTV|BluRay|BD|HD|WEB-?DL|1080[Pp]|720[Pp]|2160[Pp]|国语版|國語版|粤语版|粵語版|日语版|日語版|韩语版|原声版|原聲版|美版|日版|港版|台版|国语|國語|粤语|粵語|日语|日語|韩语|韓語|原声|原聲|中字|双字|雙字|中英双字|无删减|未删减|修复版|高清版|抢先版|完整版|动漫合集|動漫合集|合集|动漫|動漫)\s*$/i;
   let s = base;
-  // 噪声可能叠着写（「斗罗大陆 第1季 4K」）→ 循环剥到不动为止
-  for (let i = 0; i < 4; i++) {
+  // 噪声可能叠着写（「海贼王动漫合集日语」「斗罗大陆 第1季 4K」）→ 循环剥到不动为止
+  for (let i = 0; i < 5; i++) {
     const next = s.replace(NOISE, '');
     if (next === s) break;
     s = next;
@@ -115,6 +131,9 @@ export function metaQueryVariants(name: string): string[] {
   push(noTags);
   const main = (noTags || unwrapped).split(/[·:：]/)[0].trim();
   push(main);
+  // ⑤ 年份截断（在已净化的名字上做；base 上的年份可能被版本/演员串夹在中间）
+  push(truncAtYear(main));
+  push(truncAtYear(base));
   return out;
 }
 

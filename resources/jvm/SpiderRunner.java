@@ -77,11 +77,17 @@ public class SpiderRunner {
         reqId = req.has("id") ? req.get("id").getAsString() : "";
         String cls = req.get("className").getAsString();
         String method = req.get("method").getAsString();
-        List<String> argList = new ArrayList<String>();
-        com.google.gson.JsonArray arr = req.has("args") && req.get("args").isJsonArray() ? req.getAsJsonArray("args") : null;
-        if (arr != null) for (int i = 0; i < arr.size(); i++) argList.add(arr.get(i).isJsonNull() ? "" : arr.get(i).getAsString());
-        data = dispatch(env, cls, method, argList.toArray(new String[0]), null);
-        ok = true;
+        // ★ 预热探针（池 warm）：env 已在 serve 入口 setupEnv 完成，无需实例化蜘蛛。
+        //   宿主在启动/配置应用后发一条 __ping__，把 JVM 冷启动成本提前付掉，首次搜索免等 1~3s。
+        if ("__ping__".equals(method)) {
+          ok = true;
+        } else {
+          List<String> argList = new ArrayList<String>();
+          com.google.gson.JsonArray arr = req.has("args") && req.get("args").isJsonArray() ? req.getAsJsonArray("args") : null;
+          if (arr != null) for (int i = 0; i < arr.size(); i++) argList.add(arr.get(i).isJsonNull() ? "" : arr.get(i).getAsString());
+          data = dispatch(env, cls, method, argList.toArray(new String[0]), null);
+          ok = true;
+        }
       } catch (Throwable t0) {
         Throwable cause = unwrap(t0);
         data = cause.getClass().getName() + ": " + cause.getMessage();

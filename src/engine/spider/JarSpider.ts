@@ -108,6 +108,18 @@ export class JarSpider extends Spider {
   }
 
   /**
+   * ★ 预热常驻 JVM（由 SpiderHost.prewarmSpiders 调度）：仅当本源的 jar 转换产物**已在磁盘上**时生效。
+   * 预热是启动路径上的"锦上添花"，绝不触发下载 / dex2jar 这类重活。
+   */
+  prewarm(): boolean {
+    const urls = this.jarUrls();
+    if (urls.length === 0) return false;
+    const paths = urls.map((u) => this.bridge.peekConverted(u)).filter((p) => !!p);
+    if (paths.length !== urls.length) return false; // 有 jar 还没转换过 → 跳过（不下载）
+    return this.bridge.prewarmJar(paths, this.clsName);
+  }
+
+  /**
    * init(Context, ext) 的 ext：把宿主已绑定的网盘/资源站 token 实时并入 ext 顶层。
    * 每次调用都读取最新绑定（宿主 DriveStore 内存快照），无需重建蜘蛛实例。
    */

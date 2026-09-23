@@ -35,6 +35,14 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { JarSpiderBridge, normalizeJarUrl } from '../../engine/spider/JarSpiderBridge';
 import { sourceTimeoutMs } from '../../engine/spider/SpiderFactory';
 import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSearch';
+import {
+  newSourceStat,
+  noteSourceOk,
+  noteSourceFail,
+  scheduleOrder,
+  sourceBudgetMs,
+  type SourceStat,
+} from '../../engine/vod/searchScheduler';
 import { classifyHealth } from '../../engine/vod/sourceHealth';
 import { mergeSubscriptions, type MergeInput } from '../../engine/config/mergeSubscriptions';
 import type { AuditItem, SearchAllReport, SearchAllProgressEvent } from '../../shared/types';
@@ -106,6 +114,13 @@ export class SpiderHost {
   private report: ImportReport | null = null;
   private sourceMap = new Map<string, SourceBean>();
   private lastSpiderJar = '';
+  /**
+   * ★ 源健康表（全源搜索调度用，见 engine/vod/searchScheduler）：key → 成功/失败/平均耗时。
+   * 本会话内存态（跨重启重置）：重启后按配置顺序从 0 开始学习，避免把「昨天的死源」永久降权。
+   */
+  private sourceHealth = new Map<string, SourceStat>();
+  /** 预热节流时间戳（配置应用/启动只冷启动有限的常驻蜘蛛进程） */
+  private lastPrewarmAt = 0;
   /**
    * ★ 聚合搜索逐源进度回调（IPC 层注入）：每完成一个源推一条给渲染层 → 结果边搜边出。
    * 无回调（单测/CLI）时退化为「只在结束时返回完整报告」。
@@ -755,21 +770,21 @@ export class SpiderHost {
    *   ③ 总体预算 SEARCH_ALL_BUDGET_MS：到点先返回**已拿到的结果**，未完成的源标注超时错误
    *      （原行为是一直等所有 worker 跑完，最坏 N/4 × 25s → 分钟级无响应）。
    *   ④ .py 源纳入（此前被排除，是嵌入式 CPython3 接入前的历史遗留）。
+   *   ★ 2026-09-23 第二轮（用户要求「全源搜索也像单源搜索一样秒出」）：
+   *     ⑤ 源健康调度（scheduleOrder）：上次成功的快源先派发、近期失败源排最后且只给 3.5s 短预算 ——
+   *        首屏命中不再被死源压在队尾；结果仍按配置顺序回填，展示顺序不变。
    */
   async searchAll(wd: string): Promise<SearchAllReport> {
     const term = (wd || '').trim();
     if (!term) throw new Error('请输入搜索关键词');
-    const pool = (this.config?.sites ?? []).filter((b) => {
-      if (Number(b.searchable) !== 1) return false;
-      if (b.type === 0 || b.type === 1) return true;
-      if (b.type === 3) return true; // jar / .js / .py 均已支持（py：嵌入式 CPython3 运行时）
-      return false;
-    });
+    const pool = this.searchableSites();
     const results = new Array<AggSearchInput | null>(pool.length).fill(null);
-    let cursor = 0;
     let done = 0;
     const workerCount = Math.min(SEARCH_ALL_WORKERS, pool.length || 1);
     const deadline = Date.now() + SEARCH_ALL_BUDGET_MS;
+    /** ★ 派发顺序（源索引）：健康源（快者优先）→ 未知源 → 近期失败源（短预算） */
+    const order = scheduleOrder(pool.length, (i) => pool[i].key, this.sourceHealth);
+    let cursor = 0;
     /** 单源完成 → 记结果 + 推流式进度（渲染层边搜边出） */
     const finish = (i: number, input: AggSearchInput): void => {
       results[i] = input;
@@ -780,8 +795,8 @@ export class SpiderHost {
     };
     const run = async (): Promise<void> => {
       for (;;) {
-        const i = cursor++;
-        if (i >= pool.length) return;
+        const i = order[cursor++];
+        if (i === undefined) return;
         const b = pool[i];
         const t0 = Date.now();
         const budget = deadline - Date.now();
@@ -793,25 +808,76 @@ export class SpiderHost {
             error: `总体搜索已超时（>${Math.round(SEARCH_ALL_BUDGET_MS / 1000)}s），该源未执行`,
             ms: 0,
           });
-          continue;
+          continue; // 未真正执行 → 不写健康表（不是这个源的错）
         }
-        const toMs = Math.min(sourceTimeoutMs(b), SEARCH_ALL_SOURCE_MAX_MS, budget);
+        const toMs = Math.min(sourceBudgetMs(this.sourceHealth.get(b.key), sourceTimeoutMs(b), SEARCH_ALL_SOURCE_MAX_MS), budget);
         try {
           const items = await raceTimeout(this.vm.search(b, term, false, toMs), toMs + 500, `单源搜索超时（>${Math.round(toMs / 1000)}s）`);
+          const ms = Date.now() - t0;
+          noteSourceOk(this.statOf(b.key), ms); // 成功/合法空结果都算健康（源可用）
           finish(i, {
             key: b.key,
             name: b.name || b.key,
             status: items.length > 0 ? 'ok' : 'empty',
             items,
-            ms: Date.now() - t0,
+            ms,
           });
         } catch (e) {
-          finish(i, { key: b.key, name: b.name || b.key, status: 'error', error: (e as Error).message, ms: Date.now() - t0 });
+          const ms = Date.now() - t0;
+          noteSourceFail(this.statOf(b.key)); // 失败 → 后续搜索降权到队尾 + 短预算
+          finish(i, { key: b.key, name: b.name || b.key, status: 'error', error: (e as Error).message, ms });
         }
       }
     };
     await Promise.all(Array.from({ length: workerCount }, () => run()));
     return mergeSearchResults(results.filter((r): r is AggSearchInput => r !== null));
+  }
+
+  /** 健康表读取（不存在则建一条空记录，便于就地在原对象上累加） */
+  private statOf(key: string): SourceStat {
+    let s = this.sourceHealth.get(key);
+    if (!s) {
+      s = newSourceStat();
+      this.sourceHealth.set(key, s);
+    }
+    return s;
+  }
+
+  /** 可搜索源（searchable=1 且类型可用）：聚合搜索与预热共用同一集合 */
+  private searchableSites(): SourceBean[] {
+    return (this.config?.sites ?? []).filter((b) => {
+      if (Number(b.searchable) !== 1) return false;
+      if (b.type === 0 || b.type === 1) return true;
+      if (b.type === 3) return true; // jar / .js / .py 均已支持（py：嵌入式 CPython3 运行时）
+      return false;
+    });
+  }
+
+  /**
+   * ★ 常驻蜘蛛进程预热（2026-09-23「全源搜索秒出」配套）：按调度顺序取前 max 个源，
+   * 把它们各自的常驻 JVM/Python 提前拉起（发 __ping__），首次进源/搜索免付冷启动 1~3s。
+   * - 只预热**已转换的 jar / 已落盘的脚本**：预热绝不触发下载或 dex2jar（那是重活，不进启动路径）；
+   * - 节流 + 静默失败：任何异常都不影响正常功能（最多就是没预热）。
+   */
+  prewarmSpiders(max = 2): number {
+    if (Date.now() - this.lastPrewarmAt < 60_000) return 0; // 节流：配置反复应用不重复拉进程
+    const pool = this.searchableSites();
+    if (pool.length === 0) return 0;
+    const order = scheduleOrder(pool.length, (i) => pool[i].key, this.sourceHealth);
+    let warmed = 0;
+    for (const i of order) {
+      if (warmed >= max) break;
+      const b = pool[i];
+      try {
+        const sp = this.vm.spiderFactory.getCSP(b, this.host) as { prewarm?: () => boolean };
+        if (typeof sp.prewarm === 'function' && sp.prewarm()) warmed++;
+      } catch { /* 预热失败静默（源不可用/类型不支持） */ }
+    }
+    if (warmed > 0) {
+      this.lastPrewarmAt = Date.now();
+      this.logger.i(`蜘蛛预热：已提前拉起 ${warmed} 个常驻进程（首次搜索免冷启动）`);
+    }
+    return warmed;
   }
   async play(key: string, flag: string, id: string, vipFlags: string[]): Promise<PlayResult> {
     const b = this.getSource(key);
@@ -936,6 +1002,11 @@ export class SpiderHost {
     this.applyConfig(cfg);
     // 源字段（ext/jar/type/api）变更后丢弃旧蜘蛛缓存，避免沿用旧实例
     this.vm.spiderFactory.clear();
+    // ★ 预热常驻蜘蛛进程（延后 3s，别抢窗口首帧的 CPU）：首次进源/搜索免付 JVM 冷启动。
+    //   只预热已转换过的 jar / 已落盘脚本；节流与静默失败见 prewarmSpiders。
+    setTimeout(() => {
+      try { this.prewarmSpiders(2); } catch { /* 预热失败静默 */ }
+    }, 3000).unref?.();
   }
 }
 

@@ -51,14 +51,37 @@ function norm(s: string): string {
   return (s || '').toLowerCase().replace(/[\s·・\-—_.,，。:：;；!！?？'"“”‘’()（）[\]【】<>《》/\\|]+/g, '');
 }
 
+/** 中文数字 → 数值（季号用：一/十/十二/二十/二十三；超范围返回 0） */
+function cn2num(tok: string): number {
+  const d: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (/^\d+$/.test(tok)) return Number(tok);
+  if (tok === '十') return 10;
+  const m = /^([一二三四五六七八九]?)(十?)([一二三四五六七八九]?)$/.exec(tok);
+  if (!m || (!m[1] && !m[2] && !m[3])) return 0;
+  const tens = m[2] ? (m[1] ? d[m[1]] * 10 : 10) : 0;
+  const ones = m[3] ? d[m[3]] : 0;
+  return tens + ones || (m[1] ? d[m[1]] : 0);
+}
+
+/** 提取季/部号（「第4季」「第四季」「第 4 部」），无标记返回 0 */
+export function seasonNo(s: string): number {
+  const m = /第\s*(\d+|[一二两三四五六七八九十]+)\s*[季部]/.exec(s || '');
+  return m ? cn2num(m[1]) : 0;
+}
+
 /**
  * 相关性判定：结果标题与查询词存在足够长的共同子串（中文 ≥4 / 拉丁 ≥6 连续字符）。
  * 目的：长剧情式片名直接搜会命中无关图 —— 宁可不出封面，也不给错图。
+ * ★ 2026-09-23 收紧季号：「侠探杰克第四季」此前会被《侠探杰克》第三季的文章命中
+ *   （共同子串「侠探杰克」= 4 字即算相关）。现在：查询带季号时，结果必须带**同一个**
+ *   季号才放行（结果无季号 = 基础剧集文章，同样拒绝）。
  */
 export function isRelevantHit(query: string, title: string): boolean {
   const q = norm(query);
   const t = norm(title);
   if (!q || !t) return false;
+  const qs = seasonNo(query);
+  if (qs > 0 && seasonNo(title) !== qs) return false; // 季号冲突/缺失 → 拒绝（宁可无图）
   // 全包含（短查询整串出现在标题里）→ 直接算相关（如「狂飙」⊂「狂飙 电视剧 剧照」）
   if (t.includes(q) || q.includes(t)) return true;
   const min = /[\u3400-\u9fff]/.test(q) ? 4 : 6;

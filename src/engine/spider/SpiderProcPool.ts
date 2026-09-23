@@ -76,6 +76,10 @@ export const PER_KEY_CAP = 4;
 const QUEUE_WAIT_MS = 15_000;
 /** 单请求默认超时（调用方一般会传源 timeout；Python 侧会传更长值） */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
+/** 预热探针方法名（Java/Python 两侧 serve 循环都识别它：只确认环境已就绪，不实例化蜘蛛） */
+export const PING_METHOD = '__ping__';
+/** 预热探针超时：JVM 启动 + setupEnv（加载大 jar）留足余量 */
+const WARM_TIMEOUT_MS = 30_000;
 export const IDLE_RECLAIM_MS = 30_000;
 const RECLAIM_INTERVAL_MS = 15_000;
 
@@ -141,6 +145,26 @@ export class SpiderProcPool {
       }
       this.enqueue(head, req, resolve, timeoutMs);
     });
+  }
+
+  /**
+   * ★ 预热（2026-09-23）：为某个 key 先起一个常驻进程，并把 `__ping__` 探针发进去 ——
+   * 只付「spawn + setupEnv / 脚本编译」的成本，不实例化蜘蛛、不碰源站。
+   * 之后首次进源主页/搜索就不必再等 JVM 冷启动（1~3s）或 Python 导入（0.5~1s）。
+   * 静默失败：已有热进程 / 全局额度不足 → 返回 false（不影响任何正常流程）。
+   */
+  warm(key: string, spec: SpawnSpec, timeoutMs = WARM_TIMEOUT_MS): boolean {
+    let group = this.groups.get(key);
+    if (!group) {
+      group = [];
+      this.groups.set(key, group);
+    }
+    if (group.some((p) => !p.dead)) return false; // 已有热进程，无需重复占额度
+    if (this.aliveCount >= GLOBAL_CAP && !this.reapOneLru(group)) return false;
+    const proc = this.spawnProc(key, spec);
+    // 探针响应直接丢弃（成功 = 进程可复用；失败 = 进程已被 kill，无副作用）
+    this.dispatch(proc, { id: `warm-${Date.now().toString(36)}`, className: '__ping__', method: PING_METHOD, args: [] }, () => undefined, timeoutMs);
+    return true;
   }
 
   /** 排队：等待期上限 QUEUE_WAIT_MS（排队超时只失败该请求，不牵连进程） */
