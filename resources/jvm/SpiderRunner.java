@@ -98,9 +98,23 @@ public class SpiderRunner {
         writeEnvelope(realOut, gson, reqId, false, "bad request: " + t0);
         continue;
       }
-      // ★ 预热探针（池 warm）：env 已在 serve 入口 setupEnv 完成，无需实例化蜘蛛。
+      // ★ 预热探针（池 warm）：
+      //   __ping__ → 只确认 env 就绪（setupEnv 已在 serve 入口完成）；
+      //   __warm__ → 进一步**加载蜘蛛类并预建实例（含 init(ext)/initApi）放入实例池**，
+      //              于是用户第一次进源/搜索时连类加载与 init 都不用付（args[0] = ext）。
       if ("__ping__".equals(method)) {
         writeEnvelope(realOut, gson, reqId, true, "");
+        continue;
+      }
+      if ("__warm__".equals(method)) {
+        String err = "";
+        try {
+          Object sp = SpiderPool.acquire(env, cls, args);
+          SpiderPool.release(cls, args, sp, false);
+        } catch (Throwable t0) {
+          err = unwrap(t0).getClass().getName() + ": " + unwrap(t0).getMessage();
+        }
+        writeEnvelope(realOut, gson, reqId, err.isEmpty(), err);
         continue;
       }
       final String fId = reqId;

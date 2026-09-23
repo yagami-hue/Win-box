@@ -7,6 +7,9 @@ import { normalizeJarUrl, type JarSpiderBridge } from './JarSpiderBridge';
 import { SourceProblemError } from './errors';
 import { enrichExt } from './driveExt';
 
+/** 首次使用该源时「jar 未转换」的最长等待（超过就先放行，让后台继续转换，用户稍后重试） */
+const PREPARE_WAIT_MS = 8000;
+
 export class JarSpider extends Spider {
   private bridge: JarSpiderBridge;
   private clsName: string;
@@ -49,12 +52,24 @@ export class JarSpider extends Spider {
       return false;
     }
     try {
-      for (const u of urls) await this.bridge.ensureConverted(u);
+      // ★ 2026-09-24：首次下载 + dex2jar 转换实测要 30~40s（用户点了「清理缓存」后尤其明显），
+      //   而进源请求只有 20s / 搜索单源只有 10s 预算 —— 直接 await 会让请求超时被标成「加载失败」。
+      //   这里最多等 PREPARE_WAIT_MS，超时即返回「正在准备运行时」的可读原因；
+      //   转换本身在后台继续（ensureConverted 的 promise 是共享的），用户再点一次就是热的。
+      await Promise.race([
+        Promise.all(urls.map((u) => this.bridge.ensureConverted(u))),
+        new Promise((_res, rej) => setTimeout(() => rej(new Error('__PREPARING__')), PREPARE_WAIT_MS)),
+      ]);
       this.ready = true;
       this.loadError = '';
       return true;
     } catch (e) {
       const msg = (e as Error).message || String(e);
+      if (msg === '__PREPARING__') {
+        this.loadError = '首次使用该源：正在后台下载并转换蜘蛛运行时（jar，约 10~40 秒），稍候重新打开该源即可';
+        this.host.logger.i(`jar-spider ${this.siteKey}: ${this.loadError}`);
+        return false;
+      }
       // 把底层报错翻译成人话：配置路径问题 / 下载失败 / 转换失败
       if (/Invalid URL|Failed to parse URL/i.test(msg)) {
         this.loadError = 'jar 地址不合法（配置里的路径无法解析），可能需要重新导入配置';
@@ -118,7 +133,8 @@ export class JarSpider extends Spider {
     if (urls.length === 0) return 0;
     const paths = urls.map((u) => this.bridge.peekConverted(u)).filter((p) => !!p);
     if (paths.length !== urls.length) return 0; // 有 jar 还没转换过 → 跳过（不下载）
-    return this.bridge.prewarmJar(paths, this.clsName, count);
+    // ★ 深度预热：把 ext 一起传进去 → 子进程侧**加载蜘蛛类 + 预建实例（含 init(ext)）**，首次进源免付这两笔
+    return this.bridge.prewarmJar(paths, this.clsName, count, this.enrichedExt());
   }
 
   /**

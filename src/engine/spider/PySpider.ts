@@ -56,7 +56,8 @@ export class PySpider extends Spider {
       path = join(this.bridge.pyCacheDir, `${md5Hex(base)}.py`);
     }
     if (!path || !existsSync(path)) return 0;
-    return this.bridge.prewarmPython(path, this.clsName, count);
+    // ★ 深度预热：同 Java 侧 —— 预建实例（含 init(ext)）进 python 侧实例缓存
+    return this.bridge.prewarmPython(path, this.clsName, count, enrichExt(this.ext || '', this.host?.driveTokens?.()));
   }
 
   /** 下载/定位 .py 到本地并按 URL md5 缓存；失败置 loadError 并返回 false。 */

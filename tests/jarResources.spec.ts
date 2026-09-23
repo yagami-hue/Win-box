@@ -205,15 +205,33 @@ describe('JarSpiderBridge — 转换产物格式版本迁移', () => {
     dirs.length = 0;
   });
 
-  it('★ 旧格式产物必须被作废 —— 否则 assets 补齐逻辑对老用户永远不生效', () => {
+  it('★ 无版本戳（清理缓存/首装）→ 保留已有产物并补写戳，不再误删重转', () => {
     const jvmDir = makeJvmDir();
     dirs.push(jvmDir);
     const cacheDir = join(jvmDir, 'converted');
     mkdirSync(cacheDir, { recursive: true });
-    // 伪造"上一版本留下的"产物（无 assets）+ 无版本戳
+    // 「清理缓存」只删内容、不写戳 → 下次启动会看到「有产物但没戳」。此处必须**保留**产物：
+    // 否则用户清缓存后第一次进源要现付「下载 + dex2jar」（实测 37s），进源请求会被超时打断。
+    const keep = join(cacheDir, 'cafe.jar');
+    writeFileSync(keep, buildZip([{ name: 'A.class', bytes: Buffer.from('a') }]));
+
+    const logs: string[] = [];
+    new JarSpiderBridge({ jvmDir, cacheDir }, makeHost(logs, ''));
+
+    expect(existsSync(keep)).toBe(true); // ★ 保留（不再误删）
+    expect(existsSync(join(cacheDir, '.converted-version'))).toBe(true); // 补写戳
+    expect(logs.some((l) => l.includes('转换产物格式升级'))).toBe(false);
+  });
+
+  it('★ 真升级（戳存在且为旧值）→ 作废重转 —— 否则 assets 补齐逻辑对老用户永远不生效', () => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    const cacheDir = join(jvmDir, 'converted');
+    mkdirSync(cacheDir, { recursive: true });
+    // 伪造"上一版本留下的"产物（无 assets）+ **旧版本戳**（真升级路径）
     const stale = join(cacheDir, 'deadbeef.jar');
     writeFileSync(stale, buildZip([{ name: 'Old.class', bytes: Buffer.from('old') }]));
-    expect(existsSync(stale)).toBe(true);
+    writeFileSync(join(cacheDir, '.converted-version'), '1');
 
     const logs: string[] = [];
     new JarSpiderBridge({ jvmDir, cacheDir }, makeHost(logs, ''));

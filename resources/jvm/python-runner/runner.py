@@ -143,9 +143,35 @@ def _serialize(result, real_out=_REAL_OUT):
     real_out.flush()
 
 
+# ★ 蜘蛛实例缓存（2026-09-24）：键 = (类名, ext)。与 Java 侧 SpiderPool 同理 ——
+#   源脚本的 init(ext) 可能要解析配置/建会话，每请求重建会让首次与后续都变慢；
+#   这里缓存实例复用；同一键并发时各自新建（Python 无锁，够用）。
+_INSTANCES = {}
+
+
+def _acquire(ns, class_name, ext):
+    key = (class_name, ext or '')
+    sp = _INSTANCES.pop(key, None)
+    if sp is None:
+        sp = _new_instance(ns, class_name)
+        try:
+            sp.init(ext)
+        except (AttributeError, TypeError):
+            pass
+    return key, sp
+
+
+def _release(key, sp, broken):
+    if broken:
+        return
+    if len(_INSTANCES) > 64:
+        _INSTANCES.clear()
+    _INSTANCES[key] = sp
+
+
 def _serve(py_path, class_name):
     """常驻模式：脚本只编译一次，stdin 逐行读 JSON 请求 {id, method, args}，单行 JSON 信封应答。
-    每请求 new Spider 实例（复用 Python 进程、不复用实例，避免跨请求状态串扰）；init(ext) 每请求执行。
+    每请求新蜘蛛实例（复用 Python 进程、不复用实例，避免跨请求状态串扰）；init(ext) 每请求执行。
     信封：{"id": ..., "ok": true|false, "data": "结果(JSON字符串)"} —— data 经 json.dumps 转义内嵌换行，
     物理单行，行协议不被结果内容打穿。读到 EOF 或请求体 {"quit":true} 退出。
     """
@@ -169,19 +195,26 @@ def _serve(py_path, class_name):
             if not isinstance(args, list):
                 args = [args]
             rest = [str(a) for a in args]
-            # ★ 预热探针（池 warm）：脚本已在 _serve 入口编译完成，无需实例化蜘蛛
+            # ★ 预热探针：脚本已在 _serve 入口编译完成；
+            #   __warm__ 进一步预建实例（含 init(ext)）进缓存，首次进源/搜索免付 init。
             if method == '__ping__':
                 ok = True
                 data = ''
-            else:
-                sp = _new_instance(ns, class_name)
-                ext = rest[0] if len(rest) > 0 else ''
-                try:
-                    sp.init(ext)
-                except (AttributeError, TypeError):
-                    pass
-                data = _serialize_raw(_call_method(sp, method, rest[1:] if len(rest) > 1 else []))
+            elif method == '__warm__':
+                key, sp = _acquire(ns, class_name, rest[0] if rest else '')
+                _release(key, sp, False)
                 ok = True
+            else:
+                key, sp = _acquire(ns, class_name, rest[0] if len(rest) > 0 else '')
+                broken = False
+                try:
+                    data = _serialize_raw(_call_method(sp, method, rest[1:] if len(rest) > 1 else []))
+                    ok = True
+                except BaseException:
+                    broken = True
+                    raise
+                finally:
+                    _release(key, sp, broken)
         except SystemExit as e:
             data = 'SystemExit: %s' % e
         except Exception as e:

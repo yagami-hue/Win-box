@@ -32,7 +32,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   /** 实际执行搜索时用的范围（结果区展示用，避免用户中途改勾选导致文案错位） */
   const [aggScope, setAggScope] = useState<'current' | 'all'>('current');
   /** ★ 全源搜索进度（已完成/总源数）：让用户看到「边搜边出」的推进，而不是干等 */
-  const [aggProgress, setAggProgress] = useState<{ done: number; total: number } | null>(null);
+  const [aggProgress, setAggProgress] = useState<{ done: number; total: number; pending: number } | null>(null);
   /**
    * ★ 结果网格一次渲染多少张卡（默认 240，可「显示更多」追加）：
    *   33 源全源搜索常出上千条，若一次全渲染，每个进度事件都要重排几百个 <img>（几百 ms/次 ×33）
@@ -472,7 +472,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       setAggCap(240); // 新搜索：结果网格重新分页
       // ★ 进度节流（200ms 合并刷新）：33 个源逐条 setState 会让整屏结果重排几十次，
       //   「边搜边出」反而变成「界面卡着不动」——累计 + 定时合并，首屏仍是首个源完成即出。
-      let progressed: { done: number; total: number } | null = null;
+      let progressed: { done: number; total: number; pending: number } | null = null;
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
       const flush = (): void => {
         if (flushTimer) {
@@ -484,10 +484,11 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       };
       const off = client.onSearchAllProgress((ev) => {
         if (ev.wd !== term) return;
-        acc.push(ev.source);
-        progressed = { done: ev.done, total: ev.total };
+        // ★ 快速窗口的「tick」不带 source（只更新进度文字），只有带 source 的才入库
+        if (ev.source) acc.push(ev.source);
+        progressed = { done: ev.done, total: ev.total, pending: ev.pending ?? Math.max(0, ev.total - ev.done) };
         setAggProgress(progressed); // 进度文字实时（极轻量）
-        if (!flushTimer) flushTimer = setTimeout(flush, 200);
+        if (ev.source && !flushTimer) flushTimer = setTimeout(flush, 200);
       });
       try {
         const r = await client.searchAll(term, { refresh: force });
@@ -597,7 +598,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         <span className="status" style={{ marginLeft: 'auto' }}>
           {loading
             ? aggScope === 'all'
-              ? `全源搜索中…${aggProgress ? `已完成 ${aggProgress.done}/${aggProgress.total} 个源 · 还在搜 ${Math.max(0, aggProgress.total - aggProgress.done)} 个（结果边搜边出）` : '（遍历全部源，结果边搜边出）'}`
+              ? `全源搜索中…${aggProgress ? `已出 ${aggProgress.done}/${aggProgress.total} 个源的结果${aggProgress.pending > 0 ? ` · 其余 ${aggProgress.pending} 个仍在补搜（出现即自动加上）` : ''}` : '（遍历全部源，结果边搜边出）'}`
               : '搜索中…'
             : aggMode
               ? `命中 ${agg?.items.length ?? 0} 条`

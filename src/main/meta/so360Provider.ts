@@ -31,17 +31,20 @@ interface So360Item {
   height?: number | string;
 }
 
-/** 解析 360 图片搜索响应 → 候选 {title,img}（纯函数，供单测） */
-export function parseSo360(json: unknown): Array<{ title: string; img: string }> {
+/** 解析 360 图片搜索响应 → 候选 {title,img,w,h}（纯函数，供单测）。
+ *  ★ 2026-09-24：把 width/height 也解析出来 —— 选图要按「竖版海报 + 面积大」排序
+ *  （此前直接取第一条相关结果，命中的常是**深色视频截图/缩略图**，用户反馈「亮度比正常封面低、不协调」）。
+ */
+export function parseSo360(json: unknown): Array<{ title: string; img: string; w: number; h: number }> {
   const j = json as { list?: unknown[] } | null;
   if (!j || !Array.isArray(j.list)) return [];
-  const out: Array<{ title: string; img: string }> = [];
+  const out: Array<{ title: string; img: string; w: number; h: number }> = [];
   for (const raw of j.list as So360Item[]) {
     if (!raw || typeof raw !== 'object') continue;
     const img = String(raw.img || raw.thumb || '').trim();
     const title = String(raw.title || raw.litetitle || '').trim();
     if (!img || !/^https?:\/\//i.test(img)) continue;
-    out.push({ title, img });
+    out.push({ title, img, w: Number(raw.width) || 0, h: Number(raw.height) || 0 });
   }
   return out;
 }
@@ -104,30 +107,78 @@ function relayed(img: string): string {
 }
 
 /**
+ * ★ 选图排序（2026-09-24，治「360 找的封面比正常封面暗/不协调」）：
+ *   360 图片结果里混着**深色视频截图、横版剧照、小缩略图**，此前取第一条相关候选 → 经常给出暗色截图。
+ *   海报的特征很明确：**竖版（高/宽 ≈1.33~1.9）且面积大**。
+ *   排序优先级：① 竖版且够大（≥200×300）→ ② 仅竖版 → ③ 其余按面积降序；
+ *   同档内**优先 jpg/webp**（png 常是带透明通道的切图/截图，压在深色卡上更暗）。
+ */
+export function pickBestSo360Cover(
+  cands: Array<{ title: string; img: string; w: number; h: number }>,
+): { title: string; img: string; w: number; h: number } | null {
+  if (cands.length === 0) return null;
+  const score = (c: { img: string; w: number; h: number }): [number, number, number] => {
+    const portrait = c.w > 0 && c.h > 0 && c.h / c.w >= 1.3 && c.h / c.w <= 2.0;
+    const bigPortrait = portrait && c.w >= 200 && c.h >= 300;
+    const niceExt = /\.(jpe?g|webp)(\?|$)/i.test(c.img) ? 1 : 0;
+    return [bigPortrait ? 2 : portrait ? 1 : 0, niceExt, c.w * c.h];
+  };
+  let best = cands[0];
+  let bestScore = score(best);
+  for (const c of cands.slice(1)) {
+    const s = score(c);
+    if (s[0] > bestScore[0] || (s[0] === bestScore[0] && s[1] > bestScore[1]) || (s[0] === bestScore[0] && s[1] === bestScore[1] && s[2] > bestScore[2])) {
+      best = c;
+      bestScore = s;
+    }
+  }
+  return best;
+}
+
+/** 竖版海报判定（高/宽 ≈1.3~2.0：常见 2:3=1.5、1:1.78、1:2；宽高缺失时视为「不是」） */
+export function isPortraitCover(c: { w: number; h: number }): boolean {
+  return c.w > 0 && c.h > 0 && c.h / c.w >= 1.3 && c.h / c.w <= 2.0;
+}
+
+/** 单次 360 图片搜索 → 原始候选（非 200 / 网络失败 → 空数组，不抛） */
+async function fetchSo360(kw: string): Promise<Array<{ title: string; img: string; w: number; h: number }>> {
+  const url = `${SEARCH_API}?q=${encodeURIComponent(kw)}&src=srp&correct=${encodeURIComponent(kw)}&sn=0&pn=10`;
+  const r = await undiciRequest(url, {
+    method: 'GET',
+    headers: { accept: 'application/json', 'User-Agent': 'Mozilla/5.0 Win-Box/0.90', Referer: SO360_REFERER },
+    headersTimeout: 10000,
+    bodyTimeout: 10000,
+    dispatcher: agent,
+  });
+  if (r.statusCode !== 200) {
+    await r.body.dump().catch(() => undefined);
+    return [];
+  }
+  return parseSo360(await r.body.json());
+}
+
+/**
  * 按中文片名查 360 图片 → 返回可用的封面 MetaHit 或 null。
- * - 只取前若干条候选，命中相关性即用（取尺寸最大者优先）；
+ * - 相关性过滤后**按「竖版海报 + 面积大」挑最佳**（见 pickBestSo360Cover）；
+ * - ★ 2026-09-24：若第一轮里**没有竖版海报**（说明命中的都是横版截图/剧照 —— 用户反馈的「暗」多来自这类），
+ *   自动补一次「<片名> 海报」查询，两轮里取最佳；
  * - 非 200 / 网络失败 → 返回 null（不抛；调用方不写缓存，下次自然重试）。
  */
 export async function so360SearchCover(logger: Logger, name: string): Promise<MetaHit | null> {
   const kw = (name || '').trim();
   if (kw.length < 2) return null;
-  const url = `${SEARCH_API}?q=${encodeURIComponent(kw)}&src=srp&correct=${encodeURIComponent(kw)}&sn=0&pn=10`;
   try {
-    const r = await undiciRequest(url, {
-      method: 'GET',
-      headers: { accept: 'application/json', 'User-Agent': 'Mozilla/5.0 Win-Box/0.86', Referer: SO360_REFERER },
-      headersTimeout: 10000,
-      bodyTimeout: 10000,
-      dispatcher: agent,
-    });
-    if (r.statusCode !== 200) {
-      await r.body.dump().catch(() => undefined);
-      return null;
+    let best = pickBestSo360Cover((await fetchSo360(kw)).filter((c) => isRelevantHit(kw, c.title)));
+    if (!best || !isPortraitCover(best)) {
+      // 补一轮「海报」：360 的图片搜索对「片名 海报」召回的竖版海报明显更多
+      const kw2 = `${kw} 海报`;
+      const more = (await fetchSo360(kw2).catch(() => [])).filter((c) => isRelevantHit(kw, c.title) || isRelevantHit(kw2, c.title));
+      const best2 = pickBestSo360Cover(more);
+      if (best2 && (!best || (isPortraitCover(best2) && !isPortraitCover(best)))) best = best2;
     }
-    const cands = parseSo360(await r.body.json()).filter((c) => isRelevantHit(kw, c.title));
-    if (cands.length === 0) return null;
-    logger.i?.(`meta:360图片兜底命中「${kw}」→ ${cands[0].title.slice(0, 40)}`);
-    return { title: kw, year: '', poster: relayed(cands[0].img), overview: '', type: 'movie' };
+    if (!best) return null;
+    logger.i?.(`meta:360图片兜底命中「${kw}」→ ${best.title.slice(0, 40)}（${best.w}×${best.h}）`);
+    return { title: kw, year: '', poster: relayed(best.img), overview: '', type: 'movie' };
   } catch (e) {
     logger.w?.(`meta:360图片 搜索失败 ${(e as Error).message}`);
     return null;

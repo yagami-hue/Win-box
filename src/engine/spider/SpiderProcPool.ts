@@ -102,6 +102,8 @@ const QUEUE_WAIT_MS = 25_000;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 /** 预热探针方法名（Java/Python 两侧 serve 循环都识别它：只确认环境已就绪，不实例化蜘蛛） */
 export const PING_METHOD = '__ping__';
+/** ★ 深度预热探针：连「加载蜘蛛类 + 预建实例（含 init(ext)）」一起做掉（args[0]=ext） */
+export const WARM_METHOD = '__warm__';
 /** 预热探针超时：JVM 启动 + setupEnv（加载大 jar）留足余量 */
 const WARM_TIMEOUT_MS = 30_000;
 /** 空闲回收：★ 60s（原 30s）—— 全源搜索后短时间内再搜一次仍能命中热进程，不必重付冷启动 */
@@ -186,17 +188,24 @@ export class SpiderProcPool {
   }
 
   /**
-   * ★ 预热（2026-09-23）：为某个 key 先起常驻进程，并把 `__ping__` 探针发进去 ——
-   * 只付「spawn + setupEnv / 脚本编译」的成本，不实例化蜘蛛、不碰源站。
-   * 之后首次进源主页/搜索就不必再等 JVM 冷启动（1~3s）或 Python 导入（0.5~1s）。
+   * ★ 预热（2026-09-23 / 2026-09-24 增强）：为某个 key 先起常驻进程，并发一条探针进去。
    *
-   * ★ 三轮：进程内已并发，**一个热进程就能承接整轮全源搜索**，
-   *   因此默认只需 1 个（count 仅用于兜底扩容场景）。
+   * 探针两种（Java/Python 两侧都识别）：
+   *   - `__ping__`：只付「spawn + setupEnv / 脚本编译」的成本（不实例化蜘蛛）；
+   *   - `__warm__`（三轮续增强，见 JarSpider.prewarm 传入）：再加「**加载蜘蛛类 + 预建实例（含 init(ext)）**」，
+   *     放进实例池 —— 用户第一次进这个源时连类加载与 init 都不用付（「进去加载 jar 源慢」的最后一截）。
    *
    * @param count 期望的**同 key 热进程数**（幂等：只补差额，不重复堆进程）
+   * @param probe 自定义探针（缺省 `__ping__`）
    * @returns 实际新起的进程数（已有足够热进程 / 额度不足时为 0）
    */
-  warm(key: string, spec: SpawnSpec, count = 1, timeoutMs = WARM_TIMEOUT_MS): number {
+  warm(
+    key: string,
+    spec: SpawnSpec,
+    count = 1,
+    probe?: { className: string; method: string; args: string[] },
+    timeoutMs = WARM_TIMEOUT_MS,
+  ): number {
     let group = this.groups.get(key);
     if (!group) {
       group = [];
@@ -209,7 +218,10 @@ export class SpiderProcPool {
       if (this.aliveCount >= this.globalCap() && !this.reapOneLru(this.groups.get(key) ?? group)) break;
       const proc = this.spawnProc(key, spec);
       // 探针响应直接丢弃（成功 = 进程可复用；失败 = 进程已被 kill，无副作用）
-      this.dispatch(proc, { id: `warm-${Date.now().toString(36)}-${started}`, className: '__ping__', method: PING_METHOD, args: [] }, () => undefined, timeoutMs);
+      const req: ServeRequest = probe
+        ? { id: `warm-${Date.now().toString(36)}-${started}`, className: probe.className, method: probe.method, args: probe.args }
+        : { id: `warm-${Date.now().toString(36)}-${started}`, className: '__ping__', method: PING_METHOD, args: [] };
+      this.dispatch(proc, req, () => undefined, timeoutMs);
       started++;
     }
     return started;

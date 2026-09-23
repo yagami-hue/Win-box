@@ -10,7 +10,7 @@ import type { EngineHost } from '../ports';
 import { md5Hex } from '../util/md5';
 import { NullLogger } from '../util/logger';
 import { buildZip, listZipEntries, looksLikeZip, readZipEntries, type ZipEntryData } from '../util/syncZip';
-import { SpiderProcPool, poolEnabled, servePoolKey, type PoolResult } from './SpiderProcPool';
+import { SpiderProcPool, poolEnabled, servePoolKey, WARM_METHOD, type PoolResult } from './SpiderProcPool';
 
 export interface JarBridgeOptions {
   /** resources/jvm 目录（含 jre/d2j/stubs/libs） */
@@ -217,11 +217,12 @@ export class JarSpiderBridge {
 
   /** 版本不符时清空转换产物，强制重转。失败只警告，不影响主流程。 */
   private ensureCacheVersion(): void {
-    // ★ 2026-09-23 修复「每次启动都重新下载+转换 jar」：
-    //   首装/清缓存后 cacheDir 不存在，老实现直接 return —— **版本戳从未写入**；
-    //   下次启动 cur='' ≠ v2 → 误判为 v1 旧产物 → 把刚转好的 jar 全删掉重来。
-    //   结果：缓存永远留不住（用户日志里每次启动都是「转换产物格式升级（v1 → v2）」+ 重新转换）。
-    //   现在：目录不存在也先建目录并写戳（写戳失败只警告，不影响主流程）。
+    // ★ 2026-09-23 / 2026-09-24 修复「每次清缓存后首次进源要等 30s+」：
+    //   ① 首装/清缓存后 cacheDir 不存在 → 先建目录并写戳（老实现直接 return，导致戳从未写入）；
+    //   ② ★ **戳缺失不再当作「旧版本产物」**：缺失只可能是「清理缓存按钮/外部清理」而不是真升级，
+    //      此时保留磁盘上已有的转换产物（它们本来就是当前版本的产物），只补写戳。
+    //      真升级（戳存在且值不同）才作废重转 —— 用户实测：清缓存后第一次进源要 37s
+    //      （下载 + dex2jar + JVM 冷启动全在这一条请求里），进而被源超时打断成「加载失败」。
     const stamp = join(this.cacheDir, JarSpiderBridge.CACHE_STAMP);
     try {
       if (!existsSync(this.cacheDir)) {
@@ -231,6 +232,11 @@ export class JarSpiderBridge {
       }
       const cur = existsSync(stamp) ? readFileSync(stamp, 'utf8').trim() : '';
       if (cur === String(JarSpiderBridge.CACHE_VERSION)) return;
+      if (!cur) {
+        // 戳缺失（清理缓存/首装）→ 保留已有产物，补写戳
+        writeFileSync(stamp, String(JarSpiderBridge.CACHE_VERSION));
+        return;
+      }
       const fs = require('node:fs') as typeof import('node:fs');
       let removed = 0;
       for (const f of fs.readdirSync(this.cacheDir)) {
@@ -241,7 +247,7 @@ export class JarSpiderBridge {
       writeFileSync(stamp, String(JarSpiderBridge.CACHE_VERSION));
       if (removed > 0) {
         this.host?.logger.i(
-          `jvm-bridge 转换产物格式升级（v${cur || '1'} → v${JarSpiderBridge.CACHE_VERSION}），已作废 ${removed} 个旧产物并重新转换`,
+          `jvm-bridge 转换产物格式升级（v${cur} → v${JarSpiderBridge.CACHE_VERSION}），已作废 ${removed} 个旧产物并重新转换`,
         );
       }
     } catch (e) {
@@ -361,13 +367,13 @@ export class JarSpiderBridge {
   }
 
   /**
-   * ★ 预热：提前 spawn `count` 个常驻 SpiderRunner --serve（详见 SpiderProcPool.warm）。
-   * count>1 的意义：同 key 的多进程并行是全源搜索的真实并发上限（见 PER_KEY_CAP 注释），
-   * 预热 N 个 = 首波搜索直接 N 路并行且全热。
+   * ★ 预热：提前 spawn `count` 个常驻 SpiderRunner --serve，并发 `__warm__` 探针
+   * （把「加载蜘蛛类 + 预建实例（含 init(ext)）」也提前做掉，见 SpiderRunner.serve）。
    *
+   * @param ext 该源的 init ext（预热实例与真实调用同键 —— 同 ext 才会被复用）
    * @returns 实际新起的进程数（0 = 未预热：池禁用/路径缺失/已热/额度不足）
    */
-  prewarmJar(jarPaths: string[], className: string, count = 1): number {
+  prewarmJar(jarPaths: string[], className: string, count = 1, ext = ''): number {
     if (!this.pool || jarPaths.length === 0 || !jarPaths.every((p) => existsSync(p))) return 0;
     const shimClasses = this.shimWithFoni(className, this.shellShimClassesPath() || this.autoShellShim(jarPaths));
     const shimJar = this.shellShimJarPath();
@@ -382,14 +388,14 @@ export class JarSpiderBridge {
       cp,
     ];
     const key = servePoolKey(this.javaExe(), serveArgv);
-    return this.pool.warm(key, { exe: this.javaExe(), serveArgv, key }, count);
+    return this.pool.warm(key, { exe: this.javaExe(), serveArgv, key }, count, { className, method: WARM_METHOD, args: [ext] });
   }
 
   /**
-   * ★ 预热：提前 spawn 常驻 Python runner（-serve）。
+   * ★ 预热：提前 spawn 常驻 Python runner（-serve）并发 `__warm__` 探针（预建实例进缓存）。
    * 运行时/脚本任一未落盘 → 直接 0：预热**绝不触发**嵌入式 Python 下载（那是 11MB 级重活）。
    */
-  prewarmPython(pyPath: string, clsName: string, count = 1): number {
+  prewarmPython(pyPath: string, clsName: string, count = 1, ext = ''): number {
     if (!this.pool || !this.pyRuntimeDir) return 0;
     const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
     const pyExe = join(dir, 'python.exe');
@@ -398,7 +404,7 @@ export class JarSpiderBridge {
     const serveArgv = [runner, '-serve', pyPath, clsName];
     const env = { PYTHONIOENCODING: 'utf-8' };
     const key = servePoolKey(pyExe, serveArgv, env);
-    return this.pool.warm(key, { exe: pyExe, serveArgv, env, key }, count);
+    return this.pool.warm(key, { exe: pyExe, serveArgv, env, key }, count, { className: clsName, method: WARM_METHOD, args: [ext] });
   }
 
   /**

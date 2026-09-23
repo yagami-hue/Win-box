@@ -183,11 +183,17 @@ export interface SearchAllReport {
 export interface SearchAllProgressEvent {
   /** 本次搜索关键词（渲染层据此丢弃过期事件） */
   wd: string;
-  /** 该源的结果（结构同 mergeSearchResults 的输入） */
-  source: { key: string; name: string; status: 'ok' | 'empty' | 'error'; items?: VodItem[]; error?: string; ms?: number };
+  /**
+   * 该源的结果（结构同 mergeSearchResults 的输入）。
+   * ★ 2026-09-24：**可选** —— 快速窗口到点时会推一条「不带 source」的进度，
+   * 只用于告诉 UI「已出 X 个、其余 N 个仍在补搜」（用户不必干等所有慢源）。
+   */
+  source?: { key: string; name: string; status: 'ok' | 'empty' | 'error'; items?: VodItem[]; error?: string; ms?: number };
   /** 已完成的源数 / 总源数 */
   done: number;
   total: number;
+  /** ★ 仍在补搜的源数（= total - done，供 UI 显示「其余 N 个仍在补搜」） */
+  pending?: number;
 }
 
 export interface VodDetail {

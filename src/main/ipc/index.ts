@@ -85,7 +85,13 @@ export function registerIpc(host: SpiderHost): void {
   registerHandler(IPC.CFG_PROFILE_DELETE, (_e: any, id: string) => host.cfgDeleteProfile(id), log);
   registerHandler(IPC.CFG_PROFILE_UPDATE_NAME, (_e: any, a: { id: string; name: string }) => host.cfgUpdateProfileName(a.id, a.name), log);
   // 清理缓存：只删可重建的纯缓存（Chromium 缓存 / jar 转换缓存），绝不动配置/历史/绑定
-  registerHandler(IPC.CACHE_CLEAR, () => clearAppCache(userDataDir(), spiderCacheDir()), log);
+  //   ★ 2026-09-24：清完立刻在后台重建蜘蛛运行时（重新转换 jar + 重启热进程），
+  //     否则用户下一次进源要在请求里现付 30~40s 的「下载 + dex2jar」并被超时打断。
+  registerHandler(IPC.CACHE_CLEAR, async () => {
+    const r = clearAppCache(userDataDir(), spiderCacheDir());
+    try { host.rewarmAfterCacheClear(); } catch { /* 预热失败不影响清理结果 */ }
+    return r;
+  }, log);
   registerHandler(IPC.VOD_DEBUG, (_e: any, key: string) => host.debug(key), log);
   registerHandler(IPC.VOD_AUDIT, () => host.auditAll(), log);
   registerHandler(IPC.DRIVE_GET, () => host.driveList(), log);

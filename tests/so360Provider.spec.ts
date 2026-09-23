@@ -1,26 +1,58 @@
 // tests/so360Provider.spec.ts — 360 图片兜底（TMDB/豆瓣都查不到的中文短剧封面）纯函数回归
 import { describe, it, expect } from 'vitest';
-import { parseSo360, isRelevantHit, seasonNo, SO360_CACHE_PREFIX, SO360_REFERER } from '../src/main/meta/so360Provider';
+import { parseSo360, isRelevantHit, seasonNo, pickBestSo360Cover, isPortraitCover, SO360_CACHE_PREFIX, SO360_REFERER } from '../src/main/meta/so360Provider';
 
 describe('parseSo360', () => {
-  it('取 img/thumb 与 title（img 优先）', () => {
+  it('取 img/thumb 与 title（img 优先）+ 宽高', () => {
     const r = parseSo360({
       list: [
-        { img: 'https://p6.moimg.net/a.png', thumb: 'https://p2.ssl.qhimgs1.com/t1.jpg', title: '假面骑士ZEZTZ情报汇总' },
+        { img: 'https://p6.moimg.net/a.jpg', thumb: 'https://p2.ssl.qhimgs1.com/t1.jpg', title: '假面骑士ZEZTZ情报汇总', width: '1080', height: '1920' },
         { thumb: 'https://p2.ssl.qhimgs1.com/t2.jpg', litetitle: '备选' },
       ],
     });
     expect(r).toHaveLength(2);
-    expect(r[0]).toEqual({ title: '假面骑士ZEZTZ情报汇总', img: 'https://p6.moimg.net/a.png' });
+    expect(r[0]).toEqual({ title: '假面骑士ZEZTZ情报汇总', img: 'https://p6.moimg.net/a.jpg', w: 1080, h: 1920 });
     expect(r[1].img).toBe('https://p2.ssl.qhimgs1.com/t2.jpg'); // 无 img 时回落 thumb
+    expect(r[1].w).toBe(0); // 缺宽高 → 0（视为「不是竖版海报」）
   });
 
   it('非 http(s) / 空 / 非法结构 → 过滤或空数组', () => {
     expect(parseSo360(null)).toEqual([]);
     expect(parseSo360({})).toEqual([]);
     expect(parseSo360({ list: [{ img: 'data:image/png;base64,AAA' }, { img: '' }, { img: 'https://x/a.jpg', title: 'ok' }] })).toEqual([
-      { title: 'ok', img: 'https://x/a.jpg' },
+      { title: 'ok', img: 'https://x/a.jpg', w: 0, h: 0 },
     ]);
+  });
+});
+
+// ★ 2026-09-24：360 兜底封面「比正常封面暗/不协调」—— 结果是深色视频截图/横版剧照/透明切图。
+//   改为「竖版海报优先（且够大）→ 优先 jpg/webp → 面积大者」。
+describe('pickBestSo360Cover（选真正的竖版海报）', () => {
+  const c = (img: string, w: number, h: number, title = 'x') => ({ img, w, h, title });
+
+  it('横版截图 vs 竖版海报 → 选竖版海报', () => {
+    const best = pickBestSo360Cover([
+      c('https://a.com/screenshot.png', 1280, 720), // 横版截图（用户看到的「暗」）
+      c('https://b.com/poster.jpg', 1080, 1920),
+    ]);
+    expect(best?.img).toBe('https://b.com/poster.jpg');
+  });
+
+  it('同样竖版 → 优先大图；再同则优先 jpg/webp', () => {
+    expect(pickBestSo360Cover([c('https://a/x.jpg', 200, 300), c('https://a/y.jpg', 800, 1200)])?.img).toBe('https://a/y.jpg');
+    expect(pickBestSo360Cover([c('https://a/x.png', 800, 1200), c('https://a/y.webp', 800, 1200)])?.img).toBe('https://a/y.webp');
+  });
+
+  it('全都是横版 → 按面积取最大（保持可用性，不返回 null）', () => {
+    expect(pickBestSo360Cover([c('https://a/s.jpg', 640, 360), c('https://a/b.jpg', 1920, 1080)])?.img).toBe('https://a/b.jpg');
+    expect(pickBestSo360Cover([])).toBeNull();
+  });
+
+  it('isPortraitCover：高/宽 1.3~2.0 才算海报（缺宽高不算）', () => {
+    expect(isPortraitCover({ w: 1000, h: 1500 })).toBe(true); // 2:3
+    expect(isPortraitCover({ w: 1080, h: 1920 })).toBe(true); // 9:16
+    expect(isPortraitCover({ w: 1920, h: 1080 })).toBe(false); // 横版
+    expect(isPortraitCover({ w: 0, h: 0 })).toBe(false);
   });
 });
 
