@@ -5,7 +5,7 @@
 // 设计要点：
 //  - 分组 key = 固定 argv 前缀（exe + serve 头 + classpath/env 差异段）的组合；同 key 共享进程。
 //  - 进程串行处理请求（同一时刻 1 个 in-flight；其余排队），行协议保证无交错。
-//  - 全局进程上限 4；每 key 组上限 2（超限排队）。
+//  - 全局进程上限 4（同 key 只 spawn 首个时冷启动 1 次，后续请求复用/排队）。
 //  - 空闲 30s 无请求回收（保留每个 key 至少 1 个热进程，减少重建）。
 //  - 传输层失败（进程退出/写入 EPIPE/单请求超时）→ 杀进程 + 拒绝其 pending；调用方回退一次性路径。
 //  - 单测默认禁用（VITEST）或 TVBOX_DISABLE_SPIDER_POOL=1 关闭。
@@ -46,7 +46,6 @@ export interface SpawnFn {
 }
 
 const GLOBAL_CAP = 4;
-const PER_KEY_CAP = 2;
 export const IDLE_RECLAIM_MS = 30_000;
 const RECLAIM_INTERVAL_MS = 15_000;
 
