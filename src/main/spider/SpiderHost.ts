@@ -894,29 +894,27 @@ export class SpiderHost {
   }
 
   /**
-   * ★ 常驻蜘蛛进程预热（2026-09-23「全源搜索秒出」配套）：按调度顺序取前 maxKeys 个源，
-   * 把它们各自的常驻 JVM/Python 提前拉起（发 __ping__），首次进源/搜索免付冷启动 1~3s。
+   * ★ 常驻蜘蛛进程预热（2026-09-23 三轮重做配套）：按调度顺序把**前 maxKeys 个不同的池 key**
+   * 各预热 perKey 个进程（默认 1 个 —— 三轮后进程内已并发，一个热 JVM 就能跑完整轮搜索）。
    * - 只预热**已转换的 jar / 已落盘的脚本**：预热绝不触发下载或 dex2jar（那是重活，不进启动路径）；
-   * - ★ 三轮：每个 key 预热到 **perKey 个进程**（幂等补差额）—— 同 key 并行度就是全源搜索的真实并发上限；
+   * - 以「真的新起了进程」计数（同 key 的后续源返回 0 → 自动跳到下一个 key）；
    * - 节流 + 静默失败：任何异常都不影响正常功能（最多就是没预热）。
    *
    * @returns 实际新起的进程数
    */
-  prewarmSpiders(maxKeys = 2, perKey = 3): number {
+  prewarmSpiders(maxKeys = 3, perKey = 1): number {
     if (Date.now() - this.lastPrewarmAt < 30_000) return 0; // 节流：配置反复应用不重复拉进程
     const pool = this.searchableSites();
     if (pool.length === 0) return 0;
     const order = scheduleOrder(pool.length, (i) => pool[i].key, this.sourceHealth);
     let started = 0;
-    let tried = 0;
     for (const i of order) {
-      if (tried >= maxKeys) break;
+      if (started >= maxKeys) break;
       const b = pool[i];
       try {
         const sp = this.vm.spiderFactory.getCSP(b, this.host) as { prewarm?: (n?: number) => number };
         if (typeof sp.prewarm !== 'function') continue;
         started += sp.prewarm(perKey);
-        tried++;
       } catch { /* 预热失败静默（源不可用/类型不支持） */ }
     }
     if (started > 0) {
@@ -1050,9 +1048,9 @@ export class SpiderHost {
     this.vm.spiderFactory.clear();
     this.searchCache.clear(); // 源列表变了 → 旧的全源搜索报告作废（可能含已删除源）
     // ★ 预热常驻蜘蛛进程（延后 3s，别抢窗口首帧的 CPU）：首次进源/搜索免付 JVM 冷启动。
-    //   三轮：每个 key 预热到 3 个进程（同 key 并行度 = 全源搜索真实并发上限）。
+    //   三轮后进程内已并发：前 3 个**不同 key** 各 1 个热进程即可覆盖整套配置。
     setTimeout(() => {
-      try { this.prewarmSpiders(2, 3); } catch { /* 预热失败静默 */ }
+      try { this.prewarmSpiders(3, 1); } catch { /* 预热失败静默 */ }
     }, 3000).unref?.();
   }
 }

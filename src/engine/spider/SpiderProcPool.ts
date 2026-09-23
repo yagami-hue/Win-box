@@ -1,18 +1,16 @@
 // src/engine/spider/SpiderProcPool.ts
-// ★ 蜘蛛子进程常驻复用池（进程池 v2）：JVM(--serve)/Python(-serve) 同一进程跨请求复用，
-//   摊销每次冷启动（JVM 1~3s / Python 0.5~1s）—— 源主页/单源搜索/全源搜索提速的核心。
+// ★ 蜘蛛子进程常驻复用池（进程池 v3）：JVM(--serve)/Python(-serve) 同一进程跨请求复用，
+//   摊销每次冷启动（JVM 1~3s / Python 0.5~1s）。
 //
-// 设计要点：
+// 设计要点（★ 2026-09-23 三轮重做：从「一个进程一个请求」改为「**进程内并发**」）：
 //  - 分组 key = 固定 argv 前缀（exe + serve 头 + classpath/env 差异段）的组合；同 key 共享进程池。
-//  - ★ v2 同 key 可开多进程并行：一份配置里几十个源常共用同一只 jar（同一个 key），
-//    全源搜索的并发请求若只能排在一个进程后面 → 串行 30+ 次 → 「搜半天搜不出来」。
-//    因此单请求占一个进程（进程内串行行协议不变），同 key 最多 PER_KEY_CAP 个进程并行。
-//  - 全局上限（内存自适应，见 effectiveGlobalCap）：超限不再无脑 spawn，而是回收「最久空闲」的进程（LRU）后复用额度。
-//  - 请求超时 = 调用方给的源 timeout（源级语义），排队等待另有 QUEUE_WAIT_MS 上限：
-//    排队超时只失败该请求（不杀进程），执行超时才 kill 进程；两者都让调用方回退一次性路径。
-//  - ★ 空结果与失败必须区分：蜘蛛成功返回 '' 是合法结果（空搜索），不再误判失败去回退一次性
-//    （旧实现让每个空结果都多打一次冷启动进程，正是「慢」的来源之一）。
-//  - 空闲 60s 回收冗余进程（保留每 key 1 个热进程，减少重建）。
+//  - ★ **一个进程同时承接多个在途请求**（MAX_INFLIGHT_PER_PROC）：JVM 侧是 24 线程池，
+//    蜘蛛调用绝大多数时间在等网络 → 一个热 JVM 就能跑完整轮 33 源并发搜索，
+//    不必再多开 6 个 JVM（那正是「进源慢、搜索更慢」的根因：冷启动 ×N + 内存 ×N + 杀软扫描 ×N）。
+//  - PER_KEY_CAP 只在「线程池被占满」时兜底扩容；全局上限（内存自适应）防失控。
+//  - 请求超时 = 调用方给的源 timeout；★ **单请求超时不再 kill 进程**（进程里还有别的源的在途请求）。
+//  - ★ 空结果与失败必须区分：蜘蛛成功返回 '' 是合法结果（空搜索），不误判失败去回退一次性。
+//  - 空闲 60s 回收冗余进程（保留每 key 1 个热进程）。
 //  - 单测默认禁用（VITEST）或 TVBOX_DISABLE_SPIDER_POOL=1 关闭。
 import { spawn, type ChildProcess } from 'node:child_process';
 import { freemem } from 'node:os';
@@ -53,7 +51,6 @@ interface Proc {
   child: ChildProcess;
   pending: Map<string, PendingEntry>;
   queue: QueuedEntry[];
-  busy: boolean;
   lastUsed: number;
   dead: boolean;
 }
@@ -87,14 +84,18 @@ export function effectiveGlobalCap(): number {
 }
 
 /**
- * 同 key 并行进程上限。
- * ★★ 2026-09-23 三轮真机取证后的关键调参 ★★
- *   用户配置里 **33 个可搜索源全部是 type=3（jar/py 子进程）**，且绝大多数共用同一只 jar
- *   —— 也就是**同一个池 key**。于是「同 key 并行度」就是全源搜索的**真实并发上限**：
- *   原值 4 意味着 30 个源要排 8 批，全部出齐 15~20s+；6 路并行把中段源的整体完成时间压下来，
- *   且配合「预热 3 个热进程」后**首屏仍是 <1s**（实测见交付说明 〇++++++ 节）。
+ * 同 key 进程上限：★ 三轮重做为「**进程内并发**」后，进程数不再等于并行度
+ * （一个 serve 进程内 24 线程并发，见 SpiderRunner.serve），本上限只用于兜底扩容
+ * （例如某蜘蛛把线程池占满时的第二/第三个进程）。
  */
-export const PER_KEY_CAP = 6;
+export const PER_KEY_CAP = 3;
+/**
+ * ★★ 单个 serve 进程允许的在途请求数（2026-09-23 三轮重做的关键）★★
+ *   旧实现「一个进程同一时刻只处理一个请求」→ 33 个源要么排队、要么多开 6 个 JVM 换并行度；
+ *   而每个 JVM 冷启动 1~3s + 84MB，首次搜索同时冷启 6 个 → 「进源慢、搜索更慢」的真身。
+ *   现在 JVM 侧是 24 线程池并发，宿主侧同步放开在途数（申请超过 24 时会在 JVM 内排队，等价于限流）。
+ */
+export const MAX_INFLIGHT_PER_PROC = 24;
 /** 排队等待上限：超过即失败该请求（进程本身可能仍在跑长任务）。★ 25s：宁可等也不要在排队超时后回退冷启动一次性进程 */
 const QUEUE_WAIT_MS = 25_000;
 /** 单请求默认超时（调用方一般会传源 timeout；Python 侧会传更长值） */
@@ -144,6 +145,8 @@ export class SpiderProcPool {
 
   /**
    * 提交 serve 请求；spec 供池按需 spawn。
+   * ★ 三轮：一个进程可**并发承接多个在途请求**（JVM 内 24 线程池），
+   *   因此这里先找「在途未满」的进程直接派发，只有全都满了才考虑扩容/排队。
    * @param timeoutMs 单请求执行超时（= 源 timeout）；排队等待另有 QUEUE_WAIT_MS 上限。
    */
   submit(key: string, spec: SpawnSpec, req: ServeRequest, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<PoolResult> {
@@ -153,9 +156,9 @@ export class SpiderProcPool {
         group = [];
         this.groups.set(key, group);
       }
-      // 1) 组内有空闲进程 → 直接派发（进程内串行，行协议安全）
-      let target = group.find((p) => !p.dead && !p.busy && p.queue.length === 0);
-      // 2) 无空闲：额度允许就再开一个同 key 进程并行
+      // 1) 组内有进程且其**在途数未满** → 直接派发（并发，行协议按 id 解复用）
+      let target = group.find((p) => !p.dead && p.pending.size < MAX_INFLIGHT_PER_PROC);
+      // 2) 全都满了：额度允许就再开一个同 key 进程扩容
       if (!target && group.filter((p) => !p.dead).length < PER_KEY_CAP) {
         if (this.aliveCount < this.globalCap() || this.reapOneLru(group)) {
           target = this.spawnProc(key, spec);
@@ -166,7 +169,7 @@ export class SpiderProcPool {
         this.dispatch(target, req, resolve, timeoutMs);
         return;
       }
-      // 3) 额度用尽/同 key 已满 → 排队到组内队列最短的进程（负载均衡，行协议串行）
+      // 3) 额度用尽/同 key 已满 → 排队到组内队列最短的进程
       const live = group.filter((p) => !p.dead);
       const head = live.sort((a, b) => a.queue.length - b.queue.length)[0];
       if (!head) {
@@ -187,9 +190,8 @@ export class SpiderProcPool {
    * 只付「spawn + setupEnv / 脚本编译」的成本，不实例化蜘蛛、不碰源站。
    * 之后首次进源主页/搜索就不必再等 JVM 冷启动（1~3s）或 Python 导入（0.5~1s）。
    *
-   * ★ 三轮增强：`count` 可一次预热**多个**同 key 进程 —— 用户配置里 30 个源共用一只 jar（同一 key），
-   *   只预热 1 个进程的话，全源搜索第一波仍要现 spawn 7 个（各 1~3s 冷启动）。
-   *   预热 N 个 = 首屏直接 N 路并行且全热。
+   * ★ 三轮：进程内已并发，**一个热进程就能承接整轮全源搜索**，
+   *   因此默认只需 1 个（count 仅用于兜底扩容场景）。
    *
    * @param count 期望的**同 key 热进程数**（幂等：只补差额，不重复堆进程）
    * @returns 实际新起的进程数（已有足够热进程 / 额度不足时为 0）
@@ -234,20 +236,27 @@ export class SpiderProcPool {
     this.drainQueue(proc);
   }
 
+  /** 队列排水：进程空闲（在途未满）就继续派发 */
   private drainQueue(proc: Proc): void {
-    if (proc.dead || proc.busy) return;
-    const entry = proc.queue.shift();
-    if (!entry) return;
-    clearTimeout(entry.timer);
-    this.dispatch(proc, entry.req, entry.resolve, entry.timeoutMs);
+    while (!proc.dead && proc.queue.length > 0 && proc.pending.size < MAX_INFLIGHT_PER_PROC) {
+      const entry = proc.queue.shift();
+      if (!entry) return;
+      clearTimeout(entry.timer);
+      this.dispatch(proc, entry.req, entry.resolve, entry.timeoutMs);
+    }
   }
 
   private dispatch(proc: Proc, req: ServeRequest, resolve: (r: PoolResult) => void, timeoutMs: number): void {
-    proc.busy = true;
     proc.lastUsed = Date.now();
     const timer = setTimeout(() => {
-      // 执行超时 → kill 进程（其 pending 全部按失败处理）→ 调用方回退一次性
-      this.kill(proc, 'timeout');
+      // ★ 三轮：单请求执行超时 **不再 kill 进程** —— 进程里可能还有 20+ 个其它源的在途请求，
+      //   杀掉会把它们一起判失败（用户侧表现为「一两个卡住的源把整轮搜索拖垮」）。
+      //   只失败这一个请求；迟到的应答按 id 找不到 pending 会被丢弃。
+      const p = proc.pending.get(req.id);
+      if (!p) return;
+      proc.pending.delete(req.id);
+      resolve({ ok: false, data: '', reason: 'timeout' });
+      this.drainQueue(proc);
     }, Math.max(3000, timeoutMs));
     proc.pending.set(req.id, { req, resolve, timer });
     const line = JSON.stringify({ id: req.id, className: req.className, method: req.method, args: req.args });
@@ -264,7 +273,7 @@ export class SpiderProcPool {
     let victim: Proc | null = null;
     for (const procs of this.groups.values()) {
       for (const p of procs) {
-        if (p.dead || p.busy || p.queue.length > 0) continue;
+        if (p.dead || p.pending.size > 0 || p.queue.length > 0) continue; // 有在途请求的绝不回收
         if (procs.length === 1 && procs === keepGroup) continue; // 本组唯一进程不可回收（还要用它排队）
         if (!victim || p.lastUsed < victim.lastUsed) victim = p;
       }
@@ -281,7 +290,6 @@ export class SpiderProcPool {
       child,
       pending: new Map(),
       queue: [],
-      busy: false,
       lastUsed: Date.now(),
       dead: false,
     };
@@ -301,7 +309,6 @@ export class SpiderProcPool {
           if (p) {
             clearTimeout(p.timer);
             proc.pending.delete(env.id ?? '');
-            proc.busy = false;
             proc.lastUsed = Date.now();
             // ★ ok:true 且 data 为空串 = 蜘蛛合法空结果（不触发调用方回退）
             p.resolve({ ok: true, data: typeof env.data === 'string' ? env.data : '' });
@@ -346,12 +353,12 @@ export class SpiderProcPool {
     }
   }
 
-  /** 空闲回收：同 key 只保留 1 个热进程（并行期多开的进程 30s 无请求即回收） */
+  /** 空闲回收：同 key 只保留 1 个热进程（冗余进程空闲 IDLE_RECLAIM_MS 即回收） */
   private reclaim(): void {
     const now = Date.now();
     for (const [key, procs] of this.groups) {
       const idleList = procs.filter(
-        (p) => !p.dead && !p.busy && p.queue.length === 0 && procs.length > 1 && now - p.lastUsed > IDLE_RECLAIM_MS,
+        (p) => !p.dead && p.pending.size === 0 && p.queue.length === 0 && procs.length > 1 && now - p.lastUsed > IDLE_RECLAIM_MS,
       );
       // 保留组内最近使用的那一个（并行期的其它进程回收）
       const sorted = [...procs].filter((p) => !p.dead).sort((a, b) => b.lastUsed - a.lastUsed);

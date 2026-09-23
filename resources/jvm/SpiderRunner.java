@@ -59,10 +59,22 @@ public class SpiderRunner {
     System.exit(code);
   }
 
-  /** 常驻服务：读 stdin JSON 行 → 每请求新蜘蛛实例 → 单行 JSON 信封应答（realOut 专用，见 main 注释）。 */
+  /**
+   * 常驻服务：读 stdin JSON 行 → **提交到线程池并发执行** → 单行 JSON 信封应答（realOut 专用）。
+   *
+   * ★★ 2026-09-23 三轮重做（用户反馈「进源加载慢得要死、搜索更慢」）★★
+   *   旧实现两个致命点：
+   *     ① **串行**：一个 JVM 同时只处理一个请求 → 33 个源要么排队（慢），要么靠多开 JVM 换并行度
+   *        （每个 JVM 冷启动 1~3s + 84MB，且首次搜索要同时冷启 6 个 → 磁盘/CPU/杀软齐打，越搜越慢）；
+   *     ② **每请求 new 实例 + init(ext) + initApi**：绝大数 fty 蜘蛛的 init 会解析/解密 ext、
+   *        建 HTTP 客户端甚至预取站点数据 —— 每次调用都重付一遍，进源/搜索自然慢。
+   *   现在：线程池（24 线程并发，蜘蛛调用绝大多数时间在等网络）+ **实例池复用**
+   *   （同一「类名+ext」最多 2 个实例：init 只做一次，并发调用各取一个；池满则临时实例兜底）。
+   *   对齐安卓 TVBox 的 SpiderManager（那里就是一个站点一个长期存活的实例）。
+   */
   private static void serve(String[] jars, PrintStream realOut) throws Exception {
-    Env env = setupEnv(jars);
-    com.google.gson.Gson gson = new com.google.gson.Gson();
+    final Env env = setupEnv(jars);
+    final com.google.gson.Gson gson = new com.google.gson.Gson();
     BufferedReader in = new BufferedReader(new InputStreamReader(System.in, "UTF-8"));
     String line;
     while ((line = in.readLine()) != null) {
@@ -70,38 +82,158 @@ public class SpiderRunner {
       if (t.isEmpty()) continue;
       if ("quit".equals(t)) break;
       String reqId = "";
-      boolean ok = false;
-      String data = "";
+      String cls = "";
+      String method = "";
+      String[] args = new String[0];
       try {
         com.google.gson.JsonObject req = gson.fromJson(t, com.google.gson.JsonObject.class);
         reqId = req.has("id") ? req.get("id").getAsString() : "";
-        String cls = req.get("className").getAsString();
-        String method = req.get("method").getAsString();
-        // ★ 预热探针（池 warm）：env 已在 serve 入口 setupEnv 完成，无需实例化蜘蛛。
-        //   宿主在启动/配置应用后发一条 __ping__，把 JVM 冷启动成本提前付掉，首次搜索免等 1~3s。
-        if ("__ping__".equals(method)) {
-          ok = true;
-        } else {
-          List<String> argList = new ArrayList<String>();
-          com.google.gson.JsonArray arr = req.has("args") && req.get("args").isJsonArray() ? req.getAsJsonArray("args") : null;
-          if (arr != null) for (int i = 0; i < arr.size(); i++) argList.add(arr.get(i).isJsonNull() ? "" : arr.get(i).getAsString());
-          data = dispatch(env, cls, method, argList.toArray(new String[0]), null);
-          ok = true;
-        }
+        cls = req.get("className").getAsString();
+        method = req.get("method").getAsString();
+        List<String> argList = new ArrayList<String>();
+        com.google.gson.JsonArray arr = req.has("args") && req.get("args").isJsonArray() ? req.getAsJsonArray("args") : null;
+        if (arr != null) for (int i = 0; i < arr.size(); i++) argList.add(arr.get(i).isJsonNull() ? "" : arr.get(i).getAsString());
+        args = argList.toArray(new String[0]);
       } catch (Throwable t0) {
-        Throwable cause = unwrap(t0);
-        data = cause.getClass().getName() + ": " + cause.getMessage();
-        StackTraceElement[] st = cause.getStackTrace();
-        for (int i = 0; i < Math.min(4, st.length); i++) System.err.println("    at " + st[i]);
+        writeEnvelope(realOut, gson, reqId, false, "bad request: " + t0);
+        continue;
       }
-      // ★ 单行信封：LinkedHashMap 保顺序；data 内嵌 \n 由 Gson 转义，物理单行
-      LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();
-      out.put("id", reqId);
-      out.put("ok", ok);
-      out.put("data", data == null ? "" : data);
-      realOut.println(gson.toJson(out));
+      // ★ 预热探针（池 warm）：env 已在 serve 入口 setupEnv 完成，无需实例化蜘蛛。
+      if ("__ping__".equals(method)) {
+        writeEnvelope(realOut, gson, reqId, true, "");
+        continue;
+      }
+      final String fId = reqId;
+      final String fCls = cls;
+      final String fMethod = method;
+      final String[] fArgs = args;
+      WORKERS.submit(new Runnable() {
+        @Override public void run() {
+          boolean ok = false;
+          String data = "";
+          Object sp = null;
+          try {
+            sp = SpiderPool.acquire(env, fCls, fArgs);
+            data = dispatchMethod(sp, fMethod, fArgs);
+            ok = true;
+          } catch (Throwable t0) {
+            Throwable cause = unwrap(t0);
+            data = cause.getClass().getName() + ": " + cause.getMessage();
+            StackTraceElement[] st = cause.getStackTrace();
+            for (int i = 0; i < Math.min(4, st.length); i++) System.err.println("    at " + st[i]);
+          } finally {
+            // 复用实例（异常时丢弃：可能已被打断到不可用状态，下次重建更稳）
+            if (sp != null) SpiderPool.release(fCls, fArgs, sp, !ok);
+          }
+          writeEnvelope(realOut, gson, fId, ok, data);
+        }
+      });
+    }
+    WORKERS.shutdown();
+  }
+
+  /** 并发工作线程池（蜘蛛调用是「等网络」，线程数给足；守护线程不阻塞 JVM 退出） */
+  private static final java.util.concurrent.ExecutorService WORKERS =
+      java.util.concurrent.Executors.newFixedThreadPool(24, new java.util.concurrent.ThreadFactory() {
+        @Override public Thread newThread(Runnable r) {
+          Thread th = new Thread(r, "spider-call");
+          th.setDaemon(true);
+          return th;
+        }
+      });
+
+  /** 单行信封（多线程并发写同一 stdout → 必须同步，避免两行交错成半个 JSON） */
+  private static void writeEnvelope(PrintStream realOut, com.google.gson.Gson gson, String id, boolean ok, String data) {
+    LinkedHashMap<String, Object> out = new LinkedHashMap<String, Object>();
+    out.put("id", id);
+    out.put("ok", ok);
+    out.put("data", data == null ? "" : data);
+    String s = gson.toJson(out);
+    synchronized (realOut) {
+      realOut.println(s);
       realOut.flush();
     }
+  }
+
+  /**
+   * ★ 实例池：键 = 类名 + ext（ext 变 = 网盘 token/配置变了 → 必须换实例）。
+   * 每键最多 MAX 个实例常驻；都被占用时新建「临时实例」（用完即弃，不干扰池内状态）。
+   */
+  private static final class SpiderPool {
+    static final int MAX = 2;
+    static final java.util.concurrent.ConcurrentHashMap<String, Entry> MAP =
+        new java.util.concurrent.ConcurrentHashMap<String, Entry>();
+
+    static final class Entry {
+      final java.util.ArrayDeque<Object> free = new java.util.ArrayDeque<Object>();
+      int made;
+    }
+
+    static String keyOf(String cls, String[] rest) {
+      return cls + '\u0001' + (rest.length > 0 && rest[0] != null ? rest[0] : "");
+    }
+
+    static Object acquire(Env env, String cls, String[] rest) throws Exception {
+      String key = keyOf(cls, rest);
+      Entry e = MAP.get(key);
+      if (e == null) {
+        // 键里含 ext（可能带网盘 token，会随绑定刷新而变化）→ 给池一个上限，防长期运行积累死实例
+        if (MAP.size() > 64) MAP.clear();
+        Entry created = new Entry();
+        Entry prev = MAP.putIfAbsent(key, created);
+        e = prev != null ? prev : created;
+      }
+      synchronized (e) {
+        if (!e.free.isEmpty()) return e.free.pollLast();
+        if (e.made < MAX) {
+          e.made++;
+          return newSpider(env, cls, rest);
+        }
+      }
+      return newSpider(env, cls, rest); // 池内都在忙 → 临时实例（不进池）
+    }
+
+    static void release(String cls, String[] rest, Object sp, boolean broken) {
+      Entry e = MAP.get(keyOf(cls, rest));
+      if (e == null) return;
+      synchronized (e) {
+        if (broken) {
+          e.made = Math.max(0, e.made - 1); // 丢弃并允许下次重建
+          return;
+        }
+        if (e.free.size() < MAX) e.free.addLast(sp);
+      }
+    }
+  }
+
+  /**
+   * 新建蜘蛛实例（类加载 + new + init(Context,ext) + initApi）——**一次性路径与实例池共用**。
+   * 顺序契约：宿主上下文（setupEnv）必须早于本方法。
+   */
+  private static Object newSpider(Env env, String cls, String[] rest) throws Exception {
+    Class<?> c = Class.forName(cls, true, env.cl);
+    Object sp = c.getDeclaredConstructor().newInstance();
+
+    // init(Context, ext)
+    try {
+      c.getMethod("init", android.content.Context.class, String.class)
+          .invoke(sp, env.app, rest.length > 0 ? rest[0] : "");
+    } catch (NoSuchMethodException e) {
+      try { c.getMethod("init", android.content.Context.class).invoke(sp, env.app); }
+      catch (NoSuchMethodException ig) { }
+    }
+
+    // initApi(SpiderApi)
+    try {
+      Class<?> apiCls = Class.forName("com.github.catvod.crawler.SpiderApi", true, env.cl);
+      Object api = apiCls.getDeclaredConstructor().newInstance();
+      c.getMethod("initApi", apiCls).invoke(sp, api);
+    } catch (ClassNotFoundException ig) {
+    } catch (NoSuchMethodException ig) {
+    } catch (Throwable ig) {
+      System.err.println("[SpiderRunner.initApi] " + ig);
+    }
+    return sp;
   }
 
   private static Throwable unwrap(Throwable t) {
@@ -179,33 +311,12 @@ public class SpiderRunner {
   }
 
   /**
-   * 单次请求分发：new 蜘蛛实例 → init → initApi → 调用方法。
+   * 单次请求分发（一次性路径）：new 蜘蛛实例 → init → initApi → 调用方法。
+   * 常驻路径走 SpiderPool（实例复用，见 serve）。
    * @param reason 失败原因容器（一次性路径传 null；serve 的失败由信封承载）
    */
   private static String dispatch(Env env, String cls, String method, String[] rest, StringBuilder reason) throws Exception {
-    Class<?> c = Class.forName(cls, true, env.cl);
-    Object sp = c.getDeclaredConstructor().newInstance();
-
-    // init(Context, ext)
-    try {
-      c.getMethod("init", android.content.Context.class, String.class)
-          .invoke(sp, env.app, rest.length > 0 ? rest[0] : "");
-    } catch (NoSuchMethodException e) {
-      try { c.getMethod("init", android.content.Context.class).invoke(sp, env.app); }
-      catch (NoSuchMethodException ig) { }
-    }
-
-    // initApi(SpiderApi)
-    try {
-      Class<?> apiCls = Class.forName("com.github.catvod.crawler.SpiderApi", true, env.cl);
-      Object api = apiCls.getDeclaredConstructor().newInstance();
-      c.getMethod("initApi", apiCls).invoke(sp, api);
-    } catch (ClassNotFoundException ig) {
-    } catch (NoSuchMethodException ig) {
-    } catch (Throwable ig) {
-      System.err.println("[SpiderRunner.initApi] " + ig);
-    }
-
+    Object sp = newSpider(env, cls, rest);
     String result = dispatchMethod(sp, method, rest);
     return result == null ? "" : result;
   }

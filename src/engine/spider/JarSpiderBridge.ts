@@ -375,7 +375,7 @@ export class JarSpiderBridge {
     if (shimClasses && existsSync(shimJar)) cpParts.unshift(shimJar);
     const cp = cpParts.join(';');
     const serveArgv = [
-      ...this.jvmPrefix(cp),
+      ...this.jvmPrefix(cp, true),
       ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []),
       'SpiderRunner',
       '--serve',
@@ -552,7 +552,7 @@ export class JarSpiderBridge {
     //   ★ 仅**传输层失败**（进程崩溃/超时/写入失败）才回退一次性保底；
     //     蜘蛛合法返回空串（空搜索）不再误判失败去多打一次冷启动。
     if (this.pool) {
-      const serveArgv = [...this.jvmPrefix(cp), ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []), 'SpiderRunner', '--serve', cp];
+      const serveArgv = [...this.jvmPrefix(cp, true), ...(shimClasses ? [`-Dtvbox.shellShimClasses=${shimClasses}`] : []), 'SpiderRunner', '--serve', cp];
       const key = servePoolKey(this.javaExe(), serveArgv);
       const tmo = timeoutMs ?? this.callTimeoutMs;
       try {
@@ -790,7 +790,7 @@ export class JarSpiderBridge {
   }
 
   /** 生成 JVM 子进程的公共前置参数（旗标 + classpath），jar/python 模式共用。 */
-  private jvmPrefix(cp: string): string[] {
+  private jvmPrefix(cp: string, serve = false): string[] {
     // ★ 蜘蛛数据沙箱：与 converted 同级的兄弟目录。
     //   蜘蛛的清理/写临时文件都限制在这里，绝不会碰到 converted 里的转换产物。
     const sandboxDir = join(this.cacheDir, '..', 'sandbox');
@@ -812,7 +812,9 @@ export class JarSpiderBridge {
       //   在低可用内存机器上直接 mmap 失败 → JVM 崩溃（hs_err_pid*.log）、
       //   蜘蛛表现为「空结果」。蜘蛛本身是轻量反射调用（实测单次约 590ms，
       //   常驻内存 <100MB），256m 足够且远离崩溃边界。
-      '-Xmx256m',
+      //   ★ 三轮：常驻 serve 进程现在要**并发承接整轮搜索（24 线程）**，堆给到 384m
+      //   （后出现的 -Xmx 覆盖前者）；一次性路径仍是 256m。
+      serve ? '-Xmx384m' : '-Xmx256m',
       '-XX:+UseSerialGC',
       // ★ 指定蜘蛛数据沙箱（见上方 sandboxDir 说明）：把蜘蛛可见的
       //   getCacheDir/getFilesDir 全部收进这个目录，避免其清理逻辑误伤
