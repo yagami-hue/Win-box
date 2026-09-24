@@ -53,8 +53,11 @@
 :root[data-theme='netflix'] .main { background: #141414; }
 
 /* 标题栏：**并进导航条同一行**（一体化）—— 只保留窗口控制按钮，LOGO 在导航条里 */
-:root[data-theme='netflix'] .nf-nav { -webkit-app-region: drag; }
-:root[data-theme='netflix'] .nf-link { -webkit-app-region: no-drag; }
+/* ★ 2026-09-24：整条顶栏是可拖拽区，且**两套 TopNav 皮肤共用**（netflix + bilibili）。
+   此前只给 netflix 设了 drag → B 站皮肤整条顶栏拖不动（用户实测：主窗口无法拖拽移动）。
+   交互元素必须 no-drag：导航链接、搜索按钮/换源入口（.srcpick）。标题栏自身的按钮区已在组件内联 no-drag。 */
+.nf-nav { -webkit-app-region: drag; }
+.nf-nav .nf-link, .nf-nav .srcpick { -webkit-app-region: no-drag; }
 .nf-nav .titlebar { height: auto; width: auto; flex: none; background: transparent; border: none; padding: 0; justify-content: flex-end; }
 .nf-nav .tb-title { display: none; }
 .nf-nav .tb-controls { gap: 4px; }
@@ -145,22 +148,40 @@
 :root[data-theme='netflix'] ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
 :root[data-theme='netflix'] ::-webkit-scrollbar-track { background: transparent; }
 
-/* ---- 发现页：Hero 大图（全宽、底部渐隐）+ 内容行 ---- */
+/* ---- 发现页：Hero（横版剧照轮播 + 文字处高斯模糊层）+ 内容行 ---- */
 .nf-hero {
-  position: relative; margin: -6px -26px 22px; min-height: 340px;
+  position: relative; margin: -6px -26px 22px; min-height: 380px;
   display: flex; align-items: flex-end; overflow: hidden;
   background: #000;
 }
 .nf-hero-bg {
-  position: absolute; inset: 0; background-size: cover; background-position: center 22%;
+  position: absolute; inset: 0; background-size: cover; background-position: center 28%;
   filter: saturate(1.05);
+  /* ★ 2026-09-24：剧照切换 = 交叉淡入淡出（前一张淡出、后一张淡入同时进行，无中间空帧） */
+  transition: opacity .9s ease;
+  will-change: opacity;
 }
 .nf-hero::after {
   content: ''; position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(90deg, rgba(20, 20, 20, .96) 0%, rgba(20, 20, 20, .72) 45%, rgba(20, 20, 20, .25) 100%),
-    linear-gradient(to top, #141414 0%, rgba(20, 20, 20, .35) 40%, transparent 70%);
+  /* 下方接内容区 + 底部压暗（文字可读性主要由 .nf-hero-body 的模糊层负责，这里只做过渡） */
+  background: linear-gradient(to top, #141414 0%, rgba(20, 20, 20, .55) 24%, rgba(20, 20, 20, .1) 62%, transparent 100%);
 }
-.nf-hero-body { position: relative; z-index: 2; padding: 26px 34px 30px; max-width: 62%; }
+/* ★ 2026-09-24（用户定稿）：**在有字的位置做高斯模糊处理** —— 文字块自身是一层毛玻璃（backdrop-filter） */
+.nf-hero-body {
+  position: relative; z-index: 2; max-width: 62%;
+  margin: 26px 34px 28px; padding: 20px 24px 22px;
+  background: rgba(20, 20, 20, .38);
+  backdrop-filter: blur(18px) saturate(1.25);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 14px;
+  /* 换片时文字块轻微上浮淡入（与背景交叉淡入淡出同节奏） */
+  animation: nfHeroIn .5s cubic-bezier(.22, .61, .36, 1) both;
+}
+@keyframes nfHeroIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
 .nf-hero-kicker { display: inline-flex; align-items: center; gap: 8px; color: var(--nf-red); font-weight: 800; font-size: 12px; letter-spacing: 2px; margin-bottom: 8px; }
 .nf-hero-title { margin: 0 0 10px; font-size: 40px; line-height: 1.06; font-weight: 800; letter-spacing: -.01em; text-shadow: 0 2px 18px rgba(0, 0, 0, .6); }
 .nf-hero-meta { color: #d2d2d2; font-size: 13px; margin-bottom: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -175,6 +196,10 @@
 .nf-row-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 8px 2px 14px; }
 .nf-row-scroll > * { flex: 0 0 var(--nf-card-w); }
 .nf-hero h3, .nf-row-title { letter-spacing: 0; }
+
+/* ★ 2026-09-24：详情页「相关推荐」横条 —— 悬停**只做轻微上浮**（不做 scale），
+   保证一排封面视觉尺寸完全一致（用户反馈「部分封面特别大」）。 */
+:root[data-theme='netflix'] .rec-row > .card-media:hover { transform: translateY(-2px); }
 
 /* ---- 详情页：封面当全宽背景 + 渐变，标题巨大化 ---- */
 :root[data-theme='netflix'] .content.nf-detail-wrap { position: relative; }

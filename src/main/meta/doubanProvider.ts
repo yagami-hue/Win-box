@@ -7,6 +7,7 @@ import { request as undiciRequest, Agent } from 'undici';
 import { createDohAgent } from '../net/DnsResolver';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import type { Logger, MetaHit } from '../../shared/types';
+import type { MetaSuggestion } from '../../shared/meta';
 
 // ★ 2026-09-23：豆瓣是**国内**站点，走系统 DNS 直连更快更稳（DoH 只是为 TMDB 这类被污染域名准备的）；
 //   实测系统 DNS 直连 m.douban.com 可达（400/200 都说明连上了）。
@@ -212,4 +213,38 @@ export async function doubanSearchTitle(logger: Logger, name: string): Promise<M
     }
   }
   return null;
+}
+
+/**
+ * ★ 2026-09-24：搜索面板「自动联想（豆瓣）」——同一 rexxar 端点，只要标题（不校验封面）。
+ * 与 doubanSearchTitle 共用熔断口径；失败/熔断中返回空数组（联想不打扰用户）。
+ */
+export async function doubanSuggest(logger: Logger, name: string, limit = 8): Promise<MetaSuggestion[]> {
+  const term = (name || '').trim();
+  if (!term || doubanBreakerOpen()) return [];
+  const q = encodeURIComponent(term);
+  const out: MetaSuggestion[] = [];
+  const seen = new Set<string>();
+  for (const type of ['movie', 'tv'] as const) {
+    const resp = await getJson(`${SEARCH_API}?q=${q}&type=${type}`, 8000);
+    if (resp.status !== 200) {
+      if (resp.status !== 0 && noteDoubanStatus(resp.status)) {
+        logger.w('meta:豆瓣 联想触发风控熔断，暂停豆瓣兜底');
+      }
+      continue;
+    }
+    noteDoubanStatus(200);
+    try {
+      for (const h of parseDoubanSearch(JSON.parse(resp.text))) {
+        if (!h.title || seen.has(h.title)) continue;
+        seen.add(h.title);
+        out.push({ title: h.title, year: h.year, mediaType: h.type });
+        if (out.length >= limit) break;
+      }
+    } catch {
+      /* json 异常忽略 */
+    }
+    if (out.length >= limit) break;
+  }
+  return out;
 }

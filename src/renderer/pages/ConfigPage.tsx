@@ -9,8 +9,17 @@ import { sourceKindInfo } from '../../engine/config/sourceKind';
 import type { AuditItem, SourceDebugReport } from '../../shared/types';
 import { applyTheme, currentTheme } from '../lib/theme';
 import { THEME_LABELS, type Theme } from '../lib/themeTokens';
+import { DEFAULT_META_SETTINGS, type MetaSettings, type MetaSettingsView, type MetaSource } from '../../shared/meta';
 
 type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'appearance' | 'shortcut';
+
+/** ★ 2026-09-24：元数据来源策略选项（封面与简介共用；「仅 TMDB」需用户先填自己的 API） */
+const META_SOURCE_OPTS: Array<{ v: MetaSource; label: string; hint: string }> = [
+  { v: 'auto', label: '全走（推荐）', hint: 'TMDB → 豆瓣 → 搜索，全自动，命中率最高' },
+  { v: 'tmdb', label: '仅 TMDB', hint: '只用 TMDB（需先填自己的 API Key；无演职员时留空即可）' },
+  { v: 'douban', label: '仅豆瓣', hint: '只用豆瓣（中文片名覆盖好；详情页无演职员/推荐区块）' },
+  { v: 'search', label: '仅搜索', hint: '只用图片搜索兜底封面；简介回落源自带简介' },
+];
 
 interface Draft {
   name: string;
@@ -80,6 +89,33 @@ export default function ConfigPage() {
   useEffect(() => {
     client.subtitleGet().then((s) => { setSubToken(s.assrtToken || ''); setSubTokenSaved(!!s.assrtToken); }).catch(() => undefined);
   }, []);
+
+  // 元数据来源（★ 2026-09-24）：TMDB 自填 Key / API 代理地址 / 图片镜像地址 + 封面与简介策略
+  const [metaView, setMetaView] = useState<MetaSettingsView | null>(null);
+  const [metaDraft, setMetaDraft] = useState<MetaSettings>({ ...DEFAULT_META_SETTINGS });
+  const [metaDirty, setMetaDirty] = useState(false);
+  const [metaMsg, setMetaMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  const metaHasKey = !!metaDraft.tmdbApiKey.trim();
+  useEffect(() => {
+    client
+      .metaGetSettings()
+      .then((s) => {
+        setMetaView(s);
+        setMetaDraft({ tmdbApiKey: s.tmdbApiKey, tmdbApiBase: s.tmdbApiBase, tmdbImageBase: s.tmdbImageBase, metaSource: s.metaSource });
+      })
+      .catch(() => undefined);
+  }, []);
+  const saveMeta = async () => {
+    try {
+      const s = await client.metaSetSettings(metaDraft);
+      setMetaView(s);
+      setMetaDraft({ tmdbApiKey: s.tmdbApiKey, tmdbApiBase: s.tmdbApiBase, tmdbImageBase: s.tmdbImageBase, metaSource: s.metaSource });
+      setMetaDirty(false);
+      setMetaMsg({ text: '✓ 已保存，立即生效。', kind: 'ok' });
+    } catch (e) {
+      setMetaMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
+    }
+  };
 
   // ---- 老板键设置（全局快捷键隐藏/恢复）----
   const [bossKey, setBossKey] = useState<BossKeySettings | null>(null);
@@ -1232,6 +1268,62 @@ export default function ConfigPage() {
         </div>
         <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
           {subTokenSaved ? '✓ 已保存。播放器中点「字幕」即可按当前剧集在线检索。' : '在 assrt.net 免费注册后，会员中心可获取一个 token（无需付费）。填写后即可在线检索中文字幕。'}
+        </div>
+      </div>
+
+      {/* 元数据（TMDB / 豆瓣）：★ 2026-09-24 —— 用户可自填 Key / 代理地址 / 镜像地址，并选择封面与简介的来源策略 */}
+      <div className="card" id="cfg-meta" style={{ padding: 12, marginBottom: 16 }}>
+        <div className="row" style={{ marginBottom: 8 }}>
+          <span className="muted" style={{ fontWeight: 600 }}>元数据（TMDB / 豆瓣 · 封面与简介来源）</span>
+        </div>
+        <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 6 }}>
+          <input
+            type="password"
+            placeholder="TMDB API Key 或 v4 令牌（留空 = 用内置默认）…"
+            value={metaDraft.tmdbApiKey}
+            style={{ flex: 1 }}
+            onChange={(e) => { setMetaDraft({ ...metaDraft, tmdbApiKey: e.target.value }); setMetaDirty(true); }}
+          />
+          <button className="primary" disabled={!metaDirty} onClick={saveMeta}>保存</button>
+        </div>
+        <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 6 }}>
+          <input
+            placeholder="API 代理地址（留空 = api.themoviedb.org/3）…"
+            value={metaDraft.tmdbApiBase}
+            style={{ flex: 1 }}
+            onChange={(e) => { setMetaDraft({ ...metaDraft, tmdbApiBase: e.target.value }); setMetaDirty(true); }}
+          />
+          <input
+            placeholder="图片镜像地址（留空 = image.tmdb.org/t/p/w342）…"
+            value={metaDraft.tmdbImageBase}
+            style={{ flex: 1 }}
+            onChange={(e) => { setMetaDraft({ ...metaDraft, tmdbImageBase: e.target.value }); setMetaDirty(true); }}
+          />
+        </div>
+        <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+          <span className="muted" style={{ fontSize: 11 }}>来源策略：</span>
+          {META_SOURCE_OPTS.map((o) => (
+            <span
+              key={o.v}
+              className={`tag ${metaDraft.metaSource === o.v ? 'active' : ''} ${o.v === 'tmdb' && !metaHasKey ? 'disabled' : ''}`}
+              onClick={() => {
+                if (o.v === 'tmdb' && !metaHasKey) return; // 未填用户 API 时「仅 TMDB」不可选
+                setMetaDraft({ ...metaDraft, metaSource: o.v as MetaSource });
+                setMetaDirty(true);
+              }}
+              title={o.hint}
+            >
+              {o.label}{metaDraft.metaSource === o.v ? ' ✓' : ''}
+            </span>
+          ))}
+        </div>
+        <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+          {metaMsg?.text}
+          {metaHasKey
+            ? ' 已使用你填写的 TMDB API。'
+            : metaView?.hasBuiltin
+              ? ' 未填写时自动使用内置默认 API（界面不展示）。'
+              : ' 未检测到内置默认凭据；填写你自己的 API 即可启用。'}
         </div>
       </div>
 

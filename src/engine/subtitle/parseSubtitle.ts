@@ -86,19 +86,36 @@ export function parseAss(text: string): SubtitleCue[] {
   return out;
 }
 
-/** 按扩展名分派解析；未知格式返回空。 */
+/** 按内容特征嗅探格式（ASS → WebVTT → SRT 兜底）；单次解析 0 cue 时继续尝试下一种 */
+function parseBySniff(text: string): SubtitleCue[] {
+  const head = text.slice(0, 3000);
+  if (/\[Script Info\]|(^|\r?\n)\s*Dialogue:/i.test(head)) {
+    const c = parseAss(text);
+    if (c.length) return c;
+  }
+  if (/WEBVTT/i.test(text.slice(0, 200))) {
+    const c = parseVtt(text);
+    if (c.length) return c;
+  }
+  return parseSrt(text);
+}
+
+/**
+ * 按扩展名分派解析；未知/不符时按内容嗅探。
+ * ★ 2026-09-24：**扩展名不再独占信任** —— assrt 常见「.srt 里其实是 ASS 文本」、
+ *   以及历史调用方误传视频文件名（xxx.mkv）的情况；只要按扩展名解析出 0 cue，
+ *   就按内容特征二次尝试，避免「明明有字幕却 0 cue → 挂不上」。
+ */
 export function parseSubtitleFile(
   fileName: string,
   text: string,
 ): SubtitleCue[] {
   const ext = (fileName.split('.').pop() || '').toLowerCase();
-  if (ext === 'srt') return parseSrt(text);
-  if (ext === 'vtt') return parseVtt(text);
-  if (ext === 'ass' || ext === 'ssa') return parseAss(text);
-  // 无扩展名：尝试自动识别
-  if (/_?ass\b|Dialogue:/i.test(text.slice(0, 500))) return parseAss(text);
-  if (/WEBVTT/i.test(text.slice(0, 50))) return parseVtt(text);
-  return parseSrt(text);
+  if (ext === 'srt' || ext === 'vtt' || ext === 'ass' || ext === 'ssa') {
+    const byExt = ext === 'srt' ? parseSrt(text) : ext === 'vtt' ? parseVtt(text) : parseAss(text);
+    if (byExt.length) return byExt;
+  }
+  return parseBySniff(text);
 }
 
 /** 字幕总体时间偏移（±秒，用于用户手动校准）。 */

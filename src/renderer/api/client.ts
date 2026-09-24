@@ -20,9 +20,10 @@ import type {
   FilterGroup,
   BossKeySettings,
 } from '../../shared/types';
-import type { SubtitleCandidate, SubtitleSettings } from '../../shared/subtitle';
+import type { SubtitleCandidate, SubtitleFetchResult, SubtitleSettings } from '../../shared/subtitle';
 import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
-import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage } from '../../shared/types';
+import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../../shared/types';
+import type { MetaSettings, MetaSettingsView, MetaSuggestion } from '../../shared/meta';
 
 interface HomeResult {
   sortClasses: { id: string; name: string; flag?: string; filters?: FilterGroup[] }[];
@@ -90,7 +91,7 @@ declare global {
         get: () => Promise<IpcResult<SubtitleSettings>>;
         set: (patch: Partial<SubtitleSettings>) => Promise<IpcResult<SubtitleSettings>>;
         search: (name: string) => Promise<IpcResult<SubtitleCandidate[]>>;
-        fetch: (cand: SubtitleCandidate) => Promise<IpcResult<string>>;
+        fetch: (cand: SubtitleCandidate) => Promise<IpcResult<SubtitleFetchResult>>;
       };
       danmaku: {
         get: () => Promise<IpcResult<DanmakuSettingsView>>;
@@ -108,6 +109,12 @@ declare global {
         /** ★ 发现页「分类」：类型清单与按类型翻页 */
         genres: () => Promise<IpcResult<{ movie: DiscoverGenre[]; tv: DiscoverGenre[] }>>;
         genrePage: (mediaType: 'movie' | 'tv', genreId: number, page: number) => Promise<IpcResult<DiscoverGenrePage>>;
+        /** ★ 2026-09-24 元数据来源配置（TMDB Key/代理/镜像 + 策略）与搜索联想 */
+        getSettings: () => Promise<IpcResult<MetaSettingsView>>;
+        setSettings: (patch: Partial<MetaSettings>) => Promise<IpcResult<MetaSettingsView>>;
+        suggest: (q: string) => Promise<IpcResult<MetaSuggestion[]>>;
+        /** ★ 发现页 Hero 轮播：某部片的横版剧照 / 竖版海报 */
+        images: (mediaType: 'movie' | 'tv', tmdbId: number) => Promise<IpcResult<MetaImages>>;
       };
       drives: {
         get: () => Promise<IpcResult<Record<string, string>>>;
@@ -233,7 +240,9 @@ export const client = {
   subtitleGet: () => unwrap(window.api.subtitle.get()),
   subtitleSet: (patch: Partial<SubtitleSettings>) => unwrap(window.api.subtitle.set(patch)),
   subtitleSearch: (name: string) => unwrap(window.api.subtitle.search(name)),
-  subtitleFetch: (cand: SubtitleCandidate) => unwrap(window.api.subtitle.fetch(cand)),
+  /** ★ 2026-09-24：返回 { text, fileName, format, entries, reason } —— 用真实字幕文件名判定格式 */
+  subtitleFetch: (cand: SubtitleCandidate) =>
+    unwrap(window.api.subtitle.fetch(cand)) as Promise<SubtitleFetchResult>,
   danmakuGet: () => unwrap(window.api.danmaku.get()),
   danmakuSet: (patch: Partial<DanmakuSettings>) => unwrap(window.api.danmaku.set(patch)),
   danmakuSearch: (name: string) => unwrap(window.api.danmaku.search(name)),
@@ -249,6 +258,13 @@ export const client = {
   metaGenres: () => unwrap(window.api.meta.genres()),
   /** ★ 发现页「分类」：按类型取一页 */
   metaGenrePage: (mediaType: 'movie' | 'tv', genreId: number, page: number) => unwrap(window.api.meta.genrePage(mediaType, genreId, page)),
+  /** ★ 2026-09-24：元数据来源配置（读取返回能力布尔 + 用户自填值，**绝不含内置密文**） */
+  metaGetSettings: () => unwrap(window.api.meta.getSettings()),
+  metaSetSettings: (patch: Partial<MetaSettings>) => unwrap(window.api.meta.setSettings(patch)),
+  /** ★ 搜索面板联想（TMDB / 豆瓣，随来源策略） */
+  metaSuggest: (q: string) => unwrap(window.api.meta.suggest(q)),
+  /** ★ 发现页 Hero 轮播：横版剧照（≤6）/ 竖版海报（≤8），已包装 /img 中继 */
+  metaImages: (mediaType: 'movie' | 'tv', tmdbId: number) => unwrap(window.api.meta.images(mediaType, tmdbId)),
   netSpeed: (cb: (kbs: number) => void) => window.api.net.onSpeed(cb),
 };
 

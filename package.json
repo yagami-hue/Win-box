@@ -1,6 +1,6 @@
 {
   "name": "win-box",
-  "version": "0.95.0",
+  "version": "0.96.0",
   "private": true,
   "description": "Win-Box (CatVod 引擎) 的 Windows 桌面移植版 — 导入源规则与安卓版保持一致",
   "type": "module",
@@ -36,12 +36,14 @@
     "wait-on": "^8.0.5"
   },
   "dependencies": {
+    "7z-wasm": "1.2.0",
     "cheerio": "^1.2.0",
     "crypto-js": "^4.2.0",
     "fast-xml-parser": "^4.5.7",
     "hls.js": "^1.7.2",
     "iconv-lite": "^0.6.3",
     "mpegts.js": "^1.8.2",
+    "node-unrar-js": "2.0.2",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -52,7 +54,7 @@
     "appId": "com.winbox.win",
     "productName": "Win-Box",
     "directories": {
-      "output": "release95"
+      "output": "release96"
     },
     "files": [
       "dist/**",

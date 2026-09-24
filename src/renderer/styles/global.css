@@ -136,6 +136,66 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 /* 顶栏里的说明文字可被压缩并省略号截断（给右侧按钮让位） */
 .topbar > .muted { min-width: 0; }
 .content { flex: 1; overflow: auto; padding: 18px; scrollbar-gutter: stable; }
+
+/* ---- ★ 2026-09-24（用户定稿）：页面切换过渡动画（苹果 / Netflix 式的轻微淡入 + 上移） ----
+   做法：App 里给路由容器加 key=pathname → 切页时容器重建 → 触发一次入场动画。
+   注意：动画结束后 transform 回到 none（不构成 fixed 定位的包含块），页面内弹窗仍按视口定位。 */
+.page-anim {
+  flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; min-height: 0;
+  animation: pageIn .3s cubic-bezier(.22, .61, .36, 1) both;
+}
+@keyframes pageIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page-anim { animation: none; }
+}
+
+/* ---- ★ 2026-09-24：换源（手机 TVBox 式：源名纯文字，长按/右键弹列表）与顶栏搜索面板 ---- */
+.srcpick { position: relative; flex: 0 0 auto; }
+.srcpick-name {
+  display: inline-flex; align-items: center; gap: 6px; cursor: default; user-select: none;
+  padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-elev);
+  color: var(--text); font-size: 12px; white-space: nowrap; max-width: 220px;
+}
+.srcpick-name:hover { border-color: var(--accent); }
+.srcpick-name.disabled { opacity: .5; }
+.srcpick-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srcpick-caret { color: var(--text-dim); font-size: 10px; }
+.srcpick-side { margin: 6px 8px 10px; }
+.srcpick-side .srcpick-name { border-radius: var(--radius-sm); max-width: none; width: 100%; justify-content: space-between; }
+.srcpick-label { color: var(--text-dim); font-size: 11px; }
+.srcpick-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 60; min-width: 200px; max-width: 320px;
+  max-height: 340px; overflow: auto; padding: 6px;
+  background: var(--bg-glass, rgba(18,20,26,.94)); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.5); backdrop-filter: blur(8px);
+}
+.srcpick-pop-tip { color: var(--text-dim); font-size: 10px; padding: 4px 8px 6px; border-bottom: 1px solid var(--border-soft); margin-bottom: 4px; }
+.srcpick-item { padding: 7px 10px; border-radius: 6px; font-size: 13px; cursor: default; }
+.srcpick-item:hover { background: var(--accent-soft, rgba(120,170,255,.12)); }
+.srcpick-item.active { color: var(--accent); font-weight: 650; }
+/* 顶栏搜索按钮与面板 */
+.sp-btn { cursor: default; }
+.sp-panel {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 70; width: 340px; padding: 10px;
+  background: var(--bg-glass, rgba(18,20,26,.94)); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.5); backdrop-filter: blur(8px);
+}
+.sp-row { display: flex; gap: 8px; }
+.sp-input { flex: 1; min-width: 0; }
+.sp-list { margin-top: 8px; max-height: 300px; overflow: auto; }
+.sp-item { display: flex; justify-content: space-between; gap: 10px; padding: 7px 8px; border-radius: 6px; font-size: 13px; cursor: default; }
+.sp-item:hover { background: var(--accent-soft, rgba(120,170,255,.12)); }
+.sp-meta { font-size: 11px; flex: 0 0 auto; }
+.sp-hot-tip { font-size: 11px; margin: 2px 0 6px; }
+.sp-hot { display: flex; flex-wrap: wrap; gap: 6px; }
+.sp-hot-item {
+  font-size: 12px; padding: 4px 10px; border-radius: 999px; cursor: default;
+  background: var(--bg-elev); border: 1px solid var(--border);
+}
+.sp-hot-item:hover { border-color: var(--accent); color: var(--accent); }
 h2, h3, h4 { font-weight: 650; letter-spacing: .2px; }
 h3 { font-size: 18px; } h4 { font-size: 14px; color: var(--text); }
 
@@ -176,6 +236,13 @@ h3 { font-size: 18px; } h4 { font-size: 14px; color: var(--text); }
 .card-media .meta { padding: 7px 9px; }
 .card-media .name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-media .remarks { font-size: 11px; color: var(--accent-2); opacity: .9; }
+
+/* ---- ★ 2026-09-24：相关推荐横条（详情页）—— 封面尺寸强约束统一（此前个别图会被撑大） ---- */
+.rec-row { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 6px; align-items: flex-start; }
+.rec-row > .card-media { flex: 0 0 132px; width: 132px; max-width: 132px; }
+.rec-row > .card-media img { width: 132px; height: 198px; aspect-ratio: 2 / 3; object-fit: cover; }
+.rec-row > .card-media .no-cover { width: 132px; height: 198px; aspect-ratio: 2 / 3; }
+.rec-row > .card-media .name { max-width: 132px; }
 
 /* 历史卡 hover 操作层：默认隐藏，悬停卡片淡入（右下角，覆盖在 meta 之上不重排布局） */
 .card-media { overflow: visible; }

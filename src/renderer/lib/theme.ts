@@ -1,10 +1,10 @@
 // src/renderer/lib/theme.ts
-// 主题：三套 —— `dark`（经典深色，默认）/ `light`（经典亮色）/ `netflix`（Netflix 风格深色皮肤）。
-// 选择持久化到 localStorage，并同步到 `<html data-theme>`，驱动 global.css + netflix.css 的 CSS 变量。
+// 主题：四套 —— `netflix`（Netflix 风格，**默认**）/ `dark`（经典深色）/ `light`（经典亮色）/ `bilibili`（哔哩哔哩）。
+// 选择持久化到 localStorage，并同步到 `<html data-theme>`，驱动 global.css + netflix.css/bilibili.css 的 CSS 变量。
 // 同时通过 IPC 通知主进程设置 nativeTheme.themeSource（netflix 按深色处理），让窗口底色对齐。
 import { useEffect, useState } from 'react';
 import { client } from '../api/client';
-import { normalizeTheme, type Theme } from './themeTokens';
+import { DEFAULT_THEME, normalizeTheme, type Theme } from './themeTokens';
 
 export type { Theme };
 const KEY = 'winbox-theme';
@@ -41,7 +41,7 @@ export function applyTheme(t: Theme) {
 
 /** 初始化：读持久化偏好并应用（在 React 挂载前调用，避免白屏闪烁）。 */
 export function initTheme(): Theme {
-  let t: Theme = 'dark';
+  let t: Theme = DEFAULT_THEME;
   try {
     t = normalizeTheme(localStorage.getItem(KEY));
   } catch {

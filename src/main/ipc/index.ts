@@ -17,6 +17,7 @@ import { bossKey, BOSS_DEFAULT_ACCEL } from '../bossKey';
 import { ok } from '../../shared/ipc-result';
 import type { IpcMainInvokeEvent } from 'electron';
 import type { BossKeySettings, SourceBean, SourceMoveDirection, SourceUpdatePatch } from '../../shared/types';
+import type { MetaSettings } from '../../shared/meta';
 
 function winOf(e: IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(e.sender);
@@ -120,6 +121,13 @@ export function registerIpc(host: SpiderHost): void {
   // ★ 2026-09-24：发现页「分类」（TMDB 类型清单 + 按类型翻页）
   registerHandler(IPC.META_GENRES, () => host.metaGenres(), log);
   registerHandler(IPC.META_GENRE_PAGE, (_e: any, mediaType: string, genreId: number, page: number) => host.metaGenrePage(String(mediaType || 'movie'), Number(genreId) || 0, Number(page) || 1), log);
+  // ★ 2026-09-24：元数据来源配置（TMDB Key/代理/镜像 + 策略）与搜索面板联想
+  registerHandler(IPC.META_GET_SETTINGS, () => host.metaGetSettings(), log);
+  registerHandler(IPC.META_SET_SETTINGS, (_e: any, patch: unknown) => host.metaSetSettings((patch || {}) as Partial<MetaSettings>), log);
+  registerHandler(IPC.META_SUGGEST, (_e: any, q: string) => host.metaSuggest(String(q || '')), log);
+  // ★ 发现页 Hero 轮播：取某部片的横版剧照/竖版海报（TMDB images）
+  registerHandler(IPC.META_IMAGES, (_e: any, mediaType: string, tmdbId: number) =>
+    host.metaImages(String(mediaType || 'movie') === 'tv' ? 'tv' : 'movie', Number(tmdbId) || 0), log);
   registerHandler(IPC.CFG_MERGE_EXPORT, (_e: any, ids: string[]) => host.mergeProfilesExport(ids), log);
   registerHandler(IPC.CFG_EXPORT_SAVE, async (_e: any, a: { content: string; defaultName?: string }) => {
     const w = winOf(_e as IpcMainInvokeEvent);

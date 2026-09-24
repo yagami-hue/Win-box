@@ -9,13 +9,77 @@ import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import type { Logger } from '../../shared/types';
 import type { MetaHit, MetaExtra, DiscoverItem, DiscoverSection, DiscoverGenre, DiscoverGenrePage } from '../../shared/types';
 import type { MetaStore } from './MetaStore';
+import type { MetaSuggestion } from '../../shared/meta';
+import type { MetaImages } from '../../shared/types';
 
 const agent = createDohAgent();
-const TMDB_API = 'https://api.themoviedb.org/3';
-/** 原始 TMDB 图床 URL 前缀（w342：列表卡片量级，体积/清晰度均衡） */
-const POSTER_BASE = 'https://image.tmdb.org/t/p/w342';
+/** 内置默认 API 地址（用户可在配置页填「API 代理地址」覆盖） */
+const DEFAULT_API = 'https://api.themoviedb.org/3';
+/** 内置默认图床前缀（w342：列表卡片量级，体积/清晰度均衡；用户可填「图片镜像地址」覆盖） */
+const DEFAULT_IMAGE_BASE = 'https://image.tmdb.org/t/p/w342';
 /** 渲染层经本地中继出图（主进程 DoH 可达、渲染层直连 image.tmdb.org 可能被 DNS 污染 → 图裂） */
 const IMG_PROXY = `${LOCAL_PROXY_BASE}/img`;
+
+/**
+ * ★ 2026-09-24：运行时可配置（宿主按用户设置注入）——
+ *   userKey  ：用户自填 API Key（v3）或 v4 读访问令牌；空 = 用内置加密凭据
+ *   apiBase  ：API 代理地址；空 = 内置默认
+ *   imageBase：图片镜像地址；空 = 内置默认
+ * 未注入时行为与历史完全一致（内置凭据 + 官方地址），单测无需设置。
+ */
+export interface TmdbRuntimeConfig {
+  userKey: string;
+  apiBase: string;
+  imageBase: string;
+}
+let rt: TmdbRuntimeConfig = { userKey: '', apiBase: '', imageBase: '' };
+export function setTmdbRuntime(next: Partial<TmdbRuntimeConfig>): void {
+  rt = { ...rt, ...next };
+}
+
+const trimSlash = (s: string): string => (s || '').trim().replace(/\/+$/, '');
+/** 生效的 API 地址 */
+export function tmdbApiBase(): string {
+  return trimSlash(rt.apiBase) || DEFAULT_API;
+}
+/** 生效的图床前缀 */
+export function tmdbImageBase(): string {
+  return trimSlash(rt.imageBase) || DEFAULT_IMAGE_BASE;
+}
+/**
+ * 图床**根**（去掉尾部尺寸段）—— 用于需要换尺寸的场景（如 Hero 剧照用 w1280）。
+ * ★ 2026-09-24 修复：`tmdbImageBase()` 默认已含 `/w342`，直接拼 `/w1280` 会得到
+ *   `…/t/p/w342/w1280/x.jpg`（404）。这里剥掉尾部 `/w数字` 或 `/original` 再拼目标尺寸。
+ */
+export function tmdbImageBaseRoot(): string {
+  return tmdbImageBase().replace(/\/(?:w\d+|h\d+|original)$/i, '');
+}
+/** 用户是否已填自己的 TMDB 凭据（「仅 TMDB」策略以此为准） */
+export function hasUserTmdbKey(): boolean {
+  return !!rt.userKey.trim();
+}
+
+/** 生效凭据：用户填的优先（eyJ 前缀按 v4 令牌走 Bearer，否则按 v3 Key 走查询参数）；否则内置密文解密 */
+export interface TmdbCred {
+  bearer: string;
+  apiKey: string;
+  viaUser: boolean;
+}
+export function tmdbCreds(): TmdbCred | null {
+  const k = (rt.userKey || '').trim();
+  if (k) {
+    return k.startsWith('eyJ') ? { bearer: k, apiKey: '', viaUser: true } : { bearer: '', apiKey: k, viaUser: true };
+  }
+  const b = getTmdbCredentials();
+  return b ? { bearer: b.accessToken, apiKey: b.apiKey, viaUser: false } : null;
+}
+
+/** 把鉴权拼到请求上：v4 令牌走 Authorization 头，v3 Key 走 api_key 查询参数 */
+function authFor(url: string, cred: TmdbCred): { url: string; bearer: string } {
+  if (cred.bearer) return { url, bearer: cred.bearer };
+  if (!cred.apiKey) return { url, bearer: '' };
+  return { url: url + (url.includes('?') ? '&' : '?') + 'api_key=' + encodeURIComponent(cred.apiKey), bearer: '' };
+}
 
 /** 内存 LRU（防重复打 API；disk 缓存由 MetaStore 承担） */
 const MAX_MEM = 1000;
@@ -31,7 +95,7 @@ function usable(h: Pick<MetaHit, 'poster' | 'overview'>): boolean {
  * json 形如 { results: [ { title|name, release_date|first_air_date, poster_path, overview } ] }。
  * poster_path 为空/不存在的条目跳过（该条目无封面可用）。
  */
-export function parseTmdbSearch(json: unknown, type: 'movie' | 'tv'): MetaHit[] {
+export function parseTmdbSearch(json: unknown, type: 'movie' | 'tv', imageBase: string = DEFAULT_IMAGE_BASE): MetaHit[] {
   const j = json as { results?: unknown[] } | null;
   if (!j || !Array.isArray(j.results)) return [];
   const out: MetaHit[] = [];
@@ -47,7 +111,7 @@ export function parseTmdbSearch(json: unknown, type: 'movie' | 'tv'): MetaHit[] 
     const hit: MetaHit = {
       title,
       year: year as number | '',
-      poster: posterPath ? `${POSTER_BASE}${posterPath}` : '',
+      poster: posterPath ? `${imageBase.replace(/\/+$/, '')}${posterPath}` : '',
       overview,
       type,
       // ★ 2026-09-24：带出 TMDB id —— 详情页「演职员/相关推荐」用它再查一次详情
@@ -180,7 +244,12 @@ async function getJson(url: string, bearer: string, headersTimeoutMs: number): P
   try {
     const r = await undiciRequest(url, {
       method: 'GET',
-      headers: { accept: 'application/json', 'User-Agent': 'Win-Box/0.72', Authorization: `Bearer ${bearer}` },
+      headers: {
+        accept: 'application/json',
+        'User-Agent': 'Win-Box/0.72',
+        // v3 Key 场景不带 Authorization（鉴权已在 URL 的 api_key 参数上）
+        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+      },
       headersTimeout: headersTimeoutMs,
       bodyTimeout: headersTimeoutMs,
       dispatcher: agent,
@@ -201,8 +270,25 @@ async function getJson(url: string, bearer: string, headersTimeoutMs: number): P
  * ★ 2026-09-18：此前未校验，把「URL 拿到了但图实际打不开」的封面也当成功
  *   （渲染层直连 image.tmdb.org 被 DNS 污染 → 图裂且被误缓存）。坏图不命中、不缓存。
  */
+/** 图床主机白名单：生效的镜像主机（用户可填）+ 官方 image.tmdb.org */
+function posterHostAllowed(url: string): boolean {
+  try {
+    const host = new URL(url).host.toLowerCase();
+    let allowed = 'image.tmdb.org';
+    try {
+      allowed = new URL(tmdbImageBase()).host.toLowerCase();
+    } catch {
+      /* 用户填的地址不合法 → 只认官方 */
+    }
+    return host === allowed || host === 'image.tmdb.org';
+  } catch {
+    return false;
+  }
+}
+
 async function verifyPoster(url: string): Promise<boolean> {
-  if (!/^https:\/\/image\.tmdb\.org\//i.test(url)) return false;
+  // ★ 2026-09-24：图床白名单改为「生效的图床主机」（含用户填的镜像地址）+ 官方 tmdb 主机
+  if (!posterHostAllowed(url)) return false;
   try {
     const r = await undiciRequest(url, {
       method: 'GET',
@@ -250,7 +336,7 @@ export async function tmdbSearchTitle(
   year?: string,
   opts?: { forceFresh?: boolean },
 ): Promise<MetaHit | null> {
-  const cred = getTmdbCredentials();
+  const cred = tmdbCreds();
   const variants = metaQueryVariants(name || '').slice(0, MAX_QUERY_VARIANTS);
   if (!cred || variants.length === 0) return null;
   const primaryKey = metaCacheKey(variants[0], year);
@@ -293,9 +379,12 @@ export async function tmdbSearchTitle(
   const verifiedAt = Date.now();
   for (const round of plan) {
     const q = encodeURIComponent(round.q);
-    const movieUrl = `${TMDB_API}/search/movie?query=${q}&language=zh-CN${round.y ? `&year=${round.y}` : ''}&include_adult=false`;
-    const tvUrl = `${TMDB_API}/search/tv?query=${q}&language=zh-CN${round.y ? `&first_air_date_year=${round.y}` : ''}&include_adult=false`;
-    const [mv, tv] = await Promise.all([getJson(movieUrl, cred.accessToken, 12000), getJson(tvUrl, cred.accessToken, 12000)]);
+    const api = tmdbApiBase();
+    const movieUrl = `${api}/search/movie?query=${q}&language=zh-CN${round.y ? `&year=${round.y}` : ''}&include_adult=false`;
+    const tvUrl = `${api}/search/tv?query=${q}&language=zh-CN${round.y ? `&first_air_date_year=${round.y}` : ''}&include_adult=false`;
+    const am = authFor(movieUrl, cred);
+    const at = authFor(tvUrl, cred);
+    const [mv, tv] = await Promise.all([getJson(am.url, am.bearer, 12000), getJson(at.url, at.bearer, 12000)]);
 
     // ★ 2026-09-19 修复：HTTP 非 200 的「服务端错误」（401/403/429/5xx/网络失败）**不写 miss 缓存**。
     //   此前一律当"查询无结果"缓存 1 天 → 限流/凭据抖动会让整批资源封面白等一天（"大部分资源缺封面"的常见根因）。
@@ -305,7 +394,7 @@ export async function tmdbSearchTitle(
       if (resp.status === 200) {
         try {
           const kind = resp === mv ? 'movie' : 'tv';
-          candidates.push(...parseTmdbSearch(JSON.parse(resp.text), kind as 'movie' | 'tv'));
+          candidates.push(...parseTmdbSearch(JSON.parse(resp.text), kind as 'movie' | 'tv', tmdbImageBase()));
         } catch { /* json 异常忽略 */ }
       } else if (resp.status === 404) {
         // 404 视为真无结果（罕见），按 miss 缓存
@@ -440,7 +529,7 @@ export async function tmdbExtras(
 ): Promise<MetaExtra | null> {
   const n = (name || '').trim();
   if (!n) return null;
-  const cred = getTmdbCredentials();
+  const cred = tmdbCreds();
   if (!cred) return null;
   try {
     let hit = await tmdbSearchTitle(store, logger, n, year);
@@ -450,8 +539,9 @@ export async function tmdbExtras(
     const key = `${mediaType}:${hit.tmdbId}`;
     const c = extrasCache.get(key);
     if (c && Date.now() - c.t < EXTRAS_TTL_MS) return c.data;
-    const url = `${TMDB_API}/${mediaType}/${hit.tmdbId}?language=zh-CN&append_to_response=credits,recommendations`;
-    const resp = await getJson(url, cred.accessToken, 12000);
+    const detailUrl = `${tmdbApiBase()}/${mediaType}/${hit.tmdbId}?language=zh-CN&append_to_response=credits,recommendations`;
+    const ad = authFor(detailUrl, cred);
+    const resp = await getJson(ad.url, ad.bearer, 12000);
     if (resp.status !== 200) {
       logger.w(`meta:TMDB 详情(${key}) 失败 status=${resp.status} ${resp.text.slice(0, 120)}`);
       return null;
@@ -462,7 +552,7 @@ export async function tmdbExtras(
       genres: raw.genres,
       recommendations: raw.recommendations
         .slice(0, MAX_RECS)
-        .map((r) => ({ ...r, poster: `${IMG_PROXY}?u=${encodeURIComponent(`${POSTER_BASE}${r.posterPath}`)}` }))
+        .map((r) => ({ ...r, poster: `${IMG_PROXY}?u=${encodeURIComponent(`${tmdbImageBase()}${r.posterPath}`)}` }))
         .map(({ posterPath: _p, ...rest }) => rest),
       directors: raw.directors.slice(0, 4),
     };
@@ -471,6 +561,77 @@ export async function tmdbExtras(
   } catch (e) {
     logger.w(`meta:TMDB 详情查询异常: ${(e as Error).message}`);
     return null;
+  }
+}
+
+/**
+ * ★ 2026-09-24：发现页 Hero「横版剧照轮播」用的图片集。
+ *   - backdrops：`/movie|tv/{id}/images` 的横版剧照（w1280），按 vote_average 降序取前 N；
+ *   - posters：同接口的竖版海报（w342），备用；
+ *   - 全部包装为本地 /img 中继（渲染层直连图床可能被 DNS 污染 → 图裂）。
+ * 纯解析函数（可单测）：过滤无 file_path / 过窄（backdrop < 1280）的条目并排序。
+ */
+export function parseTmdbImages(json: unknown): { backdrops: string[]; posters: string[] } {
+  const j = json as { backdrops?: unknown[]; posters?: unknown[] } | null;
+  const pick = (arr: unknown, minWidth: number, max: number): string[] => {
+    if (!Array.isArray(arr)) return [];
+    const rows = (arr as Record<string, unknown>[])
+      .map((r) => ({
+        path: typeof r?.file_path === 'string' ? r.file_path : '',
+        width: Number(r?.width) || 0,
+        vote: Number(r?.vote_average) || 0,
+        /** 中文优先：有中文图时排前面（Hero 上的画面更贴合中文片名） */
+        zh: r?.iso_639_1 === 'zh' ? 1 : 0,
+      }))
+      .filter((r) => r.path && r.width >= minWidth);
+    rows.sort((a, b) => b.zh - a.zh || b.vote - a.vote || b.width - a.width);
+    return rows.slice(0, max).map((r) => r.path);
+  };
+  return {
+    backdrops: pick(j?.backdrops, 1280, MAX_HERO_BACKDROPS),
+    posters: pick(j?.posters, 0, MAX_HERO_POSTERS),
+  };
+}
+
+const MAX_HERO_BACKDROPS = 6;
+const MAX_HERO_POSTERS = 8;
+const IMAGES_TTL_MS = 24 * 3600 * 1000;
+const imagesCache = new Map<string, { t: number; data: MetaImages }>();
+
+/** 取某部片的剧照/海报（发现页 Hero 轮播用）；失败返回空数组，绝不抛错 */
+export async function tmdbImages(
+  logger: Logger,
+  mediaType: 'movie' | 'tv',
+  tmdbId: number,
+): Promise<MetaImages> {
+  const empty: MetaImages = { backdrops: [], posters: [] };
+  const cred = tmdbCreds();
+  const id = Number(tmdbId);
+  if (!cred || !Number.isFinite(id) || id <= 0) return empty;
+  const key = `${mediaType}:${id}`;
+  const c = imagesCache.get(key);
+  if (c && Date.now() - c.t < IMAGES_TTL_MS) return c.data;
+  try {
+    const url = `${tmdbApiBase()}/${mediaType}/${id}/images?include_image_language=zh,en,null`;
+    const au = authFor(url, cred);
+    const resp = await getJson(au.url, au.bearer, 12000);
+    if (resp.status !== 200) {
+      logger.w(`meta:剧照(${key}) 失败 status=${resp.status} ${resp.text.slice(0, 120)}`);
+      return empty;
+    }
+    const raw = parseTmdbImages(JSON.parse(resp.text));
+    // ★ 用「图床根」拼目标尺寸：基址默认已含 /w342，必须剥掉再拼（否则 /w342/w1280/… 404）
+    const root = tmdbImageBaseRoot();
+    const wrap = (size: string, p: string): string => `${IMG_PROXY}?u=${encodeURIComponent(`${root}${size}${p}`)}`;
+    const data: MetaImages = {
+      backdrops: raw.backdrops.map((p) => wrap('/w1280', p)),
+      posters: raw.posters.map((p) => wrap('/w342', p)),
+    };
+    if (data.backdrops.length || data.posters.length) imagesCache.set(key, { t: Date.now(), data });
+    return data;
+  } catch (e) {
+    logger.w(`meta:剧照查询异常: ${(e as Error).message}`);
+    return empty;
   }
 }
 
@@ -506,7 +667,7 @@ export function toDiscoverItems(json: unknown, mediaType: 'movie' | 'tv'): Disco
  * - 结果内存缓存 6h；`refresh=true` 绕过缓存重拉；并发调用共享同一 in-flight promise。
  */
 export async function tmdbDiscover(logger: Logger, refresh = false): Promise<DiscoverSection[]> {
-  const cred = getTmdbCredentials();
+  const cred = tmdbCreds();
   if (!cred) return [];
   if (!refresh && discoverCache && Date.now() - discoverCache.t < DISCOVER_TTL_MS) return discoverCache.data;
   if (discoverInflight) return discoverInflight;
@@ -514,7 +675,8 @@ export async function tmdbDiscover(logger: Logger, refresh = false): Promise<Dis
     const parts = await Promise.all(
       DISCOVER_SECTIONS.map(async (s) => {
         try {
-          const resp = await getJson(`${TMDB_API}${s.path}?language=zh-CN&page=1`, cred.accessToken, 12000);
+          const u = authFor(`${tmdbApiBase()}${s.path}?language=zh-CN&page=1`, cred);
+          const resp = await getJson(u.url, u.bearer, 12000);
           if (resp.status !== 200) {
             logger.w(`meta:发现页 ${s.id} 失败 status=${resp.status} ${resp.text.slice(0, 120)}`);
             return null;
@@ -573,11 +735,12 @@ export function parseGenrePage(json: unknown, mediaType: 'movie' | 'tv'): Discov
  */
 export async function tmdbGenres(logger: Logger): Promise<{ movie: DiscoverGenre[]; tv: DiscoverGenre[] }> {
   const empty = { movie: [] as DiscoverGenre[], tv: [] as DiscoverGenre[] };
-  const cred = getTmdbCredentials();
+  const cred = tmdbCreds();
   if (!cred) return empty;
   if (genresCache && Date.now() - genresCache.t < GENRES_TTL_MS) return genresCache.data;
   const one = async (type: 'movie' | 'tv'): Promise<DiscoverGenre[]> => {
-    const resp = await getJson(`${TMDB_API}/genre/${type}/list?language=zh-CN`, cred.accessToken, 10000);
+    const u = authFor(`${tmdbApiBase()}/genre/${type}/list?language=zh-CN`, cred);
+    const resp = await getJson(u.url, u.bearer, 10000);
     if (resp.status !== 200) {
       logger.w(`meta:类型清单(${type}) 失败 status=${resp.status}`);
       return [];
@@ -606,7 +769,7 @@ export async function tmdbGenrePage(
   page = 1,
 ): Promise<DiscoverGenrePage> {
   const empty: DiscoverGenrePage = { items: [], page: 1, totalPages: 1 };
-  const cred = getTmdbCredentials();
+  const cred = tmdbCreds();
   const id = Number(genreId);
   const pg = Math.max(1, Math.min(500, Number(page) || 1));
   if (!cred || !Number.isFinite(id) || id <= 0) return empty;
@@ -614,8 +777,9 @@ export async function tmdbGenrePage(
   const c = genrePageCache.get(key);
   if (c && Date.now() - c.t < GENRE_PAGE_TTL_MS) return c.data;
   try {
-    const url = `${TMDB_API}/discover/${mediaType}?language=zh-CN&with_genres=${id}&sort_by=popularity.desc&include_adult=false&page=${pg}`;
-    const resp = await getJson(url, cred.accessToken, 12000);
+    const url = `${tmdbApiBase()}/discover/${mediaType}?language=zh-CN&with_genres=${id}&sort_by=popularity.desc&include_adult=false&page=${pg}`;
+    const au = authFor(url, cred);
+    const resp = await getJson(au.url, au.bearer, 12000);
     if (resp.status !== 200) {
       logger.w(`meta:分类(${key}) 失败 status=${resp.status} ${resp.text.slice(0, 120)}`);
       return empty;
@@ -633,6 +797,38 @@ export async function tmdbGenrePage(
   }
 }
 
+/**
+ * ★ 2026-09-24：搜索面板「自动联想」——`/search/multi` 取前 N 条（电影/剧集）。
+ * 轻量：不校验封面、不写缓存（输入即查）；无凭据/失败返回空数组。
+ */
+export async function tmdbSuggest(logger: Logger, q: string, limit = 8): Promise<MetaSuggestion[]> {
+  const cred = tmdbCreds();
+  const term = (q || '').trim();
+  if (!cred || !term) return [];
+  const url = `${tmdbApiBase()}/search/multi?query=${encodeURIComponent(term)}&language=zh-CN&include_adult=false`;
+  const au = authFor(url, cred);
+  const resp = await getJson(au.url, au.bearer, 8000);
+  if (resp.status !== 200) return [];
+  const out: MetaSuggestion[] = [];
+  try {
+    const j = JSON.parse(resp.text) as { results?: Array<Record<string, unknown>> };
+    for (const r of j.results || []) {
+      const mt = String(r.media_type || '');
+      if (mt !== 'movie' && mt !== 'tv') continue;
+      const title = String(r.title ?? r.name ?? '').trim();
+      if (!title) continue;
+      const date = String(r.release_date ?? r.first_air_date ?? '');
+      const y = /^(\d{4})/.exec(date)?.[1];
+      out.push({ title, year: y ? Number(y) : '', mediaType: mt });
+      if (out.length >= limit) break;
+    }
+  } catch {
+    logger.w('meta:联想解析失败');
+    return [];
+  }
+  return out;
+}
+
 function memSet(cacheKey: string, hit: MetaHit | null): void {
   if (memCache.size >= MAX_MEM) {
     const first = memCache.keys().next().value;
@@ -641,11 +837,12 @@ function memSet(cacheKey: string, hit: MetaHit | null): void {
   memCache.set(cacheKey, hit);
 }
 
-/** 测试用：清空内存缓存（封面/详情增强/发现页/分类四处） */
+/** 测试用：清空内存缓存（封面/详情增强/发现页/分类/剧照五处） */
 export function __resetMemCacheForTest(): void {
   memCache.clear();
   extrasCache.clear();
   discoverCache = null;
   genresCache = null;
   genrePageCache.clear();
+  imagesCache.clear();
 }

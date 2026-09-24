@@ -1,5 +1,7 @@
-import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet, Route, Routes, useNavigate } from 'react-router-dom';
 import TitleBar from './components/TitleBar';
+import SearchPanel from './components/SearchPanel';
+import SourcePicker from './components/SourcePicker';
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import ConfigPage from './pages/ConfigPage';
@@ -23,6 +25,21 @@ const NAV = [
   { to: '/live', label: '直播', ico: '📡' },
   { to: '/config', label: '配置', ico: '⚙' },
 ];
+
+/**
+ * 页面外壳（布局路由）：承载「页面切换过渡动画」。
+ * ★ 2026-09-24（用户定稿）：以 pathname 为 key → 切页时容器重建并播放一次入场动画
+ *   （淡入 + 轻微上移，苹果 / Netflix 式）。用布局路由 + Outlet 而非嵌套 Routes，
+ *   避免相对路径解析问题；query 变化（如 HomePage 清 `?agg=`）不改 pathname → 不重播动画。
+ */
+function PageShell() {
+  const loc = useLocation();
+  return (
+    <div className="page-anim" key={loc.pathname}>
+      <Outlet />
+    </div>
+  );
+}
 
 export default function App() {
   const nav = useNavigate();
@@ -253,6 +270,8 @@ export default function App() {
             </NavLink>
           ))}
           <div style={{ flex: 1 }} />
+          {/* ★ 2026-09-24：经典皮肤侧栏底部常驻「当前源」（纯文字，长按/右键弹列表换源） */}
+          <SourcePicker variant="sidebar" />
         </aside>
       )}
       <main className="main">
@@ -267,24 +286,31 @@ export default function App() {
               </NavLink>
             ))}
             <span className="nf-spacer" />
+            {/* ★ 2026-09-24：右上角搜索按钮（面板含热搜 + 自动联想）与「源名纯文字」换源入口 */}
+            <SearchPanel />
+            <SourcePicker />
             <TitleBar />
           </nav>
         ) : (
           <TitleBar />
         )}
         <Routes>
-          {/* ★ 2026-09-24（用户定稿）：「发现」= 默认首页（软件打开即进这里）；「点播」= 源主页 /home */}
-          <Route path="/" element={<DiscoverPage />} />
-          <Route path="/home" element={<HomePage onOpenDetail={openDetail} />} />
-          {/**
-            * ★ 2026-09-24：全源搜索专用路由 —— 详情页「演员/相关推荐」与发现页卡片点击后跳这里，
-            * 由 HomePage 读 `?agg=<关键词>` 自动执行一次全源搜索。
-            */}
-          <Route path="/search" element={<HomePage onOpenDetail={openDetail} />} />
-          <Route path="/history" element={<HistoryPage />} />
-          <Route path="/detail/:key/:id" element={<DetailPage onPlay={onDetailPlay} />} />
-          <Route path="/live" element={<LivePage />} />
-          <Route path="/config" element={<ConfigPage />} />
+          {/* ★ 2026-09-24（用户定稿）：页面切换过渡动画 —— 布局路由 PageShell 以 pathname 为 key，
+              切页时容器重建并播放一次「淡入 + 轻微上移」（苹果 / Netflix 式）。 */}
+          <Route element={<PageShell />}>
+            {/* ★ 2026-09-24（用户定稿）：「发现」= 默认首页（软件打开即进这里）；「点播」= 源主页 /home */}
+            <Route path="/" element={<DiscoverPage />} />
+            <Route path="/home" element={<HomePage onOpenDetail={openDetail} />} />
+            {/**
+              * ★ 2026-09-24：全源搜索专用路由 —— 详情页「演员/相关推荐」与发现页卡片点击后跳这里，
+              * 由 HomePage 读 `?agg=<关键词>` 自动执行一次全源搜索。
+              */}
+            <Route path="/search" element={<HomePage onOpenDetail={openDetail} />} />
+            <Route path="/history" element={<HistoryPage />} />
+            <Route path="/detail/:key/:id" element={<DetailPage onPlay={onDetailPlay} />} />
+            <Route path="/live" element={<LivePage />} />
+            <Route path="/config" element={<ConfigPage />} />
+          </Route>
         </Routes>
       </main>
     </div>

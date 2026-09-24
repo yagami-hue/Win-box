@@ -281,6 +281,16 @@ export interface DiscoverSection {
   items: DiscoverItem[];
 }
 
+/**
+ * ★ 2026-09-24：某部片的图集（发现页 Hero「横版剧照轮播」用）。
+ * backdrops = TMDB 横版剧照（w1280，已按中文优先 + 评分排序，≤6 张）；
+ * posters = 竖版海报（w342，≤8 张）。均已包装为本地 /img 中继 URL。
+ */
+export interface MetaImages {
+  backdrops: string[];
+  posters: string[];
+}
+
 // ---------- 发现页「分类」浏览（TMDB 类型清单 + 按类型翻页；★ 2026-09-24） ----------
 export interface DiscoverGenre {
   id: number;

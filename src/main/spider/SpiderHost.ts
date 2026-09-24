@@ -50,15 +50,31 @@ import type { AuditItem, SearchAllReport, SearchAllProgressEvent } from '../../s
 import { SubtitleStore } from '../subtitle/SubtitleStore';
 import { assrtSearch, assrtFetch, assrtSearchMulti } from '../subtitle/assrtProvider';
 import { buildSearchQuery, normalizeTitle, normalizeSubtitleQuery, titleVariants } from '../../engine/subtitle/normalizeQuery';
-import type { SubtitleCandidate, SubtitleSettings } from '../../shared/subtitle';
+import type { SubtitleCandidate, SubtitleSettings, SubtitleFetchResult } from '../../shared/subtitle';
 import { DanmakuStore } from '../danmaku/DanmakuStore';
 import { dandanplaySearch, dandanplayBangumi, dandanplayComment } from '../danmaku/dandanplayProvider';
 import { getDanmakuCredentials } from '../danmaku/credentials';
 import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
-import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage } from '../../shared/types';
+import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../../shared/types';
+import type { MetaSettings, MetaSettingsView, MetaSuggestion, MetaSource } from '../../shared/meta';
+import { normalizeMetaSettings } from '../../shared/meta';
 import { MetaStore } from '../meta/MetaStore';
-import { tmdbSearchTitle, tmdbExtras, tmdbDiscover, tmdbGenres, tmdbGenrePage, metaCacheKey, metaQueryVariants } from '../meta/tmdbProvider';
-import { doubanSearchTitle, isCjkName, DOUBAN_CACHE_PREFIX } from '../meta/doubanProvider';
+import { MetaSettingsStore } from '../meta/MetaSettings';
+import {
+  tmdbSearchTitle,
+  tmdbExtras,
+  tmdbDiscover,
+  tmdbGenres,
+  tmdbGenrePage,
+  tmdbSuggest,
+  tmdbImages,
+  metaCacheKey,
+  metaQueryVariants,
+  setTmdbRuntime,
+  hasUserTmdbKey,
+} from '../meta/tmdbProvider';
+import { doubanSearchTitle, doubanSuggest, isCjkName, DOUBAN_CACHE_PREFIX } from '../meta/doubanProvider';
+import { getTmdbCredentials } from '../meta/credentials';
 import { so360SearchCover, SO360_CACHE_PREFIX } from '../meta/so360Provider';
 
 /** 豆瓣兜底最多尝试的名称变体数（原名 + 净化名；再多只会多打外部请求） */
@@ -126,6 +142,8 @@ export class SpiderHost {
   private static readonly DANMAKU_CACHE_MAX = 200;
   /** TMDB 元数据补全（配置+缓存；缺封面/缺简介时兜底查询） */
   private metaStore: MetaStore;
+  /** ★ 元数据来源配置（TMDB 自填 Key / API 代理地址 / 图片镜像地址 / 来源策略） */
+  private metaSettings: MetaSettingsStore;
   /** ★ 夸克已落盘待清理队列（关闭播放/窗口/退出时删除，进度仍保留在本地历史；持久化防重启丢失） */
   private pendingQuarkDeletes: Array<{ cookie: string; pdirFid: string; fid: string; dirFid?: string; at: number }> = [];
   private pendingQuarkStore: JsonStore;
@@ -189,6 +207,9 @@ export class SpiderHost {
     this.subtitles = new SubtitleStore(join(userDataDir(), 'subtitle.json'), this.logger, safeStorageDriveCodec());
     this.danmakuStore = new DanmakuStore(join(userDataDir(), 'danmaku.json'), this.logger);
     this.metaStore = new MetaStore(new JsonStore(join(userDataDir(), 'meta.json')));
+    // ★ 2026-09-24：元数据来源配置（TMDB 自填 Key/镜像地址 + 来源策略）；装配后立即把运行期配置注入 tmdbProvider
+    this.metaSettings = new MetaSettingsStore(join(userDataDir(), 'meta-settings.json'), this.logger, safeStorageDriveCodec());
+    this.applyMetaRuntime();
     this.autoRefreshStore = new JsonStore(join(userDataDir(), 'auto-refresh.json'));
     this.pendingQuarkStore = new JsonStore(join(userDataDir(), 'pending-quark-delete.json'));
     const pendingRaw = this.pendingQuarkStore.getObject<Array<{ cookie?: string; pdirFid?: string; fid?: string; dirFid?: string; at?: number }> | null>('list', null);
@@ -400,7 +421,7 @@ export class SpiderHost {
       throw new Error('assrt 检索失败：' + msg);
     }
   }
-  async subtitleFetch(candidate: SubtitleCandidate): Promise<string> {
+  async subtitleFetch(candidate: SubtitleCandidate): Promise<SubtitleFetchResult> {
     const token = (this.subtitles.settings.assrtToken || '').trim();
     if (!token) throw new Error('尚未配置 assrt token');
     return assrtFetch(token, candidate);
@@ -468,47 +489,119 @@ export class SpiderHost {
     }
   }
 
-  // ---- TMDB 元数据补全（源缺封面/缺简介时的兜底；凭据为内置密文，用户无需配置） ----
-  // ★ 豆瓣兜底（2026-09-23）：中文片名 TMDB miss 时查豆瓣（国产/冷门片 TMDB 覆盖差，
-  //   豆瓣命中率显著更高）。命中写磁盘缓存（MetaStore，key 带 DOUBAN_CACHE_PREFIX 与 TMDB 区隔）；
-  //   再次查询直接命中缓存，不再打豆瓣。
-  /** 按名称查询 TMDB（失败/无内置凭据/无命中 → null，绝不抛错；命中与 miss 都会缓存） */
+  // ---- 元数据（封面/简介/演职员）来源：★ 2026-09-24 用户可在配置页选策略 ----
+  //   auto（默认）: TMDB → 豆瓣（仅中文片名）→ 360 图搜
+  //   tmdb        : 仅 TMDB（**必须用户自填 API**；未填时保存即回落 auto，见 metaSetSettings）
+  //   douban      : 仅豆瓣
+  //   search      : 仅 360 图搜（封面；简介回落源自带，符合用户定稿口径）
+  //   注：策略只约束封面/简介/详情增强；发现页（TMDB 榜单/分类）不受限。
+
+  /** 生效的来源策略 */
+  private get metaSource(): MetaSource {
+    return this.metaSettings.settings.metaSource;
+  }
+
+  /** 把用户配置注入 tmdbProvider（Key / API 代理地址 / 图片镜像地址） */
+  private applyMetaRuntime(): void {
+    const s = this.metaSettings.settings;
+    setTmdbRuntime({ userKey: s.tmdbApiKey, apiBase: s.tmdbApiBase, imageBase: s.tmdbImageBase });
+  }
+
+  /** meta:getSettings —— 配置页读取（**绝不返回内置密文**，只给能力布尔） */
+  metaGetSettings(): MetaSettingsView {
+    const s = this.metaSettings.settings;
+    return { ...s, hasBuiltin: !!getTmdbCredentials(), hasUserKey: hasUserTmdbKey() };
+  }
+
+  /** meta:setSettings —— 保存并即时生效（无需重启）；「仅 TMDB」缺用户 Key → 自动回落 auto */
+  metaSetSettings(patch: Partial<MetaSettings>): MetaSettingsView {
+    const next = normalizeMetaSettings({ ...this.metaSettings.settings, ...patch });
+    this.metaSettings.settings = next;
+    this.applyMetaRuntime();
+    this.logger.i(`meta: 来源策略=${next.metaSource}；用户 Key=${next.tmdbApiKey ? '已配置' : '未配置'}；代理=${next.tmdbApiBase || '默认'}；图床=${next.tmdbImageBase || '默认'}`);
+    return this.metaGetSettings();
+  }
+
+  /**
+   * ★ 发现页 Hero 轮播：取某部片的横版剧照/竖版海报（TMDB images，24h 内存缓存）。
+   * 与来源策略无关（Hero 属发现页范畴，不受「仅豆瓣/仅搜索」约束）；无凭据/无 id 返回空数组。
+   */
+  async metaImages(mediaType: 'movie' | 'tv', tmdbId: number): Promise<MetaImages> {
+    try {
+      return await tmdbImages(this.logger, mediaType, tmdbId);
+    } catch (e) {
+      this.logger.w(`meta:剧照查询失败: ${(e as Error).message}`);
+      return { backdrops: [], posters: [] };
+    }
+  }
+
+  /** ★ 搜索面板「自动联想」：TMDB 优先（auto/tmdb），否则豆瓣；仅搜索策略无联想来源 */
+  async metaSuggest(q: string): Promise<MetaSuggestion[]> {
+    const term = (q || '').trim();
+    if (!term) return [];
+    const src = this.metaSource;
+    try {
+      if (src === 'douban') return await doubanSuggest(this.logger, term);
+      if (src === 'search') return [];
+      const list = await tmdbSuggest(this.logger, term);
+      if (list.length || src === 'tmdb') return list;
+      return await doubanSuggest(this.logger, term); // auto：TMDB 无结果 → 豆瓣补联想
+    } catch {
+      return [];
+    }
+  }
+
+  /** 豆瓣查询（原名 + 净化名变体；命中/miss 都写缓存，miss 短 TTL） */
+  private async doubanLookup(n: string, year?: string): Promise<MetaHit | null> {
+    for (const v of metaQueryVariants(n).slice(0, DOUBAN_MAX_VARIANTS)) {
+      const dbKey = `${DOUBAN_CACHE_PREFIX}${metaCacheKey(v, year || '')}`;
+      const diskDb = this.metaStore.cacheGet(dbKey);
+      if (diskDb) {
+        if (diskDb.hit) return diskDb.hit; // 命中缓存（miss 短 TTL 自动过期重查 → 继续试下一个变体）
+        continue;
+      }
+      const db = await doubanSearchTitle(this.logger, v);
+      this.metaStore.cacheSet(dbKey, db, Date.now());
+      if (db) return db;
+    }
+    return null;
+  }
+
+  /** 360 图片搜索兜底（无 key；带相关性过滤，宁缺勿错图） */
+  private async so360Lookup(n: string): Promise<MetaHit | null> {
+    for (const v of metaQueryVariants(n).slice(0, 1)) {
+      const soKey = `${SO360_CACHE_PREFIX}${metaCacheKey(v, '')}`;
+      const diskSo = this.metaStore.cacheGet(soKey);
+      if (diskSo) {
+        if (diskSo.hit) return diskSo.hit;
+        continue;
+      }
+      const so = await so360SearchCover(this.logger, v);
+      this.metaStore.cacheSet(soKey, so, Date.now());
+      if (so) return so;
+    }
+    return null;
+  }
+
+  /**
+   * 按名称查询封面/简介（按用户选择的来源策略分派；失败/无凭据/无命中 → null，绝不抛错）。
+   * 命中与 miss 都会缓存（着 MetaStore 的 hit/miss 双 TTL 语义）。
+   */
   async metaSearch(name: string, year?: string): Promise<MetaHit | null> {
     const n = (name || '').trim();
     if (!n) return null;
+    const src = this.metaSource;
     try {
+      if (src === 'tmdb') return await tmdbSearchTitle(this.metaStore, this.logger, n, year || undefined);
+      if (src === 'douban') return await this.doubanLookup(n, year);
+      if (src === 'search') return await this.so360Lookup(n);
+      // auto（默认，与历史行为一致）：TMDB →（仅中文片名才兜底）豆瓣 → 360 图搜
       const tmdb = await tmdbSearchTitle(this.metaStore, this.logger, n, year || undefined);
       if (tmdb) return tmdb;
-      // ★ 仅中文片名才兜底豆瓣（日/韩/欧美片名 TMDB 覆盖已够，少一次外部请求）
       if (!isCjkName(n)) return null;
-      // ★ 变体退让（与 TMDB 同规则）：原名 miss 时用「去噪净化名」再试一次（源站常把
-      //   「第1季/更新至N集/4K」拼进片名，直接查豆瓣同样查不到 → 封面补不上的主因）
-      for (const v of metaQueryVariants(n).slice(0, DOUBAN_MAX_VARIANTS)) {
-        const dbKey = `${DOUBAN_CACHE_PREFIX}${metaCacheKey(v, year || '')}`;
-        const diskDb = this.metaStore.cacheGet(dbKey);
-        if (diskDb) {
-          if (diskDb.hit) return diskDb.hit; // 命中缓存（miss 短 TTL 自动过期重查 → 继续试下一个变体）
-          continue;
-        }
-        const db = await doubanSearchTitle(this.logger, v);
-        // 命中写缓存（long TTL）；miss 也写（短 TTL）——复用 MetaStore 的 hit/miss 双 TTL 语义
-        this.metaStore.cacheSet(dbKey, db, Date.now());
-        if (db) return db;
-      }
-      // ★ 最后一档：中文图片搜索（360 图片，无 key）。TMDB/豆瓣都没有条目时——
-      //   短剧/网文改编类「剧情式长片名」的常态——靠它兜住封面；带相关性过滤，宁缺勿错图。
-      for (const v of metaQueryVariants(n).slice(0, 1)) {
-        const soKey = `${SO360_CACHE_PREFIX}${metaCacheKey(v, '')}`;
-        const diskSo = this.metaStore.cacheGet(soKey);
-        if (diskSo) {
-          if (diskSo.hit) return diskSo.hit;
-          continue;
-        }
-        const so = await so360SearchCover(this.logger, v);
-        this.metaStore.cacheSet(soKey, so, Date.now());
-        if (so) return so;
-      }
-      return null;
+      const db = await this.doubanLookup(n, year);
+      if (db) return db;
+      return await this.so360Lookup(n);
     } catch (e) {
       this.logger.e('meta:搜索失败', e);
       return null;
@@ -517,11 +610,13 @@ export class SpiderHost {
 
   /**
    * ★ 2026-09-24 详情页增强：TMDB 演职员 / 类型 / 相关推荐（详情页「演员名单 + 相关推荐」区块用）。
-   * 无凭据或无命中返回 null（渲染层用详情自带 actor 串兜底），绝不抛错。
+   * 策略为 douban/search 时返回 null（详情页用详情自带 actor 串兜底）；无凭据或无命中同样 null，绝不抛错。
    */
   async metaExtra(name: string, year?: string): Promise<MetaExtra | null> {
     const n = (name || '').trim();
     if (!n) return null;
+    const src = this.metaSource;
+    if (src === 'douban' || src === 'search') return null;
     try {
       return await tmdbExtras(this.metaStore, this.logger, n, year || undefined);
     } catch (e) {

@@ -129,3 +129,23 @@ describe('parse* 独立函数外部可用', () => {
     expect(parseAss(ASS).length).toBe(2);
   });
 });
+
+// ---- ★ 2026-09-24：扩展名不再独占信任（assrt 常见「.srt 里其实是 ASS」/调用方误传视频文件名）----
+describe('parseSubtitleFile — 扩展名与内容不符时的二次尝试', () => {
+  it('ASS 文本命名为 .srt → 按扩展名得 0 cue 后按内容嗅探出 ASS', () => {
+    const cues = parseSubtitleFile('a.srt', ASS);
+    expect(cues).toHaveLength(2);
+    expect(cues[0].text).toBe('Line one\nLine two');
+  });
+  it('传入视频文件名（xxx.mkv）也能识别 ASS / VTT / SRT', () => {
+    expect(parseSubtitleFile('繁花.S01E11.1080p.mkv', ASS)).toHaveLength(2);
+    expect(parseSubtitleFile('繁花.S01E11.1080p.mkv', VTT)).toHaveLength(2);
+    expect(parseSubtitleFile('繁花.S01E11.1080p.mkv', SRT)).toHaveLength(2);
+  });
+  it('VTT 文本命名为 .txt → 嗅探出 VTT', () => {
+    expect(parseSubtitleFile('sub.txt', VTT)).toHaveLength(2);
+  });
+  it('确实是垃圾文本 → 仍返回空（不臆造 cue）', () => {
+    expect(parseSubtitleFile('a.ass', 'garbage')).toEqual([]);
+  });
+});

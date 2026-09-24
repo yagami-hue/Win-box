@@ -1,6 +1,47 @@
 // tests/tmdbProvider.spec.ts — TMDB 元数据补全的纯函数测试（解析/缓存键/名称规范化，不依赖网络）
 import { describe, expect, it } from 'vitest';
-import { parseTmdbSearch, metaCacheKey, metaQueryName, metaQueryVariants, truncAtYear, parseTmdbExtras, toDiscoverItems, parseGenreList, parseGenrePage, titleMatches } from '../src/main/meta/tmdbProvider';
+import { parseTmdbSearch, metaCacheKey, metaQueryName, metaQueryVariants, truncAtYear, parseTmdbExtras, toDiscoverItems, parseGenreList, parseGenrePage, titleMatches, parseTmdbImages } from '../src/main/meta/tmdbProvider';
+
+// ★ 2026-09-24：发现页 Hero「横版剧照轮播」的图片解析（过滤 + 中文优先 + 评分排序 + 上限）
+describe('parseTmdbImages', () => {
+  const img = (file_path: string, width: number, vote: number, iso?: string): Record<string, unknown> => ({
+    file_path,
+    width,
+    height: Math.round(width / 1.78),
+    vote_average: vote,
+    ...(iso ? { iso_639_1: iso } : {}),
+  });
+
+  it('backdrops 过滤过窄（<1280）与无 file_path 的条目', () => {
+    const r = parseTmdbImages({
+      backdrops: [img('/a.jpg', 1920, 5), img('/small.jpg', 780, 9), { file_path: '', width: 1920, vote_average: 9 }],
+    });
+    expect(r.backdrops).toEqual(['/a.jpg']);
+  });
+
+  it('中文图优先，其次按评分降序', () => {
+    const r = parseTmdbImages({
+      backdrops: [img('/en-hi.jpg', 1920, 9, 'en'), img('/zh-low.jpg', 1920, 1, 'zh'), img('/en-low.jpg', 1920, 2, 'en')],
+    });
+    expect(r.backdrops).toEqual(['/zh-low.jpg', '/en-hi.jpg', '/en-low.jpg']);
+  });
+
+  it('上限：backdrops ≤6、posters ≤8；posters 不做宽度过滤', () => {
+    const r = parseTmdbImages({
+      backdrops: Array.from({ length: 10 }, (_, i) => img(`/b${i}.jpg`, 1920, 10 - i)),
+      posters: Array.from({ length: 12 }, (_, i) => img(`/p${i}.jpg`, 500, 10 - i)),
+    });
+    expect(r.backdrops).toHaveLength(6);
+    expect(r.posters).toHaveLength(8);
+    expect(r.posters[0]).toBe('/p0.jpg');
+  });
+
+  it('空/异常输入安全返回空数组', () => {
+    expect(parseTmdbImages(null)).toEqual({ backdrops: [], posters: [] });
+    expect(parseTmdbImages({})).toEqual({ backdrops: [], posters: [] });
+    expect(parseTmdbImages({ backdrops: 'x', posters: null })).toEqual({ backdrops: [], posters: [] });
+  });
+});
 
 // ★ 2026-09-24：TMDb 命中「实质同名」校验（防误匹配 → 补出来的封面/演职员全是错的）
 describe('titleMatches', () => {

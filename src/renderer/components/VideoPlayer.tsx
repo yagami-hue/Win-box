@@ -406,23 +406,38 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     const v = ref.current;
     if (!v) return;
+    /** 把 cues 写入 track，返回真正成功加入的条数（用于「挂载失败」自检） */
+    const apply = (track: TextTrack): number => {
+      while (track.cues && track.cues.length) track.removeCue(track.cues[0] as VTTCue);
+      track.mode = subEnabled && subCues.length ? 'showing' : 'disabled';
+      let added = 0;
+      if (subEnabled && subCues.length) {
+        for (const c of shiftCues(subCues, subOffset)) {
+          try {
+            track.addCue(new VTTCue(c.start, c.end, c.text));
+            added++;
+          } catch {
+            /* ignore 单条失败 */
+          }
+        }
+      }
+      return added;
+    };
+    // ★ 2026-09-24：trackRef 可能是**上一个 video 元素**留下的孤儿 track（切集重建元素后仍指向旧元素）
+    //   —— 此时 addCue 会「成功但永不显示」。必须校验 track 属于当前元素，否则重建。
     let track = trackRef.current;
-    if (!track) {
+    const belongs = !!track && Array.from(v.textTracks || []).includes(track);
+    if (!track || !belongs) {
       track = v.addTextTrack('subtitles', '外挂字幕', 'zh');
       trackRef.current = track;
     }
-    // 清空旧 cue
-    while (track.cues && track.cues.length) track.removeCue(track.cues[0] as VTTCue);
-    track.mode = subEnabled && subCues.length ? 'showing' : 'disabled';
-    if (subEnabled && subCues.length) {
-      const shifted = shiftCues(subCues, subOffset);
-      for (const c of shifted) {
-        try {
-          track.addCue(new VTTCue(c.start, c.end, c.text));
-        } catch {
-          /* ignore 单条失败 */
-        }
-      }
+    const added = apply(track);
+    // 兜底：有 cue 却一条都没进 track → 重建一次再试（覆盖 TextTrack 失效/被播放器重置的情况）
+    if (subEnabled && subCues.length && added === 0) {
+      trackRef.current = null;
+      track = v.addTextTrack('subtitles', '外挂字幕', 'zh');
+      trackRef.current = track;
+      apply(track);
     }
   }, [subEnabled, subCues, subOffset]);
 
@@ -471,16 +486,30 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     const gen = ++subGenRef.current; // 本次下载为最新代际，旧的在途下载失效
     setSubMsg('');
     try {
-      const text = await client.subtitleFetch(c);
+      const res = await client.subtitleFetch(c);
       if (gen !== subGenRef.current) return; // 期间换集/发起新下载 → 丢弃
-      if (!text) { setSubMsg('字幕下载为空'); return; }
-      const cues = parseSubtitleFile(c.subname || '', text);
-      if (!cues.length) { setSubMsg('字幕解析失败（空或无有效时间轴）'); return; }
+      if (!res || !res.text) {
+        setSubMsg(res?.reason || '字幕下载为空');
+        return;
+      }
+      // ★ 2026-09-24：用**真实字幕文件名**判格式（此前传 c.subname = 视频文件名 xxx.mkv → ASS 文本被 SRT 解析成 0 cue）
+      const cues = parseSubtitleFile(res.fileName || c.subname || '', res.text);
+      if (!cues.length) {
+        setSubMsg(`字幕解析失败（${res.format || '未知格式'}，无有效时间轴）`);
+        return;
+      }
       setSubCues(cues);
       setSubOffset(0);
-      setSubActive(c.subname || c.file);
+      setSubActive(res.fileName || c.subname || c.file);
       setSubEnabled(true);
       setSubPanel(false);
+      // 挂载自检回显（面板再打开可见；控制台留痕便于用户反馈排障）
+      setSubMsg(
+        res.entries && res.entries > 1
+          ? `已挂载 ${cues.length} 条（包内 ${res.entries} 个文件，取「${res.fileName}」）`
+          : `字幕已挂载（${cues.length} 条）`,
+      );
+      console.info(`[subtitle] ${res.fileName || c.subname}：解析 ${cues.length} 条 cue（包内 ${res.entries ?? 1} 个文件）`);
       void client.subtitleSet({ enabled: true }).catch(() => undefined);
     } catch (e) {
       if (gen === subGenRef.current) setSubMsg((e as Error).message);

@@ -5,6 +5,9 @@ import type { SourceBean, VodItem, SearchAllReport, AggVodItem, FilterGroup } fr
 import { sourceAvailability } from '../../engine/vod/sourceAvailability';
 import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSearch';
 import { uiMem, schedulePersist } from '../lib/uiMemory';
+import SourcePicker from '../components/SourcePicker';
+import { useTheme } from '../lib/theme';
+import { TOP_NAV_THEMES } from '../lib/themeTokens';
 import { getSessionSort, setSessionSort } from '../lib/sessionSort';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 import { pickCover, preloadImage } from '../lib/coverPick';
@@ -12,6 +15,11 @@ import { pickCover, preloadImage } from '../lib/coverPick';
 type SortClassView = { id: string; name: string; flag?: string; filters?: FilterGroup[] };
 
 export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string, id: string, pic?: string, name?: string) => void }) {
+  /**
+   * ★ 2026-09-24（用户定稿）：TopNav 皮肤（Netflix / 哔哩哔哩）的顶栏已自带「搜索（全部源搜索）+ 换源」，
+   *   点播页顶栏因此**不再放源内搜索与换源入口** —— 避免两处重复；经典皮肤保持原样（含源内搜索）。
+   */
+  const topNav = TOP_NAV_THEMES.includes(useTheme());
   const [sites, setSites] = useState<SourceBean[]>([]);
   const [key, setKey] = useState('');
   const [classes, setClasses] = useState<SortClassView[]>([]);
@@ -340,6 +348,21 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         if (cancelled) return;
         const s = cfg.sources;
         setSites(s);
+        /**
+         * 选出「本次应展示的源」：会话内浏览过的源（uiMem）→ 持久化选中源 → 第一个可用源。
+         * ★ 2026-09-24 修复：本函数**必须在下面每个提前 return 的分支之前调用** ——
+         *   此前 `/search?agg=` 分支直接 return，`key`/`keyRef` 始终为空 →
+         *   ① 界面回落到 sites[0]（用户反馈「全源搜索完返回变成默认第一个源」）；
+         *   ② `exitSearch()` 读 `keyRef.current` 为空 → 连首页都加载不出来。
+         */
+        const pickSource = (): string => {
+          const memKey = uiMem.home.key ? s.find((x) => x.key === uiMem.home.key) : undefined;
+          if (memKey && sourceAvailability(memKey).usable) return memKey.key;
+          const active = cfg.ui.activeSourceKey ? s.find((x) => x.key === cfg.ui.activeSourceKey) : undefined;
+          if (active && sourceAvailability(active).usable) return active.key;
+          const firstUsable = s.find((x) => sourceAvailability(x).usable);
+          return firstUsable ? firstUsable.key : (s[0]?.key ?? '');
+        };
         // ★ 外部入口：/search?agg=<关键词> —— 详情页「演员 / 相关推荐」与发现页卡片点击后跳来，
         //   自动跑一次全源搜索。先清 URL 参数（返回/重进不重复触发），再置关键词与「全源」范围后执行。
         const aggParam = (searchParams.get('agg') || '').trim();
@@ -347,6 +370,13 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           setSearchParams({}, { replace: true });
           setWd(aggParam);
           setSearchAllSources(true);
+          // 先把「搜索前的源」定下来（只置状态、不拉首页数据，搜索视图不需要），
+          // 这样退出搜索（返回浏览）能准确回到原源与原列表。
+          const pick = pickSource();
+          if (pick) {
+            setKey(pick);
+            keyRef.current = pick;
+          }
           // ★ 显式传「全源」：setState 尚未生效，闭包里读 searchAllSources 会是 false（曾误走单源分支报
           //   「当前未选中任何源，无法搜索」）
           requestAnimationFrame(() => { void doSearch(false, aggParam, true); });
@@ -360,6 +390,11 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           setAggMode(true);
           setAggScope(memSearch.aggScope);
           setSearchAllSources(memSearch.searchAllSources);
+          const pick = pickSource();
+          if (pick) {
+            setKey(pick);
+            keyRef.current = pick;
+          }
           requestAnimationFrame(() => {
             if (contentRef.current && uiMem.home.scrollTop) contentRef.current.scrollTop = uiMem.home.scrollTop;
           });
@@ -369,19 +404,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           setErr('尚未导入站源，请先到「配置」页导入');
           return;
         }
-        let pick = '';
-        // 返回优先：本次会话里浏览过的源与位置（uiMem），否则用持久化选中源
-        const memKey = uiMem.home.key ? s.find((x) => x.key === uiMem.home.key) : undefined;
-        if (memKey && sourceAvailability(memKey).usable) {
-          pick = memKey.key;
-        } else {
-          const active = cfg.ui.activeSourceKey ? s.find((x) => x.key === cfg.ui.activeSourceKey) : undefined;
-          if (active && sourceAvailability(active).usable) pick = active.key;
-          else {
-            const firstUsable = s.find((x) => sourceAvailability(x).usable);
-            pick = firstUsable ? firstUsable.key : s[0].key;
-          }
-        }
+        const pick = pickSource();
         if (pick) {
           setKey(pick);
           const mem = uiMem.home;
@@ -478,6 +501,17 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     client.cfgSetActiveSource(k).catch(() => undefined);
     void loadHome(k);
   }
+
+  // ★ 2026-09-24：侧栏/顶栏的 SourcePicker 换源后广播事件 → 本页同步切换（避免「源名已换、列表还是旧源」）
+  useEffect(() => {
+    const onChanged = (e: Event): void => {
+      const k = (e as CustomEvent<string>).detail;
+      if (typeof k === 'string' && k) chooseSource(k);
+    };
+    window.addEventListener('winbox:source-changed', onChanged);
+    return () => window.removeEventListener('winbox:source-changed', onChanged);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /**
    * 搜索。
@@ -629,33 +663,40 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
 
   return (
     <>
+      {/**
+        * ★ 2026-09-24（用户定稿）：TopNav 皮肤（Netflix / 哔哩哔哩）的**浏览态不显示这一行** ——
+        *   搜索与换源都已在顶栏（🔍 搜索 / 源名），此处再放一遍是重复；整行隐藏让内容网格直接铺满。
+        *   仅「全源搜索结果态」保留（需要「返回浏览」出口与条数状态）。
+        */}
+      {(!topNav || aggMode) && (
       <div className="topbar">
-        <select value={key} onChange={(e) => chooseSource(e.target.value)} style={{ minWidth: 180 }} disabled={aggMode}>
-          {sites.map((s) => (
-            <option key={s.key} value={s.key}>
-              {optionLabel(s)}
-            </option>
-          ))}
-        </select>
-        <input
-          placeholder={searchAllSources ? '全源搜索：一次搜遍所有源（结果边搜边出）…' : '搜索当前源…'}
-          value={wd}
-          onChange={(e) => setWd(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && doSearch()}
-          style={{ flex: 1, maxWidth: 420 }}
-        />
-        <label className="tag" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', userSelect: 'none' }} title="默认只搜当前选中的源（快）；勾选后遍历全部可搜索源（慢）">
+        {/* 经典皮肤：换源改手机 TVBox 式（源名纯文字，长按/右键弹列表），搜索仍走源内 */}
+        {!topNav && <SourcePicker sites={sites} current={key} onPick={chooseSource} disabled={aggMode} />}
+        {!topNav && (
           <input
-            type="checkbox"
-            style={{ accentColor: 'var(--accent)', margin: 0 }}
-            checked={searchAllSources}
-            onChange={(e) => setSearchAllSources(e.target.checked)}
+            placeholder={searchAllSources ? '全源搜索：一次搜遍所有源（结果边搜边出）…' : '搜索当前源…'}
+            value={wd}
+            onChange={(e) => setWd(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && doSearch()}
+            style={{ flex: 1, maxWidth: 420 }}
           />
-          全源搜索
-        </label>
-        <button className="primary" onClick={() => void doSearch()} disabled={loading || !wd.trim()}>
-          {searchAllSources ? '全源搜索' : '搜索'}
-        </button>
+        )}
+        {!topNav && (
+          <label className="tag" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', userSelect: 'none' }} title="默认只搜当前选中的源（快）；勾选后遍历全部可搜索源（慢）">
+            <input
+              type="checkbox"
+              style={{ accentColor: 'var(--accent)', margin: 0 }}
+              checked={searchAllSources}
+              onChange={(e) => setSearchAllSources(e.target.checked)}
+            />
+            全源搜索
+          </label>
+        )}
+        {!topNav && (
+          <button className="primary" onClick={() => void doSearch()} disabled={loading || !wd.trim()}>
+            {searchAllSources ? '全源搜索' : '搜索'}
+          </button>
+        )}
         {aggMode && <button onClick={exitSearch}>返回浏览</button>}
         <span className="status" style={{ marginLeft: 'auto' }}>
           {loading
@@ -669,6 +710,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 : ''}
         </span>
       </div>
+      )}
       <div className="content" ref={contentRef}>
         {err && <div className="err" style={{ marginBottom: 10 }}>{err}</div>}
         {!err && fallback && !aggMode && (

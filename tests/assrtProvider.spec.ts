@@ -2,7 +2,9 @@
 // assrtProvider 纯函数单测：hitKeywordQuality（S2）、decodeSubtitle（S3）、isArchive（S6）。
 // 网络请求类函数（assrtSearch/detail/fetch）不做单测（依赖外网）。
 import { describe, expect, it } from 'vitest';
-import { hitKeywordQuality, decodeSubtitle, isArchive } from '../src/main/subtitle/assrtProvider';
+import * as iconv from 'iconv-lite';
+import { hitKeywordQuality, decodeSubtitle, isArchive, subtitleFromBytes } from '../src/main/subtitle/assrtProvider';
+import { buildZip } from '../src/engine/util/syncZip';
 import type { SubtitleCandidate } from '../src/shared/subtitle';
 
 function cand(title?: string, subname = ''): SubtitleCandidate {
@@ -69,6 +71,15 @@ describe('decodeSubtitle（S3：UTF-8 / GBK 判别）', () => {
     const out = decodeSubtitle(buf);
     expect(typeof out).toBe('string');
   });
+  it('★ 2026-09-24 修复：GBK 字幕（必然含换行）不再被解成空串', () => {
+    // 真因：textScore 把 \r\n\t（≤0x1F）一律判 -Infinity → GBK 严格 UTF-8 解码失败得空串、
+    //      两边同为 -Infinity → 选空串 → 表现为「字幕下载为空 / 挂不上」。
+    const srt = '1\r\n00:00:01,000 --> 00:00:02,000\r\n中文字幕测试\r\n';
+    const out = decodeSubtitle(iconv.encode(srt, 'gb18030'));
+    expect(out).toContain('中文字幕测试');
+    expect(out).toContain('-->');
+    expect(out).not.toBe('');
+  });
 });
 
 describe('isArchive（S6：压缩/归档魔数）', () => {
@@ -86,5 +97,49 @@ describe('isArchive（S6：压缩/归档魔数）', () => {
   it('空/短 Buffer 安全返回 false', () => {
     expect(isArchive(Buffer.alloc(0))).toBe(false);
     expect(isArchive(Buffer.from([0x50]))).toBe(false);
+  });
+});
+
+// ---- ★ 2026-09-24：压缩包 → 解压 → 挑条目 → 解码（此前压缩包直接返回空串 = 100% 挂不上）----
+describe('subtitleFromBytes（压缩包字幕可用化）', () => {
+  const ASS_TEXT = '[Script Info]\nDialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,你好世界';
+  it('zip 内含 ASS + readme → 自动挑出 ASS（含真实文件名/格式/条目数）', async () => {
+    const zip = buildZip([
+      { name: 'readme.txt', bytes: Buffer.from('站点说明', 'utf-8') },
+      { name: '繁花.EP12.ass', bytes: Buffer.from(ASS_TEXT, 'utf-8') },
+    ]);
+    const r = await subtitleFromBytes(zip, { videoName: '繁花.S01E12.1080p.mkv', ep: '12' });
+    expect(r.text).toContain('Dialogue:');
+    expect(r.fileName).toBe('繁花.EP12.ass');
+    expect(r.format).toBe('ass');
+    expect(r.entries).toBe(2);
+  });
+  it('包内 GBK 编码的 srt 能正确解码（编码判定沿用 decodeSubtitle）', async () => {
+    const srt = '1\r\n00:00:01,000 --> 00:00:02,000\r\n中文字幕测试\r\n';
+    const gbk = iconv.encode(srt, 'gb18030');
+    const zip = buildZip([{ name: 'x.srt', bytes: gbk }]);
+    const r = await subtitleFromBytes(zip, {});
+    expect(r.text).toContain('中文字幕测试');
+    expect(r.fileName).toBe('x.srt');
+  });
+  it('包内没有字幕文件 → 空文本 + 可读原因（不再静默）', async () => {
+    const zip = buildZip([{ name: 'movie.mkv', bytes: Buffer.alloc(200) }]);
+    const r = await subtitleFromBytes(zip, {});
+    expect(r.text).toBe('');
+    expect(r.reason).toContain('未找到字幕文件');
+    expect(r.entries).toBe(1);
+  });
+  it('损坏的 zip → 空文本 + 解压失败原因', async () => {
+    const broken = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from('garbage-garbage')]);
+    const r = await subtitleFromBytes(broken, {});
+    expect(r.text).toBe('');
+    expect(r.reason).toContain('解压失败');
+  });
+  it('非归档纯文本 → 直接解码返回（文件名/格式透传）', async () => {
+    const r = await subtitleFromBytes(Buffer.from('1\r\n00:00:01,000 --> 00:00:02,000\r\nhi\r\n', 'utf-8'), { fileName: 'a.srt' });
+    expect(r.fileName).toBe('a.srt');
+    expect(r.format).toBe('srt');
+    expect(r.entries).toBe(1);
+    expect(r.text).toContain('hi');
   });
 });

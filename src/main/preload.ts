@@ -2,7 +2,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { IpcResult } from '../shared/ipc-result';
 import { IPC } from '../shared/ipc-channels';
-import type { SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile, MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage } from '../shared/types';
+import type { SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile, MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../shared/types';
+import type { SubtitleFetchResult } from '../shared/subtitle';
+import type { MetaSettings, MetaSettingsView, MetaSuggestion } from '../shared/meta';
 
 const invoke = <T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> =>
   ipcRenderer.invoke(channel, ...args);
@@ -69,7 +71,8 @@ const api = {
     get: () => invoke(IPC.SUBTITLE_GET),
     set: (patch: unknown) => invoke(IPC.SUBTITLE_SET, patch),
     search: (name: string) => invoke(IPC.SUBTITLE_SEARCH, name),
-    fetch: (cand: unknown) => invoke(IPC.SUBTITLE_FETCH, cand),
+    // ★ 2026-09-24：返回 { text, fileName, format, entries, reason }（压缩包已在主进程解出并挑好条目）
+    fetch: (cand: unknown) => invoke<SubtitleFetchResult>(IPC.SUBTITLE_FETCH, cand),
   },
   danmaku: {
     get: () => invoke(IPC.DANMAKU_GET),
@@ -89,6 +92,13 @@ const api = {
     genres: () => invoke<{ movie: DiscoverGenre[]; tv: DiscoverGenre[] }>(IPC.META_GENRES),
     genrePage: (mediaType: 'movie' | 'tv', genreId: number, page: number) =>
       invoke<DiscoverGenrePage>(IPC.META_GENRE_PAGE, mediaType, genreId, page),
+    // ★ 2026-09-24：元数据来源配置（TMDB 自填 Key/代理/镜像 + 策略）与搜索面板联想
+    //   读取返回的 tmdbApiKey 只可能是**用户自己填的**值；内置凭据永不返回（仅 hasBuiltin 布尔）
+    getSettings: () => invoke<MetaSettingsView>(IPC.META_GET_SETTINGS),
+    setSettings: (patch: Partial<MetaSettings>) => invoke<MetaSettingsView>(IPC.META_SET_SETTINGS, patch),
+    suggest: (q: string) => invoke<MetaSuggestion[]>(IPC.META_SUGGEST, q),
+    // ★ 发现页 Hero 轮播：某部片的横版剧照 / 竖版海报（TMDB images，已包装 /img 中继）
+    images: (mediaType: 'movie' | 'tv', tmdbId: number) => invoke<MetaImages>(IPC.META_IMAGES, mediaType, tmdbId),
   },
   drives: {
     get: () => invoke(IPC.DRIVE_GET),

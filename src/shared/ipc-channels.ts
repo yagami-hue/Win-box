@@ -24,6 +24,12 @@ export const IPC = {
   // ★ 发现页「分类」浏览（TMDB 类型清单 + 按类型翻页）
   META_GENRES: 'meta:genres',
   META_GENRE_PAGE: 'meta:genrePage',
+  // ★ 2026-09-24 元数据来源配置（TMDB 自填 Key/代理/镜像 + 来源策略）与搜索联想
+  META_GET_SETTINGS: 'meta:getSettings',
+  META_SET_SETTINGS: 'meta:setSettings',
+  META_SUGGEST: 'meta:suggest',
+  /** ★ 发现页 Hero 轮播用的剧照/海报（TMDB images） */
+  META_IMAGES: 'meta:images',
   DRIVE_GET: 'drive:get',
   DRIVE_SET: 'drive:set',
   DRIVE_REMOVE: 'drive:remove',

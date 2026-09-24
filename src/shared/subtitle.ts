@@ -20,6 +20,24 @@ export interface SubtitleCandidate {
   hitKeyword?: string;
 }
 
+/**
+ * ★ 2026-09-24 字幕下载结果：从「纯文本」升级为「文本 + 真实文件名 + 解压信息」。
+ * 为什么必须带 fileName：压缩包里的字幕文件名才是**权威扩展名**，渲染层此前用
+ * `candidate.subname`（视频文件名，如 xxx.mkv）判别格式 → ASS 文本被 SRT 解析器解析成 0 cue。
+ */
+export interface SubtitleFetchResult {
+  /** 已解码的字幕文本（失败为空串，原因见 reason） */
+  text: string;
+  /** 真实字幕文件名（含扩展名；来自包内条目名或 assrt detail 的 filename） */
+  fileName: string;
+  /** 规范化格式：srt / ass / ssa / vtt / txt（未知为空） */
+  format?: string;
+  /** 压缩包内的文件条目数（>1 说明自动挑了最匹配的一条） */
+  entries?: number;
+  /** 失败原因（text 为空时给出，UI 直接上屏） */
+  reason?: string;
+}
+
 export interface SubtitleSettings {
   /** assrt token（用户自填） */
   assrtToken?: string;

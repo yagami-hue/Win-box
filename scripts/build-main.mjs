@@ -13,7 +13,9 @@ const opts = {
   format: 'cjs',
   target: 'node20',
   sourcemap: true,
-  external: ['electron', 'iconv-lite', 'fast-xml-parser'],
+  // ★ 2026-09-24：wasm 解压库（字幕压缩包）走 external，运行时从 node_modules 加载，
+  //   wasm 二进制由代码内 `wasmBinary` 显式传入（不依赖库内部的 __dirname 路径解析）。
+  external: ['electron', 'iconv-lite', 'fast-xml-parser', 'node-unrar-js', '7z-wasm'],
   logLevel: 'info',
 };
 

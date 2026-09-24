@@ -8,6 +8,7 @@ import type { Episode, MetaExtra, MetaHit, VodDetail } from '../../shared/types'
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 import { pickCover } from '../lib/coverPick';
 import { formatEpisodeLabel } from '../lib/epName';
+import HScrollRow from '../components/HScrollRow';
 import { useTheme } from '../lib/theme';
 
 export default function DetailPage({
@@ -233,6 +234,15 @@ export default function DetailPage({
   /** ★ 2026-09-24：导演/主演展示文本 —— 源数据优先，缺失时用 TMDb 演职员补齐 */
   const directorText = (detail?.director || '').trim() || (extra?.directors || []).join(' / ');
   const actorText = (detail?.actor || '').trim() || (extra?.cast || []).slice(0, 8).map((c) => c.name).join(' / ');
+  /**
+   * ★ 2026-09-24（用户定稿）：简介**一律优先第三方**（TMDB/豆瓣，随来源策略），
+   *   第三方没拿到（或过短）才回落「源自带简介」——封面同一逻辑（见 lib/coverPick.ts）。
+   */
+  const introText = ((): string => {
+    const third = (metaHit?.overview || '').trim();
+    if (third.length >= 8) return third;
+    return (detail?.des || '').trim();
+  })();
   /** 点击演员 / 推荐影片 → 走 /search 路由对该关键词执行一次全源搜索（HomePage 的 ?agg= 入口） */
   const goSearch = (kw: string): void => { nav(`/search?agg=${encodeURIComponent(kw)}`); };
 
@@ -271,11 +281,7 @@ export default function DetailPage({
                 {actorText && <div className="muted" style={{ marginBottom: 4 }}>主演：{actorText}</div>}
                 {detail.remarks && <div style={{ color: 'var(--accent-2)', marginBottom: 4 }}>{detail.remarks}</div>}
                 <div className="muted" style={{ fontSize: 12, maxHeight: 80, overflow: 'auto', marginTop: 8 }}>
-                  {(detail.des || '').trim().length >= 8
-                    ? detail.des
-                    : metaHit?.overview
-                      ? <>{metaHit.overview}</>
-                      : detail.des || ''}
+                  {introText}
                 </div>
               </div>
             </div>
@@ -329,24 +335,26 @@ export default function DetailPage({
             {recs.length > 0 && (
               <div style={{ marginTop: 18 }}>
                 <div className="muted" style={{ marginBottom: 8 }}>相关推荐（点击全源搜索该影片）</div>
-                <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 6 }}>
+                {/* ★ 2026-09-24：改用 .rec-row —— 封面尺寸**强约束统一**（此前个别图会被撑大）；
+                    滚轮在行内 → 横向滚动（HScrollRow） */}
+                <HScrollRow className="rec-row">
                   {recs.map((r, i) => (
                     <div
                       key={`${r.title}-${i}`}
                       className="card-media"
-                      style={{ flex: '0 0 132px', cursor: 'pointer' }}
+                      style={{ cursor: 'pointer' }}
                       onClick={() => goSearch(r.title)}
                       title={`${r.title}${r.year ? ` (${r.year})` : ''}`}
                     >
                       <div className="card">
-                        <img src={r.poster} loading="lazy" decoding="async" />
+                        <img src={r.poster} loading="lazy" decoding="async" alt="" />
                         <div className="meta">
-                          <div className="name">{r.title}</div>
+                          <div className="name" title={r.title}>{r.title}</div>
                         </div>
                       </div>
                     </div>
                   ))}
-                </div>
+                </HScrollRow>
               </div>
             )}
           </>
