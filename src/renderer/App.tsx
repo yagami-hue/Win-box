@@ -10,6 +10,7 @@ import PlayerPage from './pages/PlayerPage';
 import LivePage from './pages/LivePage';
 import HistoryPage from './pages/HistoryPage';
 import { loadUiMemory, saveUiMemory } from './lib/uiMemory';
+import { useTheme } from './lib/theme';
 import { client } from './api/client';
 import type { Episode } from '../shared/types';
 
@@ -25,6 +26,9 @@ const NAV = [
 export default function App() {
   const nav = useNavigate();
   const loc = useLocation();
+  /** ★ 2026-09-24：三套皮肤（经典深/浅 + Netflix）；Netflix 用「顶部导航」替代侧边栏 */
+  const theme = useTheme();
+  const netflix = theme === 'netflix';
   // 首次启动免责声明弹窗：已同意过（localStorage 标记）则不再弹出
   const [disclaim, setDisclaim] = useState(() => {
     try {
@@ -230,26 +234,40 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app${netflix ? ' nf' : ''}`}>
       {disclaim && DisclaimerModal}
-      <aside className="sidebar">
-        <div className="logo">Win-Box</div>
-        {NAV.map((n) => (
-          <NavLink
-            key={n.to}
-            to={n.to}
-            end={n.end}
-            className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
-          >
-            <span className="nav-ico">{n.ico}</span>
-            <span className="nav-txt">{n.label}</span>
-          </NavLink>
-        ))}
-        <div style={{ flex: 1 }} />
-      </aside>
+      {/* Netflix 皮肤：**无侧边栏**（导航移到顶部的 .nf-nav），经典主题保持原侧边栏 */}
+      {!netflix && (
+        <aside className="sidebar">
+          <div className="logo">Win-Box</div>
+          {NAV.map((n) => (
+            <NavLink
+              key={n.to}
+              to={n.to}
+              end={n.end}
+              className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
+            >
+              <span className="nav-ico">{n.ico}</span>
+              <span className="nav-txt">{n.label}</span>
+            </NavLink>
+          ))}
+          <div style={{ flex: 1 }} />
+        </aside>
+      )}
       <main className="main">
         {/* 自定义无边框标题栏：整条可拖拽，右侧为窗口控制（最小化/最大化/关闭） */}
         <TitleBar />
+        {netflix && (
+          <nav className="nf-nav">
+            <span className="nf-logo">WIN-BOX</span>
+            {NAV.map((n) => (
+              <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => 'nf-link' + (isActive ? ' active' : '')}>
+                {n.label}
+              </NavLink>
+            ))}
+            <span className="nf-spacer" />
+          </nav>
+        )}
         <Routes>
           {/* ★ 2026-09-24（用户定稿）：「发现」= 默认首页（软件打开即进这里）；「点播」= 源主页 /home */}
           <Route path="/" element={<DiscoverPage />} />

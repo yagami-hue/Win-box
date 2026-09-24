@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { client } from '../api/client';
+import { useTheme } from '../lib/theme';
 import type { DiscoverItem, DiscoverSection, DiscoverGenre } from '../../shared/types';
 
 /** 影片卡（推荐区与分类区共用）：点击 → 全源搜索该片名 */
@@ -32,6 +33,8 @@ function ItemCard({ it, onOpen }: { it: DiscoverItem; onOpen: () => void }) {
 
 export default function DiscoverPage() {
   const nav = useNavigate();
+  /** ★ 2026-09-24：Netflix 皮肤下用「Hero 大图 + 横向内容行」的影院式布局 */
+  const nf = useTheme() === 'netflix';
   const [sections, setSections] = useState<DiscoverSection[] | null>(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);
@@ -88,6 +91,8 @@ export default function DiscoverPage() {
 
   const genreList = media === 'movie' ? genres.movie : genres.tv;
   const hasGenres = genres.movie.length > 0 || genres.tv.length > 0;
+  /** Hero 主推：榜单首条（Netflix 首屏就是一张大图 + 播放/更多信息） */
+  const hero = sections && sections.length > 0 ? sections[0].items[0] : null;
 
   return (
     <>
@@ -106,6 +111,26 @@ export default function DiscoverPage() {
         )}
       </div>
       <div className="content">
+        {/* ---- Netflix Hero：全宽主推大图（仅 Netflix 皮肤；经典皮肤保持原来的列表式） ---- */}
+        {nf && hero && !gSel && (
+          <div className="nf-hero">
+            <div className="nf-hero-bg" style={{ backgroundImage: `url(${hero.poster})` }} />
+            <div className="nf-hero-body">
+              <div className="nf-hero-kicker">WIN-BOX 精选</div>
+              <h1 className="nf-hero-title">{hero.title}</h1>
+              <div className="nf-hero-meta">
+                <span className="nf-hero-match">98% 匹配</span>
+                {hero.year ? <span>{hero.year}</span> : null}
+                <span>{hero.mediaType === 'tv' ? '剧集' : '电影'}</span>
+                <span>{sections && sections[0] ? sections[0].title : ''}</span>
+              </div>
+              <div className="nf-hero-actions">
+                <button className="nf-play-btn" onClick={() => goSearch(hero.title)}>▶ 播放</button>
+                <button onClick={() => goSearch(hero.title)}>更多信息</button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* ---- 分类条（TMDB 类型）---- */}
         {hasGenres && (
           <div className="row" style={{ marginBottom: 14 }}>
@@ -154,12 +179,15 @@ export default function DiscoverPage() {
           <div className="err">{err}</div>
         ) : (
           (sections || []).map((s) => (
-            <div key={s.id} style={{ marginBottom: 22 }}>
-              <h3 style={{ margin: '0 0 10px' }}>{s.title}</h3>
-              {/* 横向滚动条：一屏放得下就排满，放不下横向滚动（不挤压主窗口布局） */}
-              <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 6 }}>
+            <div key={s.id} className={nf ? 'nf-row' : undefined} style={nf ? undefined : { marginBottom: 22 }}>
+              <h3 className={nf ? 'nf-row-title' : undefined} style={nf ? undefined : { margin: '0 0 10px' }}>{s.title}</h3>
+              {/* 横向滚动条：一屏放得下就排满，放不下横向滚动（Netflix 皮肤下卡片更大、hover 放大） */}
+              <div
+                className={nf ? 'nf-row-scroll' : undefined}
+                style={nf ? undefined : { display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 6 }}
+              >
                 {s.items.map((it, i) => (
-                  <div key={`${it.title}-${i}`} style={{ flex: '0 0 132px' }}>
+                  <div key={`${it.title}-${i}`} style={nf ? undefined : { flex: '0 0 132px' }}>
                     <ItemCard it={it} onOpen={() => goSearch(it.title)} />
                   </div>
                 ))}

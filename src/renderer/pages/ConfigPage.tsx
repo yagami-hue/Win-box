@@ -7,7 +7,8 @@ import { sourceAvailability } from '../../engine/vod/sourceAvailability';
 import { EXT_TEMPLATES, validateExtJson, extAsObject } from '../../engine/config/extHelper';
 import { sourceKindInfo } from '../../engine/config/sourceKind';
 import type { AuditItem, SourceDebugReport } from '../../shared/types';
-import { applyTheme, currentTheme, type Theme } from '../lib/theme';
+import { applyTheme, currentTheme } from '../lib/theme';
+import { THEME_LABELS, type Theme } from '../lib/themeTokens';
 
 type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'appearance' | 'shortcut';
 
@@ -1251,10 +1252,7 @@ export default function ConfigPage() {
           <span className="muted" style={{ fontWeight: 600 }}>外观主题</span>
         </div>
         <div className="row" style={{ gap: 6 }}>
-          {(Object.entries({
-            dark: '🌙 深色',
-            light: '☀️ 亮色',
-          }) as [Theme, string][]).map(([t, label]) => (
+          {(Object.entries(THEME_LABELS) as [Theme, string][]).map(([t, label]) => (
             <span
               key={t}
               className={`tag ${theme === t ? 'active' : ''}`}
@@ -1262,14 +1260,20 @@ export default function ConfigPage() {
                 setTheme(t);
                 applyTheme(t);
               }}
-              title={t === 'dark' ? '深色模式（默认）' : '亮色模式'}
+              title={
+                t === 'dark' ? '经典深色（Mica 半透明表层）'
+                  : t === 'light' ? '经典亮色（Mica 半透明表层）'
+                    : 'Netflix 风格：纯黑舞台 + 品牌红 + 顶部导航 + 影院式卡片/播放器'
+              }
             >
               {label} {theme === t ? '✓' : ''}
             </span>
           ))}
         </div>
         <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-          选择后立即应用，并保存以供下次启动沿用。窗口将使用 Windows Mica 材质，表层随所选主题呈现半透明磨砂质感。
+          选择后立即应用，并保存以供下次启动沿用。经典主题使用 Windows Mica 半透明材质；
+          <b>Netflix</b> 为主题皮肤：纯黑背景（#141414）、品牌红强调（#E50914）、顶部导航取代侧边栏、
+          发现页 Hero 大图 + 横向内容行、详情页大图背景、播放器红色进度条与居中大播放键。
         </div>
       </div>
 

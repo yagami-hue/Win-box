@@ -8,6 +8,7 @@ import type { Episode, MetaExtra, MetaHit, VodDetail } from '../../shared/types'
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 import { pickCover } from '../lib/coverPick';
 import { formatEpisodeLabel } from '../lib/epName';
+import { useTheme } from '../lib/theme';
 
 export default function DetailPage({
   onPlay,
@@ -17,6 +18,8 @@ export default function DetailPage({
   const { key, id } = useParams<{ key: string; id: string }>();
   const [searchParams] = useSearchParams();
   const nav = useNavigate();
+  /** ★ 2026-09-24：Netflix 皮肤下详情页用「大图背景 + 大标题 + 白色播放键」的影院式排版 */
+  const nf = useTheme() === 'netflix';
   // 从列表页经 URL query 携带的封面（fty 等源 detail 接口偶发不返回 vod_pic，用作兜底）
   const fromListPic = searchParams.get('pic') || '';
   /** ★ 2026-09-24：列表页带过来的片名 —— 「立播」等源详情接口不返回 vod_name，用它兜底 */
@@ -239,7 +242,9 @@ export default function DetailPage({
         <BackButton fallback="/home" label="返回列表" />
         <span className="muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
       </div>
-      <div className="content" ref={contentRef}>
+      <div className={`content${nf ? ' nf-detail-wrap' : ''}`} ref={contentRef}>
+        {/* Netflix 皮肤：封面当全宽背景（大图 + 暗渐变），内容压在上面 */}
+        {nf && cover && <div className="nf-detail-backdrop" style={{ backgroundImage: `url(${cover})` }} />}
         {loading ? (
           <div className="empty">加载中…</div>
         ) : err ? (
@@ -301,7 +306,7 @@ export default function DetailPage({
                   ))}
                 </div>
                 <div className="row" style={{ marginTop: 14 }}>
-                  <button className="primary" onClick={play}>▶ 播放选中</button>
+                  <button className={`primary${nf ? ' nf-play-btn' : ''}`} onClick={play}>▶ 播放选中</button>
                 </div>
               </>
             )}
