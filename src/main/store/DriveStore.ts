@@ -26,6 +26,14 @@ export interface DriveCodec {
 export class DriveStore {
   /** 落盘形态（值可能是 `enc:` 密文或旧明文） */
   private data: DriveTokens = {};
+  /**
+   * ★ 明文解码缓存（2026-09-24）：list() 被引擎在**每次蜘蛛调用**里读取（enrichExt 注入网盘 token），
+   * 而每次都要对每个 provider 走一遍 DPAPI 解密 —— 实测用户日志里同一秒刷 20+ 条
+   * 「drive-tokens: 解密失败」告警（708/1108 行），主进程被白白占着。
+   * 现在：解码一次缓存住，直到 set/remove/import 才失效；失败告警每个 provider 只打一次。
+   */
+  private decoded: DriveTokens | null = null;
+  private warnedFail = new Set<string>();
   constructor(private store: JsonStore, private logger: Logger, private codec?: DriveCodec) {
     const raw = this.store.getObject<DriveTokens | null>(DRIVE_KEY, null);
     if (raw && typeof raw === 'object') {
@@ -35,18 +43,23 @@ export class DriveStore {
       }
     }
   }
-  /** 明文列表（内存态，供引擎注入蜘蛛 ext） */
+  /** 明文列表（内存态，供引擎注入蜘蛛 ext）；带解码缓存，失败告警去重 */
   list(): DriveTokens {
+    if (this.decoded) return { ...this.decoded };
     const out: DriveTokens = {};
     for (const [k, v] of Object.entries(this.data)) {
       const p = this.decodeValue(v);
       if (p === null) {
-        this.logger.w(`drive-tokens: 解密失败，跳过 provider=${k}（请重新扫码授权）`);
+        if (!this.warnedFail.has(k)) {
+          this.warnedFail.add(k);
+          this.logger.w(`drive-tokens: 解密失败，跳过 provider=${k}（请重新扫码授权；已只提示一次）`);
+        }
         continue;
       }
       out[k] = p;
     }
-    return out;
+    this.decoded = out;
+    return { ...out };
   }
   has(provider: string): boolean {
     return this.decodeValue(this.data[provider.trim().toLowerCase()]) != null;
@@ -69,6 +82,7 @@ export class DriveStore {
     return this.codec.decode(v);
   }
   private persist(): void {
+    this.decoded = null; // 数据变了 → 解码缓存失效（下次 list() 重新解码）
     this.store.setObject(DRIVE_KEY, this.data);
     this.store.flush();
   }

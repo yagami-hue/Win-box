@@ -34,11 +34,13 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   /** ★ 全源搜索进度（已完成/总源数）：让用户看到「边搜边出」的推进，而不是干等 */
   const [aggProgress, setAggProgress] = useState<{ done: number; total: number; pending: number } | null>(null);
   /**
-   * ★ 结果网格一次渲染多少张卡（默认 240，可「显示更多」追加）：
-   *   33 源全源搜索常出上千条，若一次全渲染，每个进度事件都要重排几百个 <img>（几百 ms/次 ×33）
-   *   —— 用户看到的就是「结果明明在出，界面却卡着不动」。分页渲染后每次刷新都是毫秒级。
+   * ★ 结果网格一次渲染多少张卡（默认 60，可「显示更多」追加）：
+   *   33 源全源搜索常出上千条。**每张卡都要经主进程的本地 /img 中继取图** ——
+   *   一次铺 240 张 = 240 个并发图片请求压在主进程上，进度事件与界面刷新全被挤住
+   *   （用户感受：结果在出但界面「加载不出来、慢得要死」）。
+   *   60 张足够铺满一屏多，其余按需追加（配合图片懒加载，只有真的滚到才发请求）。
    */
-  const [aggCap, setAggCap] = useState(240);
+  const [aggCap, setAggCap] = useState(60);
   const keyRef = useRef('');
   const contentRef = useRef<HTMLDivElement>(null);
   const filtersRef = useRef<Record<string, string>>({});
@@ -469,7 +471,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       //   进度事件带 wd 用于丢弃过期事件（用户已经改了关键词/换了范围）。
       const acc: AggSearchInput[] = [];
       setAggProgress(null);
-      setAggCap(240); // 新搜索：结果网格重新分页
+      setAggCap(60); // 新搜索：结果网格重新分页
       // ★ 进度节流（200ms 合并刷新）：33 个源逐条 setState 会让整屏结果重排几十次，
       //   「边搜边出」反而变成「界面卡着不动」——累计 + 定时合并，首屏仍是首个源完成即出。
       let progressed: { done: number; total: number; pending: number } | null = null;
@@ -660,7 +662,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                   </div>
                   {agg.items.length > aggCap && (
                     <div style={{ textAlign: 'center', marginTop: 12 }}>
-                      <button onClick={() => setAggCap((n) => n + 600)}>显示更多（还有 {agg.items.length - aggCap} 条）</button>
+                      <button onClick={() => setAggCap((n) => n + 240)}>显示更多（还有 {agg.items.length - aggCap} 条）</button>
                     </div>
                   )}
                 </>
@@ -775,7 +777,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                   <div className="list">
                     {items.map((it) => (
                       <div key={it.id} className="list-item" onClick={() => onOpenDetail(key, it.id, picOf(it))}>
-                        <img src={picOf(it)} onError={picErr(it)} loading="lazy" />
+                        <img src={picOf(it)} onError={picErr(it)} loading="lazy" decoding="async" />
                         <span className="li-name" title={it.name}>{it.name}</span>
                         {it.remarks && <span className="badge">{it.remarks}</span>}
                       </div>
@@ -787,7 +789,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                     <div key={it.id} className="card-media" onClick={() => onOpenDetail(key, it.id, picOf(it))}>
                       <div className="card">
                         <div style={{ position: 'relative' }}>
-                          <img src={picOf(it)} onError={picErr(it)} loading="lazy" />
+                          <img src={picOf(it)} onError={picErr(it)} loading="lazy" decoding="async" />
                           {it.remarks && <span className="badge">{it.remarks}</span>}
                         </div>
                         <div className="meta">
@@ -820,7 +822,7 @@ function AggCard({ it, pic, onOpen, onErr }: { it: AggVodItem; pic: string; onOp
     <div className="card-media" onClick={onOpen}>
       <div className="card">
         <div style={{ position: 'relative' }}>
-          <img src={pic} onError={onErr} loading="lazy" />
+          <img src={pic} onError={onErr} loading="lazy" decoding="async" />
           {it.remarks && <span className="badge">{it.remarks}</span>}
           <span
             style={{

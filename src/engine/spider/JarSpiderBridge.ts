@@ -419,6 +419,13 @@ export class JarSpiderBridge {
     return this.pool?.aliveCount ?? 0;
   }
 
+  /** ★ 嵌入式 Python 运行时是否已落盘（同步判定，全源搜索就绪闸门用；**绝不触发下载**） */
+  pyRuntimeReady(): boolean {
+    if (!this.pyRuntimeDir) return false;
+    const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
+    return existsSync(join(dir, 'python.exe')) && existsSync(join(dir, 'runner.py'));
+  }
+
   /**
    * shell-shim（方案 A 影子类）真实实现路径；非空 = 启用，空串 = 默认关闭。
    * 优先级：构造参数 shellShimClasses > 环境变量 TVBOX_SHELL_SHIM_CLASSES。

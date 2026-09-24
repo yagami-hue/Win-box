@@ -47,6 +47,22 @@ export class PySpider extends Spider {
    * （本地 .py 或已缓存的下载脚本）且嵌入式运行时已就绪时生效 —— 预热不触发任何下载。
    * @returns 实际新起的进程数
    */
+  /**
+   * ★ 运行时就绪判定（同步）：脚本与嵌入式 Python 运行时都已落盘才算就绪。
+   * 未就绪 → 返回 false（全源搜索本次跳过该源，绝不触发 11MB 运行时下载）；下载由正常单源使用触发。
+   */
+  isRuntimeReady(): boolean {
+    const base = (this.api || '').split('?')[0];
+    let path = '';
+    if (base.startsWith('file://')) {
+      try { path = fileURLToPath(base); } catch { return false; }
+    } else if (/^https?:\/\//i.test(base)) {
+      path = join(this.bridge.pyCacheDir, `${md5Hex(base)}.py`);
+    }
+    if (!path || !existsSync(path)) return false;
+    return this.bridge.pyRuntimeReady();
+  }
+
   prewarm(count = 1): number {
     const base = (this.api || '').split('?')[0];
     let path = '';

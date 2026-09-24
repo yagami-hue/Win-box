@@ -827,6 +827,9 @@ export class SpiderHost {
      */
     const active: number[] = [];
     const skipped = new Array<AggSearchInput | null>(pool.length).fill(null);
+    const searchT0 = Date.now();
+    let firstHitAt = 0;
+    let pushed = 0;
     for (let i = 0; i < pool.length; i++) {
       const b = pool[i];
       if (this.unsupportedSources.has(b.key)) {
@@ -839,6 +842,24 @@ export class SpiderHost {
         };
         continue;
       }
+      // ★★ 新搜索逻辑（2026-09-24）：**只搜「运行时现在就绪」的源** ★★
+      //   以前一次搜索会被「jar 还没下载/转换（实测 30~40s）」「嵌入式 Python 还没下载」拖住 ——
+      //   33 个源里只要有一个没就绪，整轮搜索就卡在那儿直到超时（用户感受：全源搜索加载不出来）。
+      //   现在：未就绪的源本次直接跳过（同时已在后台启动准备），**搜索永远不等运行时**；
+      //   等后台准备好后，下一次搜索自动包含它们（用户看到的是「秒出 + 逐轮更全」）。
+      try {
+        const sp = this.vm.spiderFactory.getCSP(b, this.host) as { isRuntimeReady?: () => boolean };
+        if (typeof sp.isRuntimeReady === 'function' && !sp.isRuntimeReady()) {
+          skipped[i] = {
+            key: b.key,
+            name: b.name || b.key,
+            status: 'error',
+            error: '运行时就绪中（正在后台下载/转换，约 10~40 秒）：本次已跳过，稍后重新搜索即包含该源',
+            ms: 0,
+          };
+          continue;
+        }
+      } catch { /* 就绪判定失败 → 按可用处理，让正常调用路径给出错误 */ }
       active.push(i);
     }
     const total = active.length;
@@ -861,8 +882,10 @@ export class SpiderHost {
     const finish = (i: number, input: AggSearchInput): void => {
       results[i] = input;
       done++;
+      if (input.status === 'ok' && !firstHitAt) firstHitAt = Date.now() - searchT0;
       try {
         this.onSearchAllProgress?.({ wd: term, source: input, done, total, pending: Math.max(0, total - done) });
+        pushed++;
       } catch { /* 进度推送失败不影响搜索本身 */ }
     };
     // ★ 快速窗口：3s 后推一条「不带 source」的进度 → UI 明确显示「已出 X 个 · 其余 N 个仍在补搜」
@@ -921,6 +944,13 @@ export class SpiderHost {
     const all = pool.map((_, i) => results[i] ?? skipped[i]).filter((r): r is AggSearchInput => r !== null);
     const report = mergeSearchResults(all);
     this.searchCache.set(term, report); // ★ 下次同关键词直接秒回
+    // ★ 诊断摘要（2026-09-24）：一行看清「引擎侧到底卡在哪」——首结果耗时/总耗时/推送条数/跳过数。
+    //   下次用户再报「慢」，看这一行即可区分是引擎慢还是界面慢（跳过数 > 0 说明有源还在后台准备运行时）。
+    this.logger.i(
+      `全源搜索「${term}」：可搜 ${pool.length} 源（本次执行 ${total} / 跳过 ${pool.length - total}）；` +
+        `首结果 ${firstHitAt || '-'}ms；完成 ${Date.now() - searchT0}ms；命中 ${report.hitSources} 源 ${report.items.length} 条；` +
+        `推送进度 ${pushed} 条`,
+    );
     return report;
   }
 

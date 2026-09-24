@@ -123,7 +123,25 @@ export class JarSpider extends Spider {
   }
 
   /**
-   * ★ 预热常驻 JVM（由 SpiderHost.prewarmSpiders 调度）：仅当本源的 jar 转换产物**已在磁盘上**时生效。
+   * ★ 运行时就绪判定（同步、零网络、零转换）：全源搜索用它做「**只搜现在就绪的源**」闸门。
+   * 未就绪时**顺手在后台启动**下载+转换（caller 不等），下次搜索即包含该源。
+   * 这样搜索永远不会被「下载 + dex2jar（实测 30~40s）」拖死 —— 仓内有缓存与否都不影响首屏。
+   */
+  isRuntimeReady(): boolean {
+    const urls = this.jarUrls();
+    if (urls.length === 0) return false;
+    let allReady = true;
+    for (const u of urls) {
+      if (!this.bridge.peekConverted(u)) {
+        allReady = false;
+        // 后台补：不 await、不抛（失败只影响下次搜索是否包含该源）
+        this.bridge.warmup(u).catch(() => undefined);
+      }
+    }
+    return allReady;
+  }
+
+  /** 预热常驻 JVM（由 SpiderHost.prewarmSpiders 调度）：仅当本源的 jar 转换产物**已在磁盘上**时生效。
    * 预热是启动路径上的"锦上添花"，绝不触发下载 / dex2jar 这类重活。
    * @param count 期望的**同 key 热进程数**（多源共用一只 jar 时，全源搜索的真实并发上限就是它）
    * @returns 实际新起的进程数
