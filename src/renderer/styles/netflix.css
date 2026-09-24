@@ -52,11 +52,21 @@
 :root[data-theme='netflix'] .sidebar { display: none; }
 :root[data-theme='netflix'] .main { background: #141414; }
 
-/* 标题栏：只留窗口控制按钮（logo 移到导航条），纯黑可拖拽 */
-:root[data-theme='netflix'] .titlebar { height: 30px; background: #141414; border-bottom: none; }
-:root[data-theme='netflix'] .tb-title { display: none; }
-:root[data-theme='netflix'] .tb-btn { width: 40px; color: #bcbcbc; }
-:root[data-theme='netflix'] .tb-btn:hover { background: #2d2d2d; color: #fff; }
+/* 标题栏：**并进导航条同一行**（一体化）—— 只保留窗口控制按钮，LOGO 在导航条里 */
+:root[data-theme='netflix'] .nf-nav { -webkit-app-region: drag; }
+:root[data-theme='netflix'] .nf-link { -webkit-app-region: no-drag; }
+.nf-nav .titlebar { height: auto; width: auto; flex: none; background: transparent; border: none; padding: 0; justify-content: flex-end; }
+.nf-nav .tb-title { display: none; }
+.nf-nav .tb-controls { gap: 4px; }
+.nf-nav .tb-btn {
+  width: 36px; height: 28px; padding: 0; margin: 0; border-radius: 4px; color: #b9b9b9;
+  display: inline-flex; align-items: center; justify-content: center; background: transparent;
+}
+.nf-nav .tb-btn:hover { background: rgba(255, 255, 255, .12); color: #fff; }
+.nf-nav .tb-btn.tb-close:hover { background: #e50914; color: #fff; }
+/* 导航项与窗口按钮等高（都 ~28px），整行视觉一致 */
+.nf-nav .nf-link { padding: 6px 10px; border-radius: 4px; }
+.nf-nav .nf-link:hover { background: rgba(255, 255, 255, .1); }
 
 /* 顶部导航：logo 左、导航项横排；滚动前是渐变、贴顶后实底 */
 .nf-nav {

@@ -44,15 +44,16 @@
 :root[data-theme='bilibili'] a { color: var(--b-blue); }
 :root[data-theme='bilibili'] .muted { color: var(--b-text2); }
 
-/* ---- 布局：顶部导航（白底）替代侧边栏 ---- */
+/* ---- 布局：顶部导航（白底，标题栏并进同一行）替代侧边栏 ---- */
 :root[data-theme='bilibili'] .app { flex-direction: column; background: var(--b-page); }
 :root[data-theme='bilibili'] .sidebar { display: none; }
 :root[data-theme='bilibili'] .main { background: var(--b-page); }
-:root[data-theme='bilibili'] .titlebar { height: 32px; background: #fff; border-bottom: 1px solid var(--b-line); }
-:root[data-theme='bilibili'] .tb-title { color: var(--b-text2); }
-:root[data-theme='bilibili'] .tb-dot { background: linear-gradient(135deg, var(--b-blue), var(--b-pink)); box-shadow: none; }
-:root[data-theme='bilibili'] .tb-btn { color: var(--b-text2); }
-:root[data-theme='bilibili'] .tb-btn:hover { background: var(--b-page); color: var(--text); }
+/* 标题栏并进导航条（一体化）：只保留窗口控制，浅色小圆角按钮 */
+.nf-nav .tb-btn { color: #61666d; border-radius: 4px; }
+.nf-nav .tb-btn:hover { background: #f1f2f3; color: #18191c; }
+.nf-nav .tb-btn.tb-close:hover { background: #fb7299; color: #fff; }
+/* 独立播放器窗口仍用完整标题栏 */
+:root[data-theme='bilibili'] .app.pwin .titlebar { background: #000; border-bottom: none; }
 
 .nf-nav { /* 结构由 netflix.css 定义，这里只改配色 */ }
 :root[data-theme='bilibili'] .nf-nav {
@@ -60,9 +61,9 @@
   padding: 10px 26px 12px; gap: 22px;
 }
 :root[data-theme='bilibili'] .nf-logo { color: var(--b-blue); font-weight: 900; letter-spacing: 1px; }
-:root[data-theme='bilibili'] .nf-link { color: var(--b-text2); font-weight: 500; padding: 4px 2px; border-radius: 6px; }
-:root[data-theme='bilibili'] .nf-link:hover { color: var(--b-blue); }
-:root[data-theme='bilibili'] .nf-link.active { color: var(--b-blue); font-weight: 700; }
+:root[data-theme='bilibili'] .nf-link { color: var(--b-text2); font-weight: 500; padding: 6px 10px; border-radius: 4px; }
+:root[data-theme='bilibili'] .nf-link:hover { color: var(--b-blue); background: rgba(0, 174, 236, .07); }
+:root[data-theme='bilibili'] .nf-link.active { color: var(--b-blue); background: rgba(0, 174, 236, .1); font-weight: 700; }
 
 /* ---- 卡片：白底 + 12px 圆角 + 轻阴影，hover 边框转蓝 + 浅蓝底（B 站标志性反馈） ---- */
 :root[data-theme='bilibili'] .content { padding: 14px 22px 26px; }

@@ -256,18 +256,21 @@ export default function App() {
         </aside>
       )}
       <main className="main">
-        {/* 自定义无边框标题栏：整条可拖拽，右侧为窗口控制（最小化/最大化/关闭） */}
-        <TitleBar />
-        {topNav && (
+        {/* ★ 2026-09-24：**一体化顶栏** —— 顶部导航皮肤把标题栏（窗口控制）并进导航条同一行，
+            不再单独占一行（此前隐藏标题文字后 space-between 把按钮挤到左上，且看起来像两行） */}
+        {topNav ? (
           <nav className="nf-nav">
-            <span className="nf-logo">{theme === 'bilibili' ? 'bilibili·盒子' : 'WIN-BOX'}</span>
+            <span className="nf-logo">WIN-BOX</span>
             {NAV.map((n) => (
               <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => 'nf-link' + (isActive ? ' active' : '')}>
                 {n.label}
               </NavLink>
             ))}
             <span className="nf-spacer" />
+            <TitleBar />
           </nav>
+        ) : (
+          <TitleBar />
         )}
         <Routes>
           {/* ★ 2026-09-24（用户定稿）：「发现」= 默认首页（软件打开即进这里）；「点播」= 源主页 /home */}
