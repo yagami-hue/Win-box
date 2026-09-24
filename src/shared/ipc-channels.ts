@@ -21,6 +21,9 @@ export const IPC = {
   // ★ 详情页增强（演职员/类型/相关推荐）与发现页榜单（无源默认主页）
   META_EXTRA: 'meta:extra',
   META_DISCOVER: 'meta:discover',
+  // ★ 发现页「分类」浏览（TMDB 类型清单 + 按类型翻页）
+  META_GENRES: 'meta:genres',
+  META_GENRE_PAGE: 'meta:genrePage',
   DRIVE_GET: 'drive:get',
   DRIVE_SET: 'drive:set',
   DRIVE_REMOVE: 'drive:remove',

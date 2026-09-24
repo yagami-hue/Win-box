@@ -11,7 +11,7 @@ import { pickCover, preloadImage } from '../lib/coverPick';
 
 type SortClassView = { id: string; name: string; flag?: string; filters?: FilterGroup[] };
 
-export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string, id: string, pic?: string) => void }) {
+export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string, id: string, pic?: string, name?: string) => void }) {
   const [sites, setSites] = useState<SourceBean[]>([]);
   const [key, setKey] = useState('');
   const [classes, setClasses] = useState<SortClassView[]>([]);
@@ -722,7 +722,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                         it={it}
                         pic={aggPicOf(it)}
                         onErr={aggPicErr(it)}
-                        onOpen={() => onOpenDetail(it.sourceKey, it.id, aggPicOf(it))}
+                        onOpen={() => onOpenDetail(it.sourceKey, it.id, aggPicOf(it), it.name)}
                       />
                     ))}
                   </div>
@@ -842,7 +842,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 {listStyle ? (
                   <div className="list">
                     {items.map((it) => (
-                      <div key={it.id} className="list-item" onClick={() => onOpenDetail(key, it.id, picOf(it))}>
+                      <div key={it.id} className="list-item" onClick={() => onOpenDetail(key, it.id, picOf(it), it.name)}>
                         <img src={picOf(it)} onError={picErr(it)} loading="lazy" decoding="async" />
                         <span className="li-name" title={it.name}>{it.name}</span>
                         {it.remarks && <span className="badge">{it.remarks}</span>}
@@ -852,7 +852,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 ) : (
                 <div className="grid">
                   {items.map((it) => (
-                    <div key={it.id} className="card-media" onClick={() => onOpenDetail(key, it.id, picOf(it))}>
+                    <div key={it.id} className="card-media" onClick={() => onOpenDetail(key, it.id, picOf(it), it.name)}>
                       <div className="card">
                         <div style={{ position: 'relative' }}>
                           {/* ★ 空封面（搜索未命中 + 源图坏）→ 渲染占位块，绝不渲染坏图/灰影 */}

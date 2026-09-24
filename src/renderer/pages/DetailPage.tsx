@@ -19,6 +19,8 @@ export default function DetailPage({
   const nav = useNavigate();
   // 从列表页经 URL query 携带的封面（fty 等源 detail 接口偶发不返回 vod_pic，用作兜底）
   const fromListPic = searchParams.get('pic') || '';
+  /** ★ 2026-09-24：列表页带过来的片名 —— 「立播」等源详情接口不返回 vod_name，用它兜底 */
+  const fromListName = searchParams.get('name') || '';
   const [detail, setDetail] = useState<VodDetail | null>(null);
   const [flag, setFlag] = useState('');
   const [ep, setEp] = useState(0);
@@ -26,6 +28,10 @@ export default function DetailPage({
   const [err, setErr] = useState('');
   const contentRef = useRef<HTMLDivElement>(null);
   const memKey = `${decodeURIComponent(key || '')}:${decodeURIComponent(id || '')}`;
+  /** ★ 2026-09-24：展示用片名 —— 详情自带优先，缺失时用列表页带入的（立播等源详情不返回 vod_name） */
+  const displayName = (detail?.name || fromListName || '').trim();
+  /** meta（封面/演职员/推荐）查询用片名：去掉「 - 副标题」尾巴 */
+  const detailName = displayName.split(' - ')[0]?.trim() || '';
 
   useEffect(() => {
     if (!key || !id) return;
@@ -73,9 +79,9 @@ export default function DetailPage({
   const [metaPicBad, setMetaPicBad] = useState(false);
   useEffect(() => {
     if (!detail) { setMetaHit(null); return; }
-    const name = (detail.name || '').trim().split(' - ')[0]?.trim();
+    const name = detailName;
     if (!name) return;
-    const y = /((?:19|20)\d{2})/.exec(`${detail.name} ${detail.year || ''} ${detail.remarks || ''}`);
+    const y = /((?:19|20)\d{2})/.exec(`${detail.name || fromListName} ${detail.year || ''} ${detail.remarks || ''}`);
     let alive = true;
     client
       .metaSearch(name, y ? y[1] : undefined)
@@ -83,16 +89,16 @@ export default function DetailPage({
       .catch(() => undefined);
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail]);
+  }, [detail, fromListName]);
 
   // ---- ★ 2026-09-24 详情页增强：TMDB 演职员 / 类型 / 相关推荐 ----
   //   供下方「演员名单 + 相关推荐」区块使用；点击演员或推荐影片 → 回首页对关键词跑一次全源搜索。
   const [extra, setExtra] = useState<MetaExtra | null>(null);
   useEffect(() => {
     if (!detail) { setExtra(null); return; }
-    const name = (detail.name || '').trim().split(' - ')[0]?.trim();
+    const name = detailName;
     if (!name) return;
-    const y = /((?:19|20)\d{2})/.exec(`${detail.name} ${detail.year || ''} ${detail.remarks || ''}`);
+    const y = /((?:19|20)\d{2})/.exec(`${detail.name || fromListName} ${detail.year || ''} ${detail.remarks || ''}`);
     let alive = true;
     client
       .metaExtra(name, y ? y[1] : undefined)
@@ -100,7 +106,7 @@ export default function DetailPage({
       .catch(() => undefined);
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail]);
+  }, [detail, fromListName]);
 
   // ★ 封面加载失败兜底（源封面优先策略下的三段式）：
   //   · 失败的是补图（/img 中继 4xx/超时）→ 移除 metaHit，落回源图；
@@ -128,9 +134,9 @@ export default function DetailPage({
     // ★ 源封面坏了而 TMDB 尚未命中 → 主动再查一次（幂等，仅一次）
     if (!metaHit && !metaRetried.current) {
       metaRetried.current = true;
-      const name = (detail?.name || '').trim().split(' - ')[0]?.trim();
+      const name = detailName;
       if (name) {
-        const y = /((?:19|20)\d{2})/.exec(`${detail?.name || ''} ${detail?.year || ''} ${detail?.remarks || ''}`);
+        const y = /((?:19|20)\d{2})/.exec(`${detail?.name || fromListName} ${detail?.year || ''} ${detail?.remarks || ''}`);
         client.metaSearch(name, y ? y[1] : undefined)
           .then((h) => { if (h) setMetaHit(h); })
           .catch(() => undefined);
@@ -190,11 +196,11 @@ export default function DetailPage({
       }
       // ★ 网盘源集名过长 → 播放器标题/历史记录统一用「第N集 · 体积」
       const label = formatEpisodeLabel(target.name, ep);
-      onPlay(r.url || target.url, `${detail.name} - ${label}`, decodeURIComponent(key!), decodeURIComponent(id!), {
+      onPlay(r.url || target.url, `${displayName} - ${label}`, decodeURIComponent(key!), decodeURIComponent(id!), {
         pic: detail.pic,
         remarks: label,
-        sourceName: detail?.name ? detail.name.split(' - ')[0] : undefined,
-        title: detail?.name || undefined, // ★ 剧名副名（详情页主标题），供字幕检索使用，避免从集名反推失败
+        sourceName: displayName ? displayName.split(' - ')[0] : undefined,
+        title: displayName || undefined, // ★ 剧名副名（详情页主标题），供字幕检索使用，避免从集名反推失败
         vodId: detail.id,
         // 换集导航数据：完整集列表 + 当前集下标 + 播放源 flag + vip 候选线路
         episodes: detail.episodes[flag] || [],
@@ -230,8 +236,8 @@ export default function DetailPage({
   return (
     <>
       <div className="topbar">
-        <BackButton fallback="/" label="返回列表" />
-        <span className="muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{detail?.name || ''}</span>
+        <BackButton fallback="/home" label="返回列表" />
+        <span className="muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
       </div>
       <div className="content" ref={contentRef}>
         {loading ? (
@@ -253,7 +259,7 @@ export default function DetailPage({
                 }}>暂无封面</div>
               )}
               <div style={{ flex: 1 }}>
-                <h2 style={{ margin: '0 0 8px' }}>{detail.name}</h2>
+                <h2 style={{ margin: '0 0 8px' }}>{displayName}</h2>
                 <div className="muted" style={{ marginBottom: 4 }}>{detail.type} · {detail.year} · {detail.area}</div>
                 {/* ★ 2026-09-24：源数据缺导演/演员时，用 TMDb 演职员补齐（user 反馈部分源两项都没有） */}
                 {directorText && (

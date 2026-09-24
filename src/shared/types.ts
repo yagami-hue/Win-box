@@ -281,6 +281,18 @@ export interface DiscoverSection {
   items: DiscoverItem[];
 }
 
+// ---------- 发现页「分类」浏览（TMDB 类型清单 + 按类型翻页；★ 2026-09-24） ----------
+export interface DiscoverGenre {
+  id: number;
+  name: string;
+}
+
+export interface DiscoverGenrePage {
+  items: DiscoverItem[];
+  page: number;
+  totalPages: number;
+}
+
 // ---------- 导入诊断 ----------
 export type SiteStatus = 'OK' | 'SKIP' | 'DEGRADE';
 export type SiteReason =

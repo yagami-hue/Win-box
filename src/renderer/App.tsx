@@ -14,30 +14,13 @@ import { client } from './api/client';
 import type { Episode } from '../shared/types';
 
 const NAV = [
-  { to: '/', label: '点播', ico: '▶', end: true },
-  { to: '/discover', label: '发现', ico: '🧭' },
+  // ★ 2026-09-24（用户定稿）：**发现放第一位，且打开软件默认进发现页**；「点播」= 源主页，移到 /home
+  { to: '/', label: '发现', ico: '🧭', end: true },
+  { to: '/home', label: '点播', ico: '▶' },
   { to: '/history', label: '历史', ico: '🕘' },
   { to: '/live', label: '直播', ico: '📡' },
   { to: '/config', label: '配置', ico: '⚙' },
 ];
-
-/**
- * ★ 2026-09-24 根路由分流：**没有任何站源 → 发现页**（TMDB 榜单，点击影片走全源搜索）；
- * 有源 → 源主页（HomePage 自己会恢复「上次选中的源」，所以选过源的用户不会看到发现页）。
- */
-function RootPage({ onOpenDetail }: { onOpenDetail: (key: string, id: string, pic?: string) => void }) {
-  const [mode, setMode] = useState<'checking' | 'discover' | 'home'>('checking');
-  useEffect(() => {
-    let alive = true;
-    client
-      .cfgGet()
-      .then((cfg) => { if (alive) setMode(cfg.sources.length === 0 ? 'discover' : 'home'); })
-      .catch(() => { if (alive) setMode('home'); }); // 读配置失败按有源处理（源主页有完整错误提示）
-    return () => { alive = false; };
-  }, []);
-  if (mode === 'checking') return <div className="empty">加载中…</div>;
-  return mode === 'discover' ? <DiscoverPage /> : <HomePage onOpenDetail={onOpenDetail} />;
-}
 
 export default function App() {
   const nav = useNavigate();
@@ -222,6 +205,16 @@ export default function App() {
     });
   };
 
+  // ★ 2026-09-24：列表 → 详情的统一跳转（带上封面与片名）
+  //   片名兜底：部分源（如「立播」）详情接口不返回 vod_name，详情页用它显示标题/查 TMDb
+  const openDetail = (k: string, id: string, pic?: string, name?: string) => {
+    const qs = new URLSearchParams();
+    if (pic) qs.set('pic', pic);
+    if (name) qs.set('name', name);
+    const q = qs.toString();
+    nav(`/detail/${encodeURIComponent(k)}/${encodeURIComponent(id)}${q ? `?${q}` : ''}`);
+  };
+
   if (isPlayerWin) {
     // 独立播放器窗口：仅播放界面（无侧栏）；标题栏由 PlayerPage 内联渲染（标题=当前集）
     return (
@@ -258,15 +251,14 @@ export default function App() {
         {/* 自定义无边框标题栏：整条可拖拽，右侧为窗口控制（最小化/最大化/关闭） */}
         <TitleBar />
         <Routes>
-          <Route path="/" element={<RootPage onOpenDetail={(k, id, pic) => nav(`/detail/${encodeURIComponent(k)}/${encodeURIComponent(id)}${pic ? `?pic=${encodeURIComponent(pic)}` : ''}`)} />} />
+          {/* ★ 2026-09-24（用户定稿）：「发现」= 默认首页（软件打开即进这里）；「点播」= 源主页 /home */}
+          <Route path="/" element={<DiscoverPage />} />
+          <Route path="/home" element={<HomePage onOpenDetail={openDetail} />} />
           {/**
             * ★ 2026-09-24：全源搜索专用路由 —— 详情页「演员/相关推荐」与发现页卡片点击后跳这里，
             * 由 HomePage 读 `?agg=<关键词>` 自动执行一次全源搜索。
-            * 不挂在 `/` 上：那时 RootPage 会按「有无源」重新分流（无源→发现页），跳转等于没跳。
             */}
-          <Route path="/search" element={<HomePage onOpenDetail={(k, id, pic) => nav(`/detail/${encodeURIComponent(k)}/${encodeURIComponent(id)}${pic ? `?pic=${encodeURIComponent(pic)}` : ''}`)} />} />
-          {/* ★ 2026-09-24：发现页独立入口（侧边栏「发现」）—— 有源时也能随时进来自选影片走全源搜索 */}
-          <Route path="/discover" element={<DiscoverPage />} />
+          <Route path="/search" element={<HomePage onOpenDetail={openDetail} />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/detail/:key/:id" element={<DetailPage onPlay={onDetailPlay} />} />
           <Route path="/live" element={<LivePage />} />

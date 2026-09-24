@@ -1,6 +1,67 @@
 // tests/tmdbProvider.spec.ts — TMDB 元数据补全的纯函数测试（解析/缓存键/名称规范化，不依赖网络）
 import { describe, expect, it } from 'vitest';
-import { parseTmdbSearch, metaCacheKey, metaQueryName, metaQueryVariants, truncAtYear, parseTmdbExtras, toDiscoverItems } from '../src/main/meta/tmdbProvider';
+import { parseTmdbSearch, metaCacheKey, metaQueryName, metaQueryVariants, truncAtYear, parseTmdbExtras, toDiscoverItems, parseGenreList, parseGenrePage, titleMatches } from '../src/main/meta/tmdbProvider';
+
+// ★ 2026-09-24：TMDb 命中「实质同名」校验（防误匹配 → 补出来的封面/演职员全是错的）
+describe('titleMatches', () => {
+  it('同名（含季/集噪声、空格与标点差异）→ 命中', () => {
+    expect(titleMatches('狂飙', '狂飙')).toBe(true);
+    expect(titleMatches('庆余年 第二季', '庆余年')).toBe(true);
+    expect(titleMatches('流浪地球 2', '流浪地球2')).toBe(true);
+    expect(titleMatches('Re：从零开始的异世界生活 第二季', 'Re：从零开始的异世界生活')).toBe(true);
+  });
+
+  it('只差纯序号尾巴（≤3 位数字/罗马数字）→ 命中', () => {
+    expect(titleMatches('流浪地球2', '流浪地球')).toBe(true);
+    expect(titleMatches('金刚狼', '金刚狼2')).toBe(true);
+    expect(titleMatches('Saw', 'Saw IV')).toBe(true);
+  });
+
+  it('多出实义词 → 拒绝（实测误匹配：韩国制造 → 《韩国制造的我》）', () => {
+    expect(titleMatches('韩国制造 第二季', '韩国制造的我')).toBe(false);
+    expect(titleMatches('武动乾坤', '武动乾坤之冰心在玉壶')).toBe(false);
+    expect(titleMatches('潜行', '潜行狙击')).toBe(false);
+  });
+
+  it('空串/无交集 → 拒绝', () => {
+    expect(titleMatches('', '狂飙')).toBe(false);
+    expect(titleMatches('狂飙', '')).toBe(false);
+    expect(titleMatches('狂飙', '无间道')).toBe(false);
+  });
+});
+
+// ★ 2026-09-24：发现页「分类」（TMDB 类型清单 + 按类型分页）
+describe('parseGenreList / parseGenrePage', () => {
+  it('类型清单：id/name 合法项保留，非法项跳过', () => {
+    const g = parseGenreList({ genres: [{ id: 28, name: '动作' }, { id: 'x', name: '坏ID' }, { id: 35, name: '' }, { id: 12, name: '冒险' }] });
+    expect(g).toEqual([{ id: 28, name: '动作' }, { id: 12, name: '冒险' }]);
+    expect(parseGenreList(null)).toEqual([]);
+  });
+
+  it('分类分页：条目 + page/total_pages（上限 500），无图条目跳过', () => {
+    const page = parseGenrePage(
+      {
+        page: 2,
+        total_pages: 800,
+        results: [
+          { id: 1, title: '流浪地球', release_date: '2019-02-05', poster_path: '/a.jpg' },
+          { id: 2, title: '无图', release_date: '', poster_path: '' },
+        ],
+      },
+      'movie',
+    );
+    expect(page.page).toBe(2);
+    expect(page.totalPages).toBe(500); // TMDB 上限钳制
+    expect(page.items.length).toBe(1);
+    expect(page.items[0].title).toBe('流浪地球');
+    expect(page.items[0].poster).toMatch(/^http:\/\/127\.0\.0\.1:9978\/img\?u=/);
+  });
+
+  it('分类分页：字段缺失 → page=1/totalPages=1、空条目', () => {
+    const p = parseGenrePage({}, 'tv');
+    expect(p).toEqual({ items: [], page: 1, totalPages: 1 });
+  });
+});
 
 // ★ 2026-09-24：TMDB id 随搜索结果带出（详情页「演职员/相关推荐」需要它再查一次详情）
 describe('parseTmdbSearch — tmdbId', () => {

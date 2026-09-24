@@ -2,7 +2,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { IpcResult } from '../shared/ipc-result';
 import { IPC } from '../shared/ipc-channels';
-import type { SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile, MetaHit, MetaExtra, DiscoverSection } from '../shared/types';
+import type { SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile, MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage } from '../shared/types';
 
 const invoke = <T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> =>
   ipcRenderer.invoke(channel, ...args);
@@ -85,6 +85,10 @@ const api = {
     extra: (name: string, year?: string) => invoke<MetaExtra | null>(IPC.META_EXTRA, name, year),
     // ★ 发现页榜单（无源时的默认主页；refresh=true 绕过 6h 缓存）
     discover: (refresh?: boolean) => invoke<DiscoverSection[]>(IPC.META_DISCOVER, !!refresh),
+    // ★ 发现页「分类」：TMDB 类型清单（电影/剧集）与按类型翻页
+    genres: () => invoke<{ movie: DiscoverGenre[]; tv: DiscoverGenre[] }>(IPC.META_GENRES),
+    genrePage: (mediaType: 'movie' | 'tv', genreId: number, page: number) =>
+      invoke<DiscoverGenrePage>(IPC.META_GENRE_PAGE, mediaType, genreId, page),
   },
   drives: {
     get: () => invoke(IPC.DRIVE_GET),

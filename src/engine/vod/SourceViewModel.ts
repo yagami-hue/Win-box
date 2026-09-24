@@ -10,6 +10,7 @@ import { parseFilters, type SortClass } from '../parse/Movie';
 import { SpiderFactory, sourceTimeoutMs, type SpiderFactoryOptions } from '../spider/SpiderFactory';
 import type { Spider } from '../spider/Spider';
 import { parseEpisodes } from './VodNormalizer';
+import { fixDetailFields } from './detailFix';
 import { SourceProblemError, SOURCE_PROBLEM_TEXT } from '../spider/errors';
 import { sourceAvailability, type SourceAvailability } from './sourceAvailability';
 
@@ -414,7 +415,7 @@ export class SourceViewModel {
           flags.push(f);
         }
       }
-      return {
+      const detail: VodDetail = {
         id: String(v['vod_id'] ?? v['id'] ?? ''),
         name: String(v['vod_name'] ?? v['name'] ?? ''),
         pic: String(
@@ -435,6 +436,8 @@ export class SourceViewModel {
         flags,
         episodes,
       };
+      // ★ 2026-09-24：字段错位纠偏（如「立播」源把地区名塞进导演/演员、类型串塞进年份/地区）
+      return fixDetailFields(detail);
     } catch {
       return null;
     }

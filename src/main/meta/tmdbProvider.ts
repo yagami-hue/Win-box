@@ -7,7 +7,7 @@ import { createDohAgent } from '../net/DnsResolver';
 import { getTmdbCredentials } from './credentials';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import type { Logger } from '../../shared/types';
-import type { MetaHit, MetaExtra, DiscoverItem, DiscoverSection } from '../../shared/types';
+import type { MetaHit, MetaExtra, DiscoverItem, DiscoverSection, DiscoverGenre, DiscoverGenrePage } from '../../shared/types';
 import type { MetaStore } from './MetaStore';
 
 const agent = createDohAgent();
@@ -73,6 +73,37 @@ export function metaCacheKey(name: string, year?: string): string {
 /** 名称规范化查询串：仅清首尾空白与尾部常见标点（中文括号保留，TMDB 搜索本身容错） */
 export function metaQueryName(name: string): string {
   return (name || '').trim().replace(/[\s.,，。:：\-—]+$/g, '');
+}
+
+/** 季/集噪声（用于片名严格比对前的净化：「第二季」「全40集」「更新至12集」） */
+const SEASON_NOISE = /第\s*[\d一二三四五六七八九十百零]+\s*[季部]|全\s*\d+\s*[集话話]|更新至\s*\d+\s*[集话話]?|\d+\s*[集话話]|season\s*\d+/gi;
+
+function normTitle(s: string): string {
+  return (s || '')
+    .replace(SEASON_NOISE, '')
+    .toLowerCase()
+    .replace(/[\s·:：,，.。\-—_()（）[\]【】《》「」"'’!！?？+&/\\]/g, '')
+    .trim();
+}
+
+/**
+ * ★ 2026-09-24：**TMDb 命中必须与查询片名「实质同名」**，否则视为误匹配。
+ * 起因（实测）：立播「韩国制造 第二季」被 TMDb 匹配成《韩国制造的我》（2026 泰米尔语电影）——
+ * 用它补出来的封面/导演/演员全是错的（导演 Ra. Karthik、主演印度演员），比不补更糟。
+ * 规则（净化季/集噪声后）：
+ *   ① 完全相同 → 命中；
+ *   ② 只差一个「纯序号」尾巴（≤3 位数字/罗马数字，如 流浪地球 vs 流浪地球2）→ 命中；
+ *   ③ 其余（如 韩国制造 vs 韩国制造的我）→ **拒绝**（宁可回退源封面/不补演职员）。
+ */
+export function titleMatches(query: string, hitTitle: string): boolean {
+  const q = normTitle(query);
+  const h = normTitle(hitTitle);
+  if (!q || !h) return false;
+  if (q === h) return true;
+  const extra = (a: string, b: string): string | null =>
+    a.startsWith(b) ? a.slice(b.length) : a.endsWith(b) ? a.slice(0, a.length - b.length) : null;
+  const ok = (x: string | null): boolean => x !== null && x.length > 0 && x.length <= 3 && /^[0-9ivx]+$/.test(x);
+  return ok(extra(q, h)) || ok(extra(h, q));
 }
 
 /** 单次 metaSearch 最多尝试的名称变体数（防个别查不到的名字把 API 打爆） */
@@ -226,13 +257,22 @@ export async function tmdbSearchTitle(
 
   // ★ forceFresh：跳过缓存直接重查（2026-09-24 详情页增强用 —— 老缓存条目没有 tmdbId，
   //   需要一次「带 id」的新结果才能查演职员/推荐；结果照常写回缓存）
+  // ★ 缓存也要过同名校验：此前已缓存的「误匹配」（如 韩国制造 → 韩国制造的我）视为 miss 重查，
+  //   否则要等 7 天 TTL 才自愈（本轮修复 2026-09-24）
+  const usableHit = (h: MetaHit | null | undefined): h is MetaHit =>
+    !!h && (titleMatches(variants[0], h.title) || titleMatches(name, h.title));
+
   if (!opts?.forceFresh) {
     // 内存 LRU
-    if (memCache.has(primaryKey)) return memCache.get(primaryKey) ?? null;
+    if (memCache.has(primaryKey)) {
+      const m = memCache.get(primaryKey);
+      if (usableHit(m)) return m;
+      memCache.delete(primaryKey);
+    }
 
     // 磁盘缓存（命中且 vv 未过期才直接返回；旧/过期缓存返回 undefined 触发重查+重校验）
     const disk = store.cacheGet(primaryKey);
-    if (disk && disk.hit) {
+    if (disk && disk.hit && usableHit(disk.hit)) {
       memSet(primaryKey, disk.hit);
       return disk.hit;
     }
@@ -279,6 +319,8 @@ export async function tmdbSearchTitle(
 
     let hit: MetaHit | null = null;
     for (const cand of candidates.slice(0, 6)) {
+      // ★ 严格同名校验（见 titleMatches）：同名或仅差序号才算命中 —— 否则宁可 miss（不补错内容）
+      if (!titleMatches(round.q, cand.title) && !titleMatches(name, cand.title)) continue;
       // 封面经本地 /img 中继出图（渲染层直连 image.tmdb.org 可能被污染）；先校验原始图真实可读
       if (await verifyPoster(cand.poster)) {
         hit = { ...cand, poster: `${IMG_PROXY}?u=${encodeURIComponent(cand.poster)}` };
@@ -493,6 +535,104 @@ export async function tmdbDiscover(logger: Logger, refresh = false): Promise<Dis
   return discoverInflight;
 }
 
+// ==================== 发现页「分类」浏览（★ 2026-09-24） ====================
+
+const GENRES_TTL_MS = 24 * 3600 * 1000;
+const GENRE_PAGE_TTL_MS = 6 * 3600 * 1000;
+let genresCache: { t: number; data: { movie: DiscoverGenre[]; tv: DiscoverGenre[] } } | null = null;
+const genrePageCache = new Map<string, { t: number; data: DiscoverGenrePage }>();
+
+/** 解析 `/genre/{type}/list` 响应（纯函数）：{ genres: [{ id, name }] } */
+export function parseGenreList(json: unknown): DiscoverGenre[] {
+  const j = json as { genres?: unknown } | null;
+  if (!Array.isArray(j?.genres)) return [];
+  const out: DiscoverGenre[] = [];
+  for (const g of j!.genres as Record<string, unknown>[]) {
+    const id = Number(g?.id);
+    const name = String(g?.name ?? '').trim();
+    if (Number.isFinite(id) && id > 0 && name) out.push({ id, name });
+  }
+  return out;
+}
+
+/** 解析 `/discover/{type}` 响应（纯函数）：条目 + 分页信息 */
+export function parseGenrePage(json: unknown, mediaType: 'movie' | 'tv'): DiscoverGenrePage {
+  const j = json as { page?: unknown; total_pages?: unknown } | null;
+  const page = Number(j?.page);
+  const totalPages = Number(j?.total_pages);
+  return {
+    items: toDiscoverItems(json, mediaType),
+    page: Number.isFinite(page) && page > 0 ? page : 1,
+    totalPages: Number.isFinite(totalPages) && totalPages > 0 ? Math.min(totalPages, 500) : 1, // TMDB 上限 500 页
+  };
+}
+
+/**
+ * 类型清单（电影 / 剧集两套，中文名；24h 内存缓存）。
+ * 无凭据 → 返回空列表（渲染层隐藏分类区，不报错）。
+ */
+export async function tmdbGenres(logger: Logger): Promise<{ movie: DiscoverGenre[]; tv: DiscoverGenre[] }> {
+  const empty = { movie: [] as DiscoverGenre[], tv: [] as DiscoverGenre[] };
+  const cred = getTmdbCredentials();
+  if (!cred) return empty;
+  if (genresCache && Date.now() - genresCache.t < GENRES_TTL_MS) return genresCache.data;
+  const one = async (type: 'movie' | 'tv'): Promise<DiscoverGenre[]> => {
+    const resp = await getJson(`${TMDB_API}/genre/${type}/list?language=zh-CN`, cred.accessToken, 10000);
+    if (resp.status !== 200) {
+      logger.w(`meta:类型清单(${type}) 失败 status=${resp.status}`);
+      return [];
+    }
+    try { return parseGenreList(JSON.parse(resp.text)); } catch { return []; }
+  };
+  try {
+    const [movie, tv] = await Promise.all([one('movie'), one('tv')]);
+    const data = { movie, tv };
+    if (movie.length || tv.length) genresCache = { t: Date.now(), data };
+    return data;
+  } catch (e) {
+    logger.w(`meta:类型清单异常: ${(e as Error).message}`);
+    return empty;
+  }
+}
+
+/**
+ * 按类型取一页（`/discover/{type}?with_genres=<id>&sort_by=popularity.desc&page=N`，中文）。
+ * 6h 内存缓存（key=类型|id|页）；单类型条目上限 500 条缓存条目，超出丢最旧。
+ */
+export async function tmdbGenrePage(
+  logger: Logger,
+  mediaType: 'movie' | 'tv',
+  genreId: number,
+  page = 1,
+): Promise<DiscoverGenrePage> {
+  const empty: DiscoverGenrePage = { items: [], page: 1, totalPages: 1 };
+  const cred = getTmdbCredentials();
+  const id = Number(genreId);
+  const pg = Math.max(1, Math.min(500, Number(page) || 1));
+  if (!cred || !Number.isFinite(id) || id <= 0) return empty;
+  const key = `${mediaType}|${id}|${pg}`;
+  const c = genrePageCache.get(key);
+  if (c && Date.now() - c.t < GENRE_PAGE_TTL_MS) return c.data;
+  try {
+    const url = `${TMDB_API}/discover/${mediaType}?language=zh-CN&with_genres=${id}&sort_by=popularity.desc&include_adult=false&page=${pg}`;
+    const resp = await getJson(url, cred.accessToken, 12000);
+    if (resp.status !== 200) {
+      logger.w(`meta:分类(${key}) 失败 status=${resp.status} ${resp.text.slice(0, 120)}`);
+      return empty;
+    }
+    const data = parseGenrePage(JSON.parse(resp.text), mediaType);
+    if (genrePageCache.size >= 500) {
+      const first = genrePageCache.keys().next().value;
+      if (first !== undefined) genrePageCache.delete(first);
+    }
+    genrePageCache.set(key, { t: Date.now(), data });
+    return data;
+  } catch (e) {
+    logger.w(`meta:分类(${key}) 异常: ${(e as Error).message}`);
+    return empty;
+  }
+}
+
 function memSet(cacheKey: string, hit: MetaHit | null): void {
   if (memCache.size >= MAX_MEM) {
     const first = memCache.keys().next().value;
@@ -501,9 +641,11 @@ function memSet(cacheKey: string, hit: MetaHit | null): void {
   memCache.set(cacheKey, hit);
 }
 
-/** 测试用：清空内存缓存（封面/详情增强/发现页三处） */
+/** 测试用：清空内存缓存（封面/详情增强/发现页/分类四处） */
 export function __resetMemCacheForTest(): void {
   memCache.clear();
   extrasCache.clear();
   discoverCache = null;
+  genresCache = null;
+  genrePageCache.clear();
 }

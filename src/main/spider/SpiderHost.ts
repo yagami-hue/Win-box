@@ -55,9 +55,9 @@ import { DanmakuStore } from '../danmaku/DanmakuStore';
 import { dandanplaySearch, dandanplayBangumi, dandanplayComment } from '../danmaku/dandanplayProvider';
 import { getDanmakuCredentials } from '../danmaku/credentials';
 import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
-import type { MetaHit, MetaExtra, DiscoverSection } from '../../shared/types';
+import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage } from '../../shared/types';
 import { MetaStore } from '../meta/MetaStore';
-import { tmdbSearchTitle, tmdbExtras, tmdbDiscover, metaCacheKey, metaQueryVariants } from '../meta/tmdbProvider';
+import { tmdbSearchTitle, tmdbExtras, tmdbDiscover, tmdbGenres, tmdbGenrePage, metaCacheKey, metaQueryVariants } from '../meta/tmdbProvider';
 import { doubanSearchTitle, isCjkName, DOUBAN_CACHE_PREFIX } from '../meta/doubanProvider';
 import { so360SearchCover, SO360_CACHE_PREFIX } from '../meta/so360Provider';
 
@@ -537,6 +537,27 @@ export class SpiderHost {
     } catch (e) {
       this.logger.w(`meta:发现页查询失败: ${(e as Error).message}`);
       return [];
+    }
+  }
+
+  /** ★ 2026-09-24 发现页「分类」：TMDB 类型清单（电影/剧集两套，中文） */
+  async metaGenres(): Promise<{ movie: DiscoverGenre[]; tv: DiscoverGenre[] }> {
+    try {
+      return await tmdbGenres(this.logger);
+    } catch (e) {
+      this.logger.w(`meta:类型清单查询失败: ${(e as Error).message}`);
+      return { movie: [], tv: [] };
+    }
+  }
+
+  /** ★ 2026-09-24 发现页「分类」：按类型取一页（popularity 排序） */
+  async metaGenrePage(mediaType: string, genreId: number, page: number): Promise<DiscoverGenrePage> {
+    const t: 'movie' | 'tv' = String(mediaType) === 'tv' ? 'tv' : 'movie';
+    try {
+      return await tmdbGenrePage(this.logger, t, Number(genreId) || 0, Number(page) || 1);
+    } catch (e) {
+      this.logger.w(`meta:分类查询失败: ${(e as Error).message}`);
+      return { items: [], page: 1, totalPages: 1 };
     }
   }
 
