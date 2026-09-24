@@ -1208,7 +1208,7 @@ export default function ConfigPage() {
           </div>
         )}
         <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-          <b>绑定即注入</b>：保存后，宿主会在每次调用 jar(dex) 蜘蛛前，把这里绑定的 token 按「provider 名」实时并入该源 <code>ext</code> JSON（同名键覆盖，蜘蛛 <code>init(Context,ext)</code> 即可读到）。使用时在目标源的 ext 里写好对应键名（如阿里云盘族常见 <code>{'{ "ali": "" }'}</code> / <code>{'{ "alipan": "" }'}</code>）再保存即可生效，无需重启。具体键名与获取步骤以各 jar 自带说明为准（不同源族写法不同）；未声明 ext 的源不会被强塞。
+          保存后立即对使用该网盘的源生效，无需重启。
         </div>
       </div>
 
@@ -1232,9 +1232,6 @@ export default function ConfigPage() {
         </div>
         <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
           {subTokenSaved ? '✓ 已保存。播放器中点「字幕」即可按当前剧集在线检索。' : '在 assrt.net 免费注册后，会员中心可获取一个 token（无需付费）。填写后即可在线检索中文字幕。'}
-        </div>
-        <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-          提示：伪射手域名已失效、字幕库/SubHD 需浏览器反爬破解，故在线字幕统一走 assrt 公开 API。
         </div>
       </div>
 
@@ -1261,19 +1258,15 @@ export default function ConfigPage() {
                 applyTheme(t);
               }}
               title={
-                t === 'dark' ? '经典深色（Mica 半透明表层）'
-                  : t === 'light' ? '经典亮色（Mica 半透明表层）'
-                    : 'Netflix 风格：纯黑舞台 + 品牌红 + 顶部导航 + 影院式卡片/播放器'
+                t === 'dark' ? '经典深色'
+                  : t === 'light' ? '经典亮色'
+                    : t === 'netflix' ? 'Netflix 风格'
+                      : '哔哩哔哩风格'
               }
             >
               {label} {theme === t ? '✓' : ''}
             </span>
           ))}
-        </div>
-        <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-          选择后立即应用，并保存以供下次启动沿用。经典主题使用 Windows Mica 半透明材质；
-          <b>Netflix</b> 为主题皮肤：纯黑背景（#141414）、品牌红强调（#E50914）、顶部导航取代侧边栏、
-          发现页 Hero 大图 + 横向内容行、详情页大图背景、播放器红色进度条与居中大播放键。
         </div>
       </div>
 

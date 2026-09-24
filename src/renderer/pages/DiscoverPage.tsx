@@ -3,19 +3,20 @@
 //   ① 推荐（TMDB 榜单五分区：热门/即将上映/高分 电影 + 热门/高分 剧集；主进程 6h 缓存）
 //   ② 分类（★ 本轮新增：TMDB 类型清单 + 按类型翻页 /discover?with_genres=…，popularity 排序）
 // 交互：点任意影片 → 走 `#/search?agg=<片名>` 用「源」做一次全源搜索（没源时提示去导入）。
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { client } from '../api/client';
 import { useTheme } from '../lib/theme';
 import type { DiscoverItem, DiscoverSection, DiscoverGenre } from '../../shared/types';
 
-/** 影片卡（推荐区与分类区共用）：点击 → 全源搜索该片名 */
-function ItemCard({ it, onOpen }: { it: DiscoverItem; onOpen: () => void }) {
+/** 影片卡（推荐区与分类区共用）：点击 → 全源搜索该片名；onHover 用于让 Hero 跟随鼠标（Netflix 皮肤） */
+function ItemCard({ it, onOpen, onHover }: { it: DiscoverItem; onOpen: () => void; onHover?: () => void }) {
   return (
     <div
       className="card-media"
       style={{ cursor: 'pointer' }}
       onClick={onOpen}
+      onMouseEnter={onHover}
       title={`${it.title}${it.year ? ` (${it.year})` : ''} · 点击全源搜索`}
     >
       <div className="card">
@@ -91,26 +92,42 @@ export default function DiscoverPage() {
 
   const genreList = media === 'movie' ? genres.movie : genres.tv;
   const hasGenres = genres.movie.length > 0 || genres.tv.length > 0;
-  /** Hero 主推：榜单首条（Netflix 首屏就是一张大图 + 播放/更多信息） */
-  const hero = sections && sections.length > 0 ? sections[0].items[0] : null;
+  /**
+   * Hero 主推片：★ 2026-09-24 用户要求 —— 不只固定第一张：
+   *   ① 鼠标移到任意卡片上 → 立刻换成那一部；
+   *   ② 鼠标离开后**自动轮播**（8s 一部，取首行条目）。
+   */
+  const [heroItem, setHeroItem] = useState<DiscoverItem | null>(null);
+  const hoveringRef = useRef(false);
+  const firstRow = sections && sections.length > 0 ? sections[0].items : [];
+  const hero = heroItem || firstRow[0] || null;
+  useEffect(() => {
+    if (!nf || firstRow.length === 0) return;
+    let i = 0;
+    const timer = setInterval(() => {
+      if (hoveringRef.current) return; // 鼠标停在卡片上时不抢画面
+      i = (i + 1) % firstRow.length;
+      setHeroItem(firstRow[i]);
+    }, 8000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nf, sections]);
 
   return (
     <>
       <div className="topbar">
         <span style={{ fontWeight: 600, flex: '0 0 auto' }}>发现</span>
-        <span className="muted" style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {hasSources
-            ? '内置发现页（数据来自 TMDb）—— 点击影片会用你的源做全源搜索'
-            : '未导入站源 —— 这是内置发现页（数据来自 TMDb）；导入并选中源后，这里会显示你的源主页'}
-        </span>
+        {/* ★ 2026-09-24：删掉原来那一长串「内置发现页（数据来自 TMDb）…」说明 —— 用户反馈属无效描述 */}
+        <span style={{ flex: '1 1 auto' }} />
         <button style={{ flex: '0 0 auto' }} onClick={() => load(true)} disabled={loading}>刷新</button>
-        {hasSources ? (
-          <button className="primary" style={{ flex: '0 0 auto' }} onClick={() => nav('/home')}>回到源主页</button>
-        ) : (
+        {!hasSources && (
           <button className="primary" style={{ flex: '0 0 auto' }} onClick={() => nav('/config')}>去导入源</button>
         )}
       </div>
-      <div className="content">
+      <div
+        className="content"
+        onMouseLeave={() => { hoveringRef.current = false; }}
+      >
         {/* ---- Netflix Hero：全宽主推大图（仅 Netflix 皮肤；经典皮肤保持原来的列表式） ---- */}
         {nf && hero && !gSel && (
           <div className="nf-hero">
@@ -188,7 +205,12 @@ export default function DiscoverPage() {
               >
                 {s.items.map((it, i) => (
                   <div key={`${it.title}-${i}`} style={nf ? undefined : { flex: '0 0 132px' }}>
-                    <ItemCard it={it} onOpen={() => goSearch(it.title)} />
+                    <ItemCard
+                      it={it}
+                      onOpen={() => goSearch(it.title)}
+                      // Netflix 皮肤：鼠标移到卡片 → Hero 立刻换成这一部（离开后恢复自动轮播）
+                      onHover={nf ? () => { hoveringRef.current = true; setHeroItem(it); } : undefined}
+                    />
                   </div>
                 ))}
               </div>

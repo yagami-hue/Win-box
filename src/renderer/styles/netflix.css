@@ -70,17 +70,25 @@
 .nf-link.active { color: #fff; font-weight: 700; }
 .nf-nav .nf-spacer { flex: 1; }
 
-/* ---- 顶栏（页面内工具栏）：融进黑底，去掉经典主题的分隔线与毛玻璃 ---- */
-:root[data-theme='netflix'] .topbar { background: #141414; border-bottom: none; backdrop-filter: none; min-height: 48px; }
+/* ---- 顶栏（页面内工具栏）：融进黑底；按钮一律**低调小号**（★ 2026-09-24 用户：太大太突兀） ---- */
+:root[data-theme='netflix'] .topbar { background: #141414; border-bottom: none; backdrop-filter: none; min-height: 44px; }
+:root[data-theme='netflix'] .topbar button {
+  background: rgba(255, 255, 255, .07); color: #c9c9c9; padding: 5px 12px; font-size: 12.5px; font-weight: 500;
+  border-radius: 4px;
+}
+:root[data-theme='netflix'] .topbar button:hover { background: rgba(255, 255, 255, .14); color: #fff; }
+/* 顶栏不出现红色 CTA（行动点交给内容区/导航），并隐藏「回到源主页/去导入源」这类冗余入口 */
+:root[data-theme='netflix'] .topbar button.primary { background: rgba(255, 255, 255, .07); color: #c9c9c9; display: none; }
 
 /* ---- 按钮：白底主行动 / 半透明次要 / 红色 CTA ---- */
 :root[data-theme='netflix'] button {
   background: rgba(109, 109, 110, .7); border: none; color: #fff;
-  border-radius: var(--radius-sm); font-weight: 500; padding: 7px 16px;
+  border-radius: var(--radius-sm); font-weight: 500; padding: 6px 14px;
 }
 :root[data-theme='netflix'] button:hover { background: rgba(109, 109, 110, .5); color: #fff; box-shadow: none; }
-:root[data-theme='netflix'] button.primary { background: var(--nf-red); color: #fff; font-weight: 700; }
-:root[data-theme='netflix'] button.primary:hover { background: var(--nf-red-hover); box-shadow: none; }
+/* 红色只留给真正的品牌行动（详情页播放键悬停等），普通 primary 不作大红块 */
+:root[data-theme='netflix'] button.primary { background: rgba(255, 255, 255, .14); color: #fff; font-weight: 600; }
+:root[data-theme='netflix'] button.primary:hover { background: rgba(255, 255, 255, .24); box-shadow: none; }
 /* 详情页「▶ 播放选中」= Netflix 的白色播放键 */
 :root[data-theme='netflix'] .nf-play-btn { background: #fff !important; color: #141414 !important; font-weight: 700; }
 :root[data-theme='netflix'] .nf-play-btn:hover { background: rgba(255, 255, 255, .8) !important; }
@@ -144,11 +152,14 @@
 }
 .nf-hero-body { position: relative; z-index: 2; padding: 26px 34px 30px; max-width: 62%; }
 .nf-hero-kicker { display: inline-flex; align-items: center; gap: 8px; color: var(--nf-red); font-weight: 800; font-size: 12px; letter-spacing: 2px; margin-bottom: 8px; }
-.nf-hero-title { margin: 0 0 10px; font-size: 44px; line-height: 1.06; font-weight: 800; letter-spacing: -.01em; text-shadow: 0 2px 18px rgba(0, 0, 0, .6); }
-.nf-hero-meta { color: #d2d2d2; font-size: 13.5px; margin-bottom: 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.nf-hero-title { margin: 0 0 10px; font-size: 40px; line-height: 1.06; font-weight: 800; letter-spacing: -.01em; text-shadow: 0 2px 18px rgba(0, 0, 0, .6); }
+.nf-hero-meta { color: #d2d2d2; font-size: 13px; margin-bottom: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .nf-hero-match { color: var(--nf-green); font-weight: 700; }
-.nf-hero-actions { display: flex; gap: 10px; align-items: center; }
-.nf-hero-actions button { padding: 9px 22px; font-size: 15px; }
+.nf-hero-actions { display: flex; gap: 8px; align-items: center; }
+/* ★ 用户反馈「按钮太大太突兀」→ 收敛为小号、低饱和，融进画面 */
+.nf-hero-actions button { padding: 6px 16px; font-size: 13.5px; border-radius: 4px; }
+.nf-hero-actions button:not(.nf-play-btn) { background: rgba(255, 255, 255, .12); }
+.nf-hero-actions button:not(.nf-play-btn):hover { background: rgba(255, 255, 255, .2); }
 .nf-row { margin-bottom: 26px; }
 .nf-row-title { font-size: 20px; font-weight: 700; margin: 0 0 10px; color: #e5e5e5; }
 .nf-row-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 8px 2px 14px; }

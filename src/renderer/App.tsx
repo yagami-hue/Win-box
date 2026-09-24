@@ -11,6 +11,7 @@ import LivePage from './pages/LivePage';
 import HistoryPage from './pages/HistoryPage';
 import { loadUiMemory, saveUiMemory } from './lib/uiMemory';
 import { useTheme } from './lib/theme';
+import { TOP_NAV_THEMES } from './lib/themeTokens';
 import { client } from './api/client';
 import type { Episode } from '../shared/types';
 
@@ -26,9 +27,9 @@ const NAV = [
 export default function App() {
   const nav = useNavigate();
   const loc = useLocation();
-  /** ★ 2026-09-24：三套皮肤（经典深/浅 + Netflix）；Netflix 用「顶部导航」替代侧边栏 */
+  /** ★ 2026-09-24：四套皮肤（经典深/浅 + Netflix + 哔哩哔哩）；Netflix/B 站用「顶部导航」替代侧边栏 */
   const theme = useTheme();
-  const netflix = theme === 'netflix';
+  const topNav = TOP_NAV_THEMES.includes(theme);
   // 首次启动免责声明弹窗：已同意过（localStorage 标记）则不再弹出
   const [disclaim, setDisclaim] = useState(() => {
     try {
@@ -234,10 +235,10 @@ export default function App() {
   }
 
   return (
-    <div className={`app${netflix ? ' nf' : ''}`}>
+    <div className={`app${topNav ? ' nf' : ''} ${theme}`.trim()}>
       {disclaim && DisclaimerModal}
-      {/* Netflix 皮肤：**无侧边栏**（导航移到顶部的 .nf-nav），经典主题保持原侧边栏 */}
-      {!netflix && (
+      {/* Netflix / 哔哩哔哩皮肤：**无侧边栏**（导航移到顶部的 .nf-nav），经典主题保持原侧边栏 */}
+      {!topNav && (
         <aside className="sidebar">
           <div className="logo">Win-Box</div>
           {NAV.map((n) => (
@@ -257,9 +258,9 @@ export default function App() {
       <main className="main">
         {/* 自定义无边框标题栏：整条可拖拽，右侧为窗口控制（最小化/最大化/关闭） */}
         <TitleBar />
-        {netflix && (
+        {topNav && (
           <nav className="nf-nav">
-            <span className="nf-logo">WIN-BOX</span>
+            <span className="nf-logo">{theme === 'bilibili' ? 'bilibili·盒子' : 'WIN-BOX'}</span>
             {NAV.map((n) => (
               <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => 'nf-link' + (isActive ? ' active' : '')}>
                 {n.label}

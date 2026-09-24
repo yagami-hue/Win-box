@@ -266,25 +266,15 @@ export default function DetailPage({
               <div style={{ flex: 1 }}>
                 <h2 style={{ margin: '0 0 8px' }}>{displayName}</h2>
                 <div className="muted" style={{ marginBottom: 4 }}>{detail.type} · {detail.year} · {detail.area}</div>
-                {/* ★ 2026-09-24：源数据缺导演/演员时，用 TMDb 演职员补齐（user 反馈部分源两项都没有） */}
-                {directorText && (
-                  <div className="muted" style={{ marginBottom: 4 }}>
-                    导演：{directorText}
-                    {!detail.director && <span style={{ opacity: .6, fontSize: 10, marginLeft: 6 }}>来自 TMDb</span>}
-                  </div>
-                )}
-                {actorText && (
-                  <div className="muted" style={{ marginBottom: 4 }}>
-                    主演：{actorText}
-                    {!detail.actor && <span style={{ opacity: .6, fontSize: 10, marginLeft: 6 }}>来自 TMDb</span>}
-                  </div>
-                )}
+                {/* ★ 2026-09-24：源数据缺导演/演员时，用 TMDb 演职员补齐（不再标注「来自 TMDb」—— 属冗余说明） */}
+                {directorText && <div className="muted" style={{ marginBottom: 4 }}>导演：{directorText}</div>}
+                {actorText && <div className="muted" style={{ marginBottom: 4 }}>主演：{actorText}</div>}
                 {detail.remarks && <div style={{ color: 'var(--accent-2)', marginBottom: 4 }}>{detail.remarks}</div>}
                 <div className="muted" style={{ fontSize: 12, maxHeight: 80, overflow: 'auto', marginTop: 8 }}>
                   {(detail.des || '').trim().length >= 8
                     ? detail.des
                     : metaHit?.overview
-                      ? <>{metaHit.overview}<span style={{ opacity: .7, fontSize: 10, marginLeft: 6 }}>简介来自 TMDb</span></>
+                      ? <>{metaHit.overview}</>
                       : detail.des || ''}
                 </div>
               </div>

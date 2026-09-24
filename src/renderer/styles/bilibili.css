@@ -1,0 +1,133 @@
+/* bilibili.css — Win-Box 第四套皮肤：哔哩哔哩风格（★ 2026-09-24 新增）
+   规范来源（联网查证 B 站品牌规范 / 社区 UI 规范）：
+     · 主色 B站蓝 #00AEEC（hover #0095CC，浅蓝底 rgba(0,174,236,.08)）；辅助色 B站粉 #FB7299（热门/强调）
+     · 中性色：主文本 #18191C、次要 #61666D、占位 #9499A0、边框 #E3E5E7、页面底 #F1F2F3、卡片 #FFFFFF
+     · 卡片白底 + 12px 圆角 + 轻阴影；hover 边框转蓝 + 浅蓝底（B 站列表/卡片的标志性反馈）
+     · 字体 Noto Sans（回退 PingFang / 微软雅黑）；过渡 200ms ease-in-out
+     · 布局：顶部导航（白底 + 蓝色字标），内容区浅灰底 —— 与 Netflix 皮肤共用 .nf-nav 结构，配色不同
+   ★ 全部规则限定在 `[data-theme='bilibili']` 下，其余主题不受影响。 */
+
+:root[data-theme='bilibili'] {
+  --bg0: #f1f2f3;
+  --bg-glass: #f1f2f3;
+  --bg1: #ffffff;
+  --bg-elev: #ffffff;
+  --bg-elev2: #f6f7f8;
+  --border: #e3e5e7;
+  --border-soft: rgba(227, 229, 231, .9);
+  --text: #18191c;
+  --text-dim: #61666d;
+  --accent: #00aeec;
+  --accent-soft: rgba(0, 174, 236, .1);
+  --accent-2: #fb7299;
+  --danger: #f56c6c;
+  --warn: #ff9900;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 2px 8px rgba(0, 0, 0, .06);
+  --side-w: 208px;
+  /* B 站专属 */
+  --b-blue: #00aeec;
+  --b-blue-hover: #0095cc;
+  --b-pink: #fb7299;
+  --b-text2: #61666d;
+  --b-dim: #9499a0;
+  --b-line: #e3e5e7;
+  --b-page: #f1f2f3;
+}
+
+:root[data-theme='bilibili'] body {
+  background: var(--b-page);
+  font-family: "Noto Sans", "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  color: var(--text);
+}
+:root[data-theme='bilibili'] a { color: var(--b-blue); }
+:root[data-theme='bilibili'] .muted { color: var(--b-text2); }
+
+/* ---- 布局：顶部导航（白底）替代侧边栏 ---- */
+:root[data-theme='bilibili'] .app { flex-direction: column; background: var(--b-page); }
+:root[data-theme='bilibili'] .sidebar { display: none; }
+:root[data-theme='bilibili'] .main { background: var(--b-page); }
+:root[data-theme='bilibili'] .titlebar { height: 32px; background: #fff; border-bottom: 1px solid var(--b-line); }
+:root[data-theme='bilibili'] .tb-title { color: var(--b-text2); }
+:root[data-theme='bilibili'] .tb-dot { background: linear-gradient(135deg, var(--b-blue), var(--b-pink)); box-shadow: none; }
+:root[data-theme='bilibili'] .tb-btn { color: var(--b-text2); }
+:root[data-theme='bilibili'] .tb-btn:hover { background: var(--b-page); color: var(--text); }
+
+.nf-nav { /* 结构由 netflix.css 定义，这里只改配色 */ }
+:root[data-theme='bilibili'] .nf-nav {
+  background: #fff; border-bottom: 1px solid var(--b-line);
+  padding: 10px 26px 12px; gap: 22px;
+}
+:root[data-theme='bilibili'] .nf-logo { color: var(--b-blue); font-weight: 900; letter-spacing: 1px; }
+:root[data-theme='bilibili'] .nf-link { color: var(--b-text2); font-weight: 500; padding: 4px 2px; border-radius: 6px; }
+:root[data-theme='bilibili'] .nf-link:hover { color: var(--b-blue); }
+:root[data-theme='bilibili'] .nf-link.active { color: var(--b-blue); font-weight: 700; }
+
+/* ---- 卡片：白底 + 12px 圆角 + 轻阴影，hover 边框转蓝 + 浅蓝底（B 站标志性反馈） ---- */
+:root[data-theme='bilibili'] .content { padding: 14px 22px 26px; }
+:root[data-theme='bilibili'] .card {
+  background: #fff; border: 1px solid transparent; border-radius: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, .05);
+  transition: border-color .2s ease-in-out, background .2s ease-in-out, box-shadow .2s ease-in-out, transform .2s ease-in-out;
+}
+:root[data-theme='bilibili'] .card-media .card { border: 1px solid var(--b-line); }
+:root[data-theme='bilibili'] .card-media:hover .card {
+  border-color: rgba(0, 174, 236, .45); background: rgba(0, 174, 236, .06);
+  box-shadow: 0 6px 18px rgba(0, 174, 236, .16); transform: translateY(-2px);
+}
+:root[data-theme='bilibili'] .card-media img { border-radius: 12px 12px 0 0; }
+:root[data-theme='bilibili'] .card-media .name { color: var(--text); font-weight: 500; }
+:root[data-theme='bilibili'] .card-media .remarks { color: var(--b-blue); }
+:root[data-theme='bilibili'] .card-media .badge { background: var(--b-pink); color: #fff; border-radius: 4px; backdrop-filter: none; }
+:root[data-theme='bilibili'] .no-cover { background: var(--b-page); color: var(--b-dim); border-radius: 12px; }
+
+/* ---- 按钮：主蓝 / 次白描边 / 粉（强调） ---- */
+:root[data-theme='bilibili'] button {
+  background: #fff; border: 1px solid var(--b-line); color: var(--b-text2); border-radius: 8px; font-weight: 500;
+}
+:root[data-theme='bilibili'] button:hover { border-color: var(--b-blue); color: var(--b-blue); background: rgba(0, 174, 236, .06); box-shadow: none; }
+:root[data-theme='bilibili'] button.primary { background: var(--b-blue); border-color: var(--b-blue); color: #fff; font-weight: 600; }
+:root[data-theme='bilibili'] button.primary:hover { background: var(--b-blue-hover); border-color: var(--b-blue-hover); color: #fff; }
+:root[data-theme='bilibili'] .linkbtn { border: none; background: none; color: var(--b-blue); }
+:root[data-theme='bilibili'] .tag {
+  background: #fff; border: 1px solid var(--b-line); color: var(--b-text2); border-radius: 8px; padding: 4px 12px;
+}
+:root[data-theme='bilibili'] .tag:hover { border-color: var(--b-blue); color: var(--b-blue); background: rgba(0, 174, 236, .06); }
+:root[data-theme='bilibili'] .tag.active { background: var(--b-blue); border-color: var(--b-blue); color: #fff; font-weight: 600; }
+:root[data-theme='bilibili'] input,
+:root[data-theme='bilibili'] select,
+:root[data-theme='bilibili'] textarea { background: #fff; border: 1px solid var(--b-line); color: var(--text); }
+:root[data-theme='bilibili'] input:focus, :root[data-theme='bilibili'] select:focus { border-color: var(--b-blue); box-shadow: 0 0 0 3px rgba(0, 174, 236, .12); }
+:root[data-theme='bilibili'] ::placeholder { color: var(--b-dim); }
+:root[data-theme='bilibili'] .topbar { background: #fff; border-bottom: 1px solid var(--b-line); backdrop-filter: none; }
+
+/* ---- 详情页：选集按钮（B 站播放页的集数块） ---- */
+:root[data-theme='bilibili'] .ep {
+  background: #fff; border: 1px solid var(--b-line); color: var(--b-text2); border-radius: 8px; font-weight: 500;
+}
+:root[data-theme='bilibili'] .ep:hover { border-color: var(--b-blue); color: var(--b-blue); background: rgba(0, 174, 236, .06); }
+:root[data-theme='bilibili'] .ep.active { background: var(--b-blue); border-color: var(--b-blue); color: #fff; font-weight: 600; }
+
+/* ---- 播放器：B 站播放器观感（纯黑舞台 + 蓝色进度 + 白色圆形中央键 + 底部渐隐） ---- */
+:root[data-theme='bilibili'] .vplayer { background: #000; }
+:root[data-theme='bilibili'] .vp-controls {
+  background: linear-gradient(to top, rgba(0, 0, 0, .9) 0%, rgba(0, 0, 0, .5) 60%, transparent 100%);
+  padding: 20px 20px 16px;
+}
+:root[data-theme='bilibili'] .vp-big {
+  width: 68px; height: 68px; border-radius: 50%;
+  background: rgba(0, 174, 236, .18); border: 2px solid rgba(255, 255, 255, .9); color: #fff;
+  transition: transform .2s ease-in-out, background .2s ease-in-out;
+}
+:root[data-theme='bilibili'] .vp-big:hover { transform: scale(1.06); background: var(--b-blue); border-color: transparent; }
+:root[data-theme='bilibili'] .vp-progress { height: 5px; background: rgba(255, 255, 255, .25); border-radius: 3px; }
+:root[data-theme='bilibili'] .vp-buffer { background: rgba(255, 255, 255, .4); }
+:root[data-theme='bilibili'] .vp-played { background: var(--b-blue); }
+:root[data-theme='bilibili'] .vp-thumb { width: 13px; height: 13px; margin-top: -4px; background: #fff; box-shadow: 0 0 0 3px rgba(0, 174, 236, .45); }
+:root[data-theme='bilibili'] .vp-ctl { color: #fff; }
+:root[data-theme='bilibili'] .vp-ctl:hover { color: var(--b-blue); }
+:root[data-theme='bilibili'] .vp-next { background: rgba(0, 0, 0, .85); border-radius: 8px; }
+:root[data-theme='bilibili'] .vp-next button, :root[data-theme='bilibili'] .vp-next button.primary { background: var(--b-blue); border-color: var(--b-blue); }
+:root[data-theme='bilibili'] .app.pwin, :root[data-theme='bilibili'] .app.pwin .main { background: #000; }
+:root[data-theme='bilibili'] .app.pwin .titlebar { background: #000; border-bottom: none; }
+:root[data-theme='bilibili'] .app.pwin .tb-title { color: #e5e5e5; }
