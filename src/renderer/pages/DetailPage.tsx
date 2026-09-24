@@ -36,6 +36,7 @@ export default function DetailPage({
     setSrcPicBad(false);
     setSrcPicRelay('');
     setRelayBad(false);
+    setMetaPicBad(false);
     metaRetried.current = false;
     client
       .detail({ key: k, ids: [i] })
@@ -57,17 +58,18 @@ export default function DetailPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, id]);
 
-  // ---- 元数据（★ 2026-09-24 封面策略改回「源封面优先」，见 lib/coverPick.ts）----
-  //   查询本身照常进行（简介兜底 + 演职员/相关推荐区块要用），但**封面只在源封面缺失或
-  //   加载失败时才用它** —— 此前是「TMDB 命中即覆盖」，用户看到封面先出源图、随后被换成
-  //   补图（含 360），即「已有正常封面还会走 360 搜索、封面忽然变化」。
+  // ---- 元数据（★ 2026-09-24 第二轮定稿：封面**一律以搜索补图为准**，见 lib/coverPick.ts）----
+  //   进入详情即按片名查 TMDB（→豆瓣→360），命中即作为封面；源封面退化为「查完前的占位 / 未命中兜底」。
+  //   同一次查询还供「简介兜底 + 演职员/相关推荐」区块使用；命中结果缓存在主进程（7 天），同一片名不换图。
   const [metaHit, setMetaHit] = useState<MetaHit | null>(null);
-  /** ★ 源封面（detail.pic / fromListPic）onError 证明是坏图 → 才启用补图 */
+  /** ★ 源封面（detail.pic / fromListPic）onError 证明是坏图 → 启用中继重试/补图兜底 */
   const [srcPicBad, setSrcPicBad] = useState(false);
   /** ★ 源封面经本地 /img 中继重试（注入同源 Referer 破防盗链）的地址；只试一次 */
   const [srcPicRelay, setSrcPicRelay] = useState('');
   /** ★ 中继重试也失败 → 交补图（无补图则置灰收手） */
   const [relayBad, setRelayBad] = useState(false);
+  /** ★ 搜索图（/img 中继）加载失败 → 本次封面退回源图，但保留 metaHit（简介/演员/推荐仍可用） */
+  const [metaPicBad, setMetaPicBad] = useState(false);
   useEffect(() => {
     if (!detail) { setMetaHit(null); return; }
     const name = (detail.name || '').trim().split(' - ')[0]?.trim();
@@ -107,21 +109,21 @@ export default function DetailPage({
   const coverErr = (e: React.SyntheticEvent<HTMLImageElement>) => {
     const el = e.target as HTMLImageElement;
     const src = el.currentSrc || el.src || '';
-    // 源图中继（/img?u=…&ref=…）失败 → 有补图交补图，否则置灰收手
+    // 源图中继（/img?u=…&ref=…）失败 → 标记 relayBad：有搜索图交搜索图，否则 pickCover 返回空串
+    //   → 渲染「暂无封面」占位（不再写 el.style.opacity —— 内联透明度会在换新图后残留成灰蒙层）
     if (/[?&]ref=/.test(src)) {
-      if (metaHit?.poster) setRelayBad(true);
-      else el.style.opacity = '0.2';
+      setRelayBad(true);
       return;
     }
     if (/\/img\?/.test(src)) {
-      if (metaHit) setMetaHit(null);
+      // 搜索图（/img 中继）失败 → 本次封面退回源图；**保留 metaHit**（简介/演员/推荐区块不受影响）
+      setMetaPicBad(true);
       return;
     }
     setSrcPicBad(true);
     // ★ 源封面失败 → 先经本地 /img 中继重试一次（DoH + Referer 链，破防盗链与 DNS 污染）
     const relay = wrapImageUrlForRelay(src, navigator.userAgent);
     if (relay) setSrcPicRelay((prev) => prev || relay);
-    else el.style.opacity = '0.2';
     // ★ 源封面坏了而 TMDB 尚未命中 → 主动再查一次（幂等，仅一次）
     if (!metaHit && !metaRetried.current) {
       metaRetried.current = true;
@@ -202,9 +204,9 @@ export default function DetailPage({
     }
   }
 
-  /** 源封面（详情自带 → 列表带入）与最终封面：统一策略「源封面优先」（见 lib/coverPick.ts） */
+  /** 源封面（详情自带 → 列表带入）与最终封面：**搜索图为准**，源图占位/兜底（见 lib/coverPick.ts） */
   const srcCover = detail?.pic || fromListPic || '';
-  const cover = pickCover({ srcPic: srcCover, srcBad: srcPicBad, relay: srcPicRelay, relayBad, meta: metaHit?.poster });
+  const cover = pickCover({ srcPic: srcCover, srcBad: srcPicBad, relay: srcPicRelay, relayBad, meta: metaPicBad ? '' : metaHit?.poster });
   /** 演员名单：TMDB 演职员优先；TMDB miss 时用详情自带的演员串拆分兜底 */
   const castList: Array<{ name: string; character?: string }> = extra?.cast?.length
     ? extra.cast
@@ -235,7 +237,7 @@ export default function DetailPage({
         ) : (
           <>
             <div className="row" style={{ alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
-              {/** 封面（★ 源封面优先）：源图 > 源图中继重试 > 补图（仅源图缺失/坏图时启用） */}
+              {/** 封面（★ 搜索补图为准）：搜索命中图 > 源图（占位/兜底）；源图坏 → 中继重试 */}
               {cover ? (
                 <img src={cover} style={{ width: 120, aspectRatio: '2/3', objectFit: 'cover', borderRadius: 8, background: 'var(--bg-elev2)' }} onError={coverErr} />
               ) : (

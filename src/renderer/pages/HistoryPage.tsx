@@ -28,6 +28,8 @@ function fmtDate(ts: number): string {
 export default function HistoryPage() {
   const nav = useNavigate();
   const [items, setItems] = useState<WatchHistory[]>([]);
+  /** ★ 2026-09-24：封面加载失败的记录（渲染「暂无封面」占位，不用内联 opacity 置灰） */
+  const [badPics, setBadPics] = useState<Record<string, boolean>>({});
   /** 最近一条被移除的记录：非空时显示"撤销"条。整条快照，撤销即无损还原。 */
   const [lastDeleted, setLastDeleted] = useState<WatchHistory | null>(null);
 
@@ -141,8 +143,13 @@ export default function HistoryPage() {
                 <div className="card-media hist-media" key={it.url} onClick={() => play(it)}>
                   <div className="card">
                     <div style={{ position: 'relative' }}>
-                      {it.pic ? (
-                        <img src={it.pic} onError={(e) => ((e.target as HTMLImageElement).style.opacity = '0.15')} loading="lazy" />
+                      {it.pic && !badPics[it.url] ? (
+                        <img
+                          src={it.pic}
+                          // ★ 2026-09-24：坏图改用状态驱动占位（此前写 el.style.opacity 会残留成灰蒙层）
+                          onError={() => setBadPics((p) => (p[it.url] ? p : { ...p, [it.url]: true }))}
+                          loading="lazy"
+                        />
                       ) : (
                         <div
                           style={{

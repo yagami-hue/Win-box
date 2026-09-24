@@ -164,6 +164,9 @@ h3 { font-size: 18px; } h4 { font-size: 14px; color: var(--text); }
   transition: transform .16s, border-color .16s, box-shadow .16s; }
 .card-media:hover .card { transform: translateY(-3px); border-color: rgba(91,140,255,.6); box-shadow: 0 10px 28px rgba(0,0,0,.45); }
 .card-media img { width: 100%; aspect-ratio: 2/3; object-fit: cover; display: block; background: var(--bg-elev2); }
+/* ★ 2026-09-24：无封面占位（搜索未命中 + 源图坏 → 不留坏图图标/灰影） */
+.no-cover { width: 100%; aspect-ratio: 2/3; display: flex; align-items: center; justify-content: center;
+  color: var(--text-dim); font-size: 11px; background: var(--bg-elev2); }
 .card-media .badge { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,.55); color: var(--accent-2);
   font-size: 11px; padding: 1px 7px; border-radius: 999px; backdrop-filter: blur(2px); }
 .card-media .meta { padding: 7px 9px; }

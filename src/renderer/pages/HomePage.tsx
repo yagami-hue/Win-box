@@ -7,7 +7,7 @@ import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSea
 import { uiMem, schedulePersist } from '../lib/uiMemory';
 import { getSessionSort, setSessionSort } from '../lib/sessionSort';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
-import { pickCover } from '../lib/coverPick';
+import { pickCover, preloadImage } from '../lib/coverPick';
 
 type SortClassView = { id: string; name: string; flag?: string; filters?: FilterGroup[] };
 
@@ -52,11 +52,12 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const filtersRef = useRef<Record<string, string>>({});
   /** 挂载恢复：数据就绪后回滚一次滚动位置（loadCategory 异步，须等 items 渲染） */
   const memRestoreRef = useRef(false);
-  // ---- 封面策略（★ 2026-09-24 改回「源封面优先」，见 lib/coverPick.ts）----
-  //   此前（2026-09-19）是「未补齐过的一律查 TMDB，命中即覆盖」，用户看到的是
-  //   封面先出源图、随后被补图替换 → 「已有正常封面还会走 360 搜索、封面忽然变化」。
-  //   现在：**只有源封面缺失或加载失败（onError）的条目才查补图**，命中写 picOver 兜底。
-  //   控制手段不变：按 归一化片名(+年份) 去重（同名条目只查一次），每页最多 30 个唯一片名。
+  // ---- 封面策略（★ 2026-09-24 第二轮定稿：**一律以搜索补图为准**，见 lib/coverPick.ts）----
+  //   用户反馈「源封面优先」仍有源图根本不显示的情况（防盗链/坏图，中继也救不回）→ 改为：
+  //   **未补过的一律查**（TMDB→豆瓣→360，主进程侧 7 天缓存），命中即覆盖源图；源图退化为占位兜底。
+  //   稳定性保障：① 命中结果落主进程缓存 → 同一片名永远同一张图，不会反复变化；
+  //              ② 覆盖前先 preloadImage 预览校验 → 不出现「换上坏图又被回退」的二次变化。
+  //   控制手段：按 归一化片名(+年份) 去重（同名条目只查一次），每页最多 30 个唯一片名（防翻页打爆 API）。
   const [picOver, setPicOver] = useState<Record<string, string>>({});
   const metaBusyRef = useRef(false);
   /** ★ 聚合搜索结果同样走补图兜底（release76：搜索结果显示大量"无图/坏图"→ 缺封面的主入口） */
@@ -76,8 +77,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   useEffect(() => {
     const MAX_UNIQUE_QUERY = 30; // 单页最多查 30 个唯一片名，防翻页打爆 API
     if (metaBusyRef.current) return;
-    // ★ 只补「无封面 / 封面已坏」的条目（源封面正常的一律不动）
-    const missing = items.filter((it) => !picOver[it.id] && tmdbTitleOf(it) && (!it.pic || badPics[it.id]));
+    // ★ 一律补图：源封面只作占位（缺失/坏图也照样查，命中即覆盖）
+    const missing = items.filter((it) => !picOver[it.id] && tmdbTitleOf(it));
     if (missing.length === 0) return;
     // 按 归一化片名|年份 分组：同标题的重复条目只查一次 TMDB，命中覆盖整组
     const groups = new Map<string, { name: string; year?: string; ids: string[] }>();
@@ -100,7 +101,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         await Promise.all(wave.map(async (g) => {
           try {
             const hit = await client.metaSearch(g.name, g.year);
-            if (hit && hit.poster) for (const id of g.ids) next[id] = hit.poster;
+            // ★ 预览校验：搜索图能真正显示才覆盖源图（避免「换坏图 → 又回退」的二次变化）
+            if (hit && hit.poster && (await preloadImage(hit.poster))) for (const id of g.ids) next[id] = hit.poster;
           } catch { /* 缺 key/网络失败静默，维持源图占位 */ }
         }));
       }
@@ -109,7 +111,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, badPics]);
-  // 封面取值：统一规则（源封面优先 → 中继重试 → 补图 → 源图占位）
+  // 封面取值：统一规则（搜索图为准 → 源封面占位/兜底 → 中继重试）
   const picOf = (it: VodItem) =>
     pickCover({ srcPic: it.pic, srcBad: badPics[it.id], relay: picRelay[it.id], meta: picOver[it.id] });
   /** ★ 源封面加载失败/为空 → 显式触发一次单条补图（原逻辑只置透明，从不重查 TMDB） */
@@ -121,24 +123,25 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     const y = tmdbYearOf(it);
     client
       .metaSearch(name, y)
-      .then((h) => {
-        if (h && h.poster) setPicOver((prev) => (prev[it.id] === undefined ? { ...prev, [it.id]: h.poster } : prev));
+      .then(async (h) => {
+        // ★ 同样先预览校验：能显示才覆盖（避免坏图覆盖 → 又回退的二次变化）
+        if (h && h.poster && (await preloadImage(h.poster))) {
+          setPicOver((prev) => (prev[it.id] === undefined ? { ...prev, [it.id]: h.poster } : prev));
+        }
       })
       .catch(() => undefined);
   };
   const picErr = (it: VodItem) => (e: React.SyntheticEvent<HTMLImageElement>) => {
     const el = e.target as HTMLImageElement;
     const src = el.currentSrc || el.src || '';
-    // ★ 源图中继（/img?u=…&ref=…）失败 → 有补图就交补图，否则置灰收手（不再反复重试）
+    // ★ 源图中继（/img?u=…&ref=…）失败 → 清掉中继：有补图交补图，否则 pickCover 返回空串 → 渲染「暂无封面」占位
     if (/[?&]ref=/.test(src)) {
-      if (picOver[it.id]) {
-        setPicRelay((prev) => {
-          if (prev[it.id] === undefined) return prev;
-          const n = { ...prev };
-          delete n[it.id];
-          return n;
-        });
-      } else el.style.opacity = '0.15';
+      setPicRelay((prev) => {
+        if (prev[it.id] === undefined) return prev;
+        const n = { ...prev };
+        delete n[it.id];
+        return n;
+      });
       return;
     }
     if (/\/img\?/.test(src)) {
@@ -154,18 +157,16 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       return;
     }
     // ★ 源封面失败（防盗链/DNS 污染/坏图）→ 先经本地 /img 中继重试一次（DoH + Referer 链），
-    //   同时触发 TMDB/豆瓣幂等补查；中继也失败就置灰交占位，不再反复重试。
+    //   同时触发 TMDB/豆瓣幂等补查；中继也没有/也失败 → 状态驱动占位。
+    //   ★ 2026-09-24 修复「图片灰蒙蒙像蒙了毛玻璃」：**不再用 el.style.opacity 置灰** ——
+    //     内联样式在 React 复用同一 <img> 节点换新图后不会被清掉，已加载成功的新封面会一直带着 0.15 透明度。
     setBadPics((prev) => (prev[it.id] ? prev : { ...prev, [it.id]: true }));
     ensureMetaSingle(it);
     const relay = wrapImageUrlForRelay(src, navigator.userAgent);
-    if (relay) {
-      setPicRelay((prev) => (prev[it.id] === undefined ? { ...prev, [it.id]: relay } : prev));
-    } else {
-      el.style.opacity = '0.15';
-    }
+    if (relay) setPicRelay((prev) => (prev[it.id] === undefined ? { ...prev, [it.id]: relay } : prev));
   };
-  // ★★ 聚合搜索结果的补图兜底：与浏览态同机制 —— 只补「无封面 / 封面已坏」的条目，
-  //   按归一化片名去重（每页 ≤30 唯一名、6 并发分波），补图失败移除覆盖。
+  // ★★ 聚合搜索结果的补图：与浏览态同机制 —— **未补过的一律查**（源图仅占位），
+  //   按归一化片名去重（每页 ≤30 唯一名、6 并发分波）；覆盖前同样先预览校验。
   const aggKeyOf = (it: AggVodItem) => `${it.sourceKey}\u0000${it.id}`;
   useEffect(() => {
     // ★ 2026-09-23 三轮：**搜索进行中不做元数据补图**（loading 为真时直接跳过）。
@@ -174,7 +175,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     //   搜索结果落定后再补图（源封面本身照常立即显示，不影响首屏观感）。
     if (loading) return;
     if (!aggMode || !agg || agg.items.length === 0 || aggBusyRef.current) return;
-    const missing = agg.items.filter((it) => !aggPicOver[aggKeyOf(it)] && (!it.pic || aggBadPics[aggKeyOf(it)]));
+    const missing = agg.items.filter((it) => !aggPicOver[aggKeyOf(it)]);
     if (missing.length === 0) return;
     const groups = new Map<string, { name: string; year?: string; keys: string[] }>();
     for (const it of missing) {
@@ -196,7 +197,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         await Promise.all(wave.map(async (g) => {
           try {
             const hit = await client.metaSearch(g.name, g.year);
-            if (hit && hit.poster) for (const k of g.keys) next[k] = hit.poster;
+            if (hit && hit.poster && (await preloadImage(hit.poster))) for (const k of g.keys) next[k] = hit.poster;
           } catch { /* 静默，维持源图占位 */ }
         }));
       }
@@ -205,7 +206,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agg, aggMode, loading, aggBadPics]);
-  // 聚合结果封面取值：与浏览态同一套规则（源封面优先 → 中继 → 补图 → 源图占位）
+  // 聚合结果封面取值：与浏览态同一套规则（搜索图为准 → 源图占位/兜底 → 中继重试）
   const aggPicOf = (it: AggVodItem) => {
     const k = aggKeyOf(it);
     return pickCover({ srcPic: it.pic, srcBad: aggBadPics[k], relay: aggPicRelay[k], meta: aggPicOver[k] });
@@ -224,8 +225,10 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     const y = /((?:19|20)\d{2})/.exec(`${it.name} ${it.remarks || ''}`)?.[1];
     client
       .metaSearch(name, y)
-      .then((h) => {
-        if (h && h.poster) setAggPicOver((prev) => (prev[k] === undefined ? { ...prev, [k]: h.poster } : prev));
+      .then(async (h) => {
+        if (h && h.poster && (await preloadImage(h.poster))) {
+          setAggPicOver((prev) => (prev[k] === undefined ? { ...prev, [k]: h.poster } : prev));
+        }
       })
       .catch(() => undefined);
   };
@@ -233,16 +236,15 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     const el = e.target as HTMLImageElement;
     const src = el.currentSrc || el.src || '';
     const k = aggKeyOf(it);
+    // ★ 全部分支改为「状态驱动」：不再写 el.style.opacity（内联透明度会在换新图后残留 → 灰蒙层）
     if (/[?&]ref=/.test(src)) {
-      // 源图中继失败 → 有补图交补图，否则置灰收手
-      if (aggPicOver[k]) {
-        setAggPicRelay((prev) => {
-          if (prev[k] === undefined) return prev;
-          const n = { ...prev };
-          delete n[k];
-          return n;
-        });
-      } else el.style.opacity = '0.15';
+      // 源图中继失败 → 清掉中继：有补图交补图，否则渲染「暂无封面」占位
+      setAggPicRelay((prev) => {
+        if (prev[k] === undefined) return prev;
+        const n = { ...prev };
+        delete n[k];
+        return n;
+      });
       return;
     }
     if (/\/img\?/.test(src)) {
@@ -254,19 +256,12 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       });
       return;
     }
-    if (/\/play\?/.test(src)) {
-      el.style.opacity = '0.15';
-      return;
-    }
+    if (/\/play\?/.test(src)) return; // /play 中继图失败：等下一轮补图，此次不处理
     // 源封面失败（防盗链/DNS 污染/坏图）→ 标记坏图（交补图）+ 中继重试一次
     setAggBadPics((prev) => (prev[k] ? prev : { ...prev, [k]: true }));
     ensureAggMetaSingle(it);
     const relay = wrapImageUrlForRelay(src, navigator.userAgent);
-    if (relay) {
-      setAggPicRelay((prev) => (prev[k] === undefined ? { ...prev, [k]: relay } : prev));
-    } else {
-      el.style.opacity = '0.15';
-    }
+    if (relay) setAggPicRelay((prev) => (prev[k] === undefined ? { ...prev, [k]: relay } : prev));
   };
   // 滚动/浏览状态记忆：卸载(返回)时存档，回来恢复列表定位
   useEffect(() => {
@@ -860,7 +855,10 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                     <div key={it.id} className="card-media" onClick={() => onOpenDetail(key, it.id, picOf(it))}>
                       <div className="card">
                         <div style={{ position: 'relative' }}>
-                          <img src={picOf(it)} onError={picErr(it)} loading="lazy" decoding="async" />
+                          {/* ★ 空封面（搜索未命中 + 源图坏）→ 渲染占位块，绝不渲染坏图/灰影 */}
+                          {picOf(it)
+                            ? <img src={picOf(it)} onError={picErr(it)} loading="lazy" decoding="async" />
+                            : <div className="no-cover">暂无封面</div>}
                           {it.remarks && <span className="badge">{it.remarks}</span>}
                         </div>
                         <div className="meta">
@@ -893,7 +891,10 @@ function AggCard({ it, pic, onOpen, onErr }: { it: AggVodItem; pic: string; onOp
     <div className="card-media" onClick={onOpen}>
       <div className="card">
         <div style={{ position: 'relative' }}>
-          <img src={pic} onError={onErr} loading="lazy" decoding="async" />
+          {/* ★ 空封面（搜索未命中 + 源图坏）→ 占位块（同上，不留灰影） */}
+          {pic
+            ? <img src={pic} onError={onErr} loading="lazy" decoding="async" />
+            : <div className="no-cover">暂无封面</div>}
           {it.remarks && <span className="badge">{it.remarks}</span>}
           <span
             style={{
