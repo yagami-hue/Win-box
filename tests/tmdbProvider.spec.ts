@@ -26,6 +26,11 @@ describe('parseTmdbExtras', () => {
   const sample = {
     genres: [{ id: 18, name: '剧情' }, { id: 80, name: '犯罪' }, { id: 18, name: '剧情' }],
     credits: {
+      crew: [
+        { name: '徐纪周', job: 'Director', department: 'Directing' },
+        { name: '徐纪周', job: 'Director', department: 'Directing' }, // 同名去重
+        { name: '某某', job: 'Producer', department: 'Production' }, // 非导演忽略
+      ],
       cast: [
         { name: '张译', character: '安欣' },
         { name: '张颂文', character: '高启强' },
@@ -43,9 +48,10 @@ describe('parseTmdbExtras', () => {
     },
   };
 
-  it('genres/cast/recommendations 全解析，含去重与无图跳过', () => {
+  it('genres/cast/recommendations/directors 全解析，含去重与无图跳过', () => {
     const r = parseTmdbExtras(sample, 'movie');
     expect(r.genres).toEqual(['剧情', '犯罪']); // 去重
+    expect(r.directors).toEqual(['徐纪周']); // crew[job=Director] 去重，非导演忽略
     expect(r.cast).toEqual([
       { name: '张译', character: '安欣' },
       { name: '张颂文', character: '高启强' },
@@ -56,9 +62,11 @@ describe('parseTmdbExtras', () => {
     expect(r.recommendations[1]).toMatchObject({ title: '推荐剧B', year: 2022, mediaType: 'movie' }); // mediaType 跟随父条目
   });
 
-  it('字段缺失/非法 → 空数组，不抛错', () => {
-    expect(parseTmdbExtras(null, 'tv')).toEqual({ genres: [], cast: [], recommendations: [] });
-    expect(parseTmdbExtras({ credits: {}, recommendations: {} }, 'tv')).toEqual({ genres: [], cast: [], recommendations: [] });
+  it('剧集：created_by 并入导演；字段缺失/非法 → 空数组，不抛错', () => {
+    const tv = parseTmdbExtras({ created_by: [{ name: '陈正道' }, { name: '陈正道' }, { name: '' }] }, 'tv');
+    expect(tv.directors).toEqual(['陈正道']);
+    expect(parseTmdbExtras(null, 'tv')).toEqual({ genres: [], cast: [], recommendations: [], directors: [] });
+    expect(parseTmdbExtras({ credits: {}, recommendations: {} }, 'tv')).toEqual({ genres: [], cast: [], recommendations: [], directors: [] });
   });
 });
 

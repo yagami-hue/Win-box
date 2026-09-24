@@ -7,6 +7,7 @@ import { uiMem, schedulePersist } from '../lib/uiMemory';
 import type { Episode, MetaExtra, MetaHit, VodDetail } from '../../shared/types';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 import { pickCover } from '../lib/coverPick';
+import { formatEpisodeLabel } from '../lib/epName';
 
 export default function DetailPage({
   onPlay,
@@ -187,9 +188,11 @@ export default function DetailPage({
         setErr('该播放地址需要网页解析/嗅探，桌面版暂不支持');
         return;
       }
-      onPlay(r.url || target.url, `${detail.name} - ${target.name}`, decodeURIComponent(key!), decodeURIComponent(id!), {
+      // ★ 网盘源集名过长 → 播放器标题/历史记录统一用「第N集 · 体积」
+      const label = formatEpisodeLabel(target.name, ep);
+      onPlay(r.url || target.url, `${detail.name} - ${label}`, decodeURIComponent(key!), decodeURIComponent(id!), {
         pic: detail.pic,
-        remarks: target.name || detail.remarks,
+        remarks: label,
         sourceName: detail?.name ? detail.name.split(' - ')[0] : undefined,
         title: detail?.name || undefined, // ★ 剧名副名（详情页主标题），供字幕检索使用，避免从集名反推失败
         vodId: detail.id,
@@ -218,6 +221,9 @@ export default function DetailPage({
         .map((name) => ({ name }));
   const genres = extra?.genres || [];
   const recs = extra?.recommendations || [];
+  /** ★ 2026-09-24：导演/主演展示文本 —— 源数据优先，缺失时用 TMDb 演职员补齐 */
+  const directorText = (detail?.director || '').trim() || (extra?.directors || []).join(' / ');
+  const actorText = (detail?.actor || '').trim() || (extra?.cast || []).slice(0, 8).map((c) => c.name).join(' / ');
   /** 点击演员 / 推荐影片 → 走 /search 路由对该关键词执行一次全源搜索（HomePage 的 ?agg= 入口） */
   const goSearch = (kw: string): void => { nav(`/search?agg=${encodeURIComponent(kw)}`); };
 
@@ -249,8 +255,19 @@ export default function DetailPage({
               <div style={{ flex: 1 }}>
                 <h2 style={{ margin: '0 0 8px' }}>{detail.name}</h2>
                 <div className="muted" style={{ marginBottom: 4 }}>{detail.type} · {detail.year} · {detail.area}</div>
-                {detail.director && <div className="muted" style={{ marginBottom: 4 }}>导演：{detail.director}</div>}
-                {detail.actor && <div className="muted" style={{ marginBottom: 4 }}>主演：{detail.actor}</div>}
+                {/* ★ 2026-09-24：源数据缺导演/演员时，用 TMDb 演职员补齐（user 反馈部分源两项都没有） */}
+                {directorText && (
+                  <div className="muted" style={{ marginBottom: 4 }}>
+                    导演：{directorText}
+                    {!detail.director && <span style={{ opacity: .6, fontSize: 10, marginLeft: 6 }}>来自 TMDb</span>}
+                  </div>
+                )}
+                {actorText && (
+                  <div className="muted" style={{ marginBottom: 4 }}>
+                    主演：{actorText}
+                    {!detail.actor && <span style={{ opacity: .6, fontSize: 10, marginLeft: 6 }}>来自 TMDb</span>}
+                  </div>
+                )}
                 {detail.remarks && <div style={{ color: 'var(--accent-2)', marginBottom: 4 }}>{detail.remarks}</div>}
                 <div className="muted" style={{ fontSize: 12, maxHeight: 80, overflow: 'auto', marginTop: 8 }}>
                   {(detail.des || '').trim().length >= 8
@@ -271,7 +288,10 @@ export default function DetailPage({
                 </div>
                 <div className="ep-list">
                   {(detail.episodes[flag] || []).map((e, i) => (
-                    <div key={i} className={`ep ${i === ep ? 'active' : ''}`} onClick={() => chooseEp(i)} title={e.url}>{e.name}</div>
+                    // ★ 2026-09-24：网盘源集名是一整串文件名 → 只展示「第N集 · 体积」（title 保留原名可悬停查看）
+                    <div key={i} className={`ep ${i === ep ? 'active' : ''}`} onClick={() => chooseEp(i)} title={e.name || e.url}>
+                      {formatEpisodeLabel(e.name, i)}
+                    </div>
                   ))}
                 </div>
                 <div className="row" style={{ marginTop: 14 }}>

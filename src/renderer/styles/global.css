@@ -131,6 +131,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 .topbar { min-height: 54px; border-bottom: 1px solid var(--border-soft); display: flex; align-items: center; gap: 10px;
   padding: 0 18px; background: var(--bg1); backdrop-filter: blur(6px); }
+/* ★ 2026-09-24：顶栏按钮固定「横板」形状 —— 此前长提示文字会把它压成竖排异形（文字折成两三行） */
+.topbar button { flex: 0 0 auto; white-space: nowrap; }
+/* 顶栏里的说明文字可被压缩并省略号截断（给右侧按钮让位） */
+.topbar > .muted { min-width: 0; }
 .content { flex: 1; overflow: auto; padding: 18px; scrollbar-gutter: stable; }
 h2, h3, h4 { font-weight: 650; letter-spacing: .2px; }
 h3 { font-size: 18px; } h4 { font-size: 14px; color: var(--text); }

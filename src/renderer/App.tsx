@@ -15,6 +15,7 @@ import type { Episode } from '../shared/types';
 
 const NAV = [
   { to: '/', label: '点播', ico: '▶', end: true },
+  { to: '/discover', label: '发现', ico: '🧭' },
   { to: '/history', label: '历史', ico: '🕘' },
   { to: '/live', label: '直播', ico: '📡' },
   { to: '/config', label: '配置', ico: '⚙' },
@@ -264,6 +265,8 @@ export default function App() {
             * 不挂在 `/` 上：那时 RootPage 会按「有无源」重新分流（无源→发现页），跳转等于没跳。
             */}
           <Route path="/search" element={<HomePage onOpenDetail={(k, id, pic) => nav(`/detail/${encodeURIComponent(k)}/${encodeURIComponent(id)}${pic ? `?pic=${encodeURIComponent(pic)}` : ''}`)} />} />
+          {/* ★ 2026-09-24：发现页独立入口（侧边栏「发现」）—— 有源时也能随时进来自选影片走全源搜索 */}
+          <Route path="/discover" element={<DiscoverPage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/detail/:key/:id" element={<DetailPage onPlay={onDetailPlay} />} />
           <Route path="/live" element={<LivePage />} />

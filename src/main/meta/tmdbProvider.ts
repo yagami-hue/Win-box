@@ -317,21 +317,40 @@ export interface TmdbExtrasRaw {
   genres: string[];
   cast: Array<{ name: string; character?: string }>;
   recommendations: Array<{ title: string; year: number | ''; posterPath: string; tmdbId?: number; mediaType: 'movie' | 'tv' }>;
+  /** ★ 2026-09-24：导演（电影取 crew[job=Director]；剧集再并入 created_by） */
+  directors: string[];
 }
 
 /**
  * 解析 `/movie/{id}?append_to_response=credits,recommendations` 响应（纯函数）。
- * genres[].name / credits.cast[].{name,character} / recommendations.results[].{title,poster_path,release_date,id}
- * 演员按出现顺序去重（同名只留首次），无封面的推荐项跳过（详情页卡片必须有图）。
+ * genres[].name / credits.cast[].{name,character} / credits.crew[job=Director] /
+ * created_by[].name（剧集）/ recommendations.results[].{title,poster_path,release_date,id}
+ * 演员与导演按出现顺序去重，无封面的推荐项跳过（详情页卡片必须有图）。
  */
 export function parseTmdbExtras(json: unknown, mediaType: 'movie' | 'tv'): TmdbExtrasRaw {
-  const j = json as { genres?: unknown; credits?: unknown; recommendations?: unknown } | null;
+  const j = json as { genres?: unknown; credits?: unknown; recommendations?: unknown; created_by?: unknown } | null;
   const genres: string[] = [];
   if (Array.isArray(j?.genres)) {
     for (const g of j!.genres as Record<string, unknown>[]) {
       const n = String(g?.name ?? '').trim();
       if (n && !genres.includes(n)) genres.push(n);
     }
+  }
+  const directors: string[] = [];
+  const pushDirector = (name: string): void => {
+    const n = name.trim();
+    if (n && !directors.includes(n)) directors.push(n);
+  };
+  const crewRaw = (j?.credits as { crew?: unknown } | undefined)?.crew;
+  if (Array.isArray(crewRaw)) {
+    for (const c of crewRaw as Record<string, unknown>[]) {
+      if (String(c?.job ?? '').trim() !== 'Director') continue;
+      pushDirector(String(c?.name ?? ''));
+    }
+  }
+  // 剧集的「导演」在 TMDB 里通常记在 created_by（创作者）上
+  if (Array.isArray(j?.created_by)) {
+    for (const c of j!.created_by as Record<string, unknown>[]) pushDirector(String(c?.name ?? ''));
   }
   const cast: TmdbExtrasRaw['cast'] = [];
   const castRaw = (j?.credits as { cast?: unknown } | undefined)?.cast;
@@ -362,7 +381,7 @@ export function parseTmdbExtras(json: unknown, mediaType: 'movie' | 'tv'): TmdbE
       });
     }
   }
-  return { genres, cast, recommendations };
+  return { genres, cast, recommendations, directors };
 }
 
 /**
@@ -403,6 +422,7 @@ export async function tmdbExtras(
         .slice(0, MAX_RECS)
         .map((r) => ({ ...r, poster: `${IMG_PROXY}?u=${encodeURIComponent(`${POSTER_BASE}${r.posterPath}`)}` }))
         .map(({ posterPath: _p, ...rest }) => rest),
+      directors: raw.directors.slice(0, 4),
     };
     extrasCache.set(key, { t: Date.now(), data });
     return data;

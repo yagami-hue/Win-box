@@ -7,6 +7,7 @@ import VideoPlayer from '../components/VideoPlayer';
 import TitleBar from '../components/TitleBar';
 import { client } from '../api/client';
 import { uiMem, recordWatch, saveUiMemory } from '../lib/uiMemory';
+import { formatEpisodeLabel } from '../lib/epName';
 
 export interface PlayerInitData {
   key: string;
@@ -40,8 +41,10 @@ export default function PlayerPage() {
     if (!eps || idx < 0 || idx >= eps.length) return;
     const target = eps[idx];
     // ★ 剧名副名优先用 subtitleTitle（详情页主标题）；回退 title；再回退 resourceName 首段
+    //   ★ 2026-09-24：集名统一归一（网盘源文件名 → 「第N集 · 体积」），标题/历史都好看
     const mainTitle = (d.subtitleTitle || d.title || '').trim();
-    const display = mainTitle ? `${mainTitle} - ${target.name}` : target.name;
+    const label = formatEpisodeLabel(target.name, idx);
+    const display = mainTitle ? `${mainTitle} - ${label}` : label;
     setEpIndex(idx);
     setCurName(display);
     try {
@@ -66,7 +69,7 @@ export default function PlayerPage() {
       flag: d.flag,
       name: display,
       pic: d.meta?.pic,
-      remarks: target.name,
+      remarks: label,
       sourceName: d.meta?.sourceName,
       sourceKey: d.meta?.fromKey,
       vodId: d.meta?.vodId ?? d.meta?.id,

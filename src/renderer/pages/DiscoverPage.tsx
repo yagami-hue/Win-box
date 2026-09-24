@@ -12,6 +12,15 @@ export default function DiscoverPage() {
   const [sections, setSections] = useState<DiscoverSection[] | null>(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);
+  /** ★ 2026-09-24：有源时也能进发现页（侧边栏「发现」入口）→ 文案/按钮随「有无源」自适应 */
+  const [hasSources, setHasSources] = useState(false);
+
+  useEffect(() => {
+    client
+      .cfgGet()
+      .then((cfg) => setHasSources(cfg.sources.length > 0))
+      .catch(() => undefined);
+  }, []);
 
   const load = (refresh: boolean): void => {
     setLoading(true);
@@ -33,13 +42,18 @@ export default function DiscoverPage() {
   return (
     <>
       <div className="topbar">
-        <span style={{ fontWeight: 600 }}>发现</span>
-        <span className="muted" style={{ marginLeft: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          未导入站源 —— 这是内置发现页（数据来自 TMDb）；导入并选中源后，这里会显示你的源主页
+        <span style={{ fontWeight: 600, flex: '0 0 auto' }}>发现</span>
+        <span className="muted" style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {hasSources
+            ? '内置发现页（数据来自 TMDb）—— 点击影片会用你的源做全源搜索'
+            : '未导入站源 —— 这是内置发现页（数据来自 TMDb）；导入并选中源后，这里会显示你的源主页'}
         </span>
-        <div style={{ flex: 1 }} />
-        <button style={{ flex: 0 }} onClick={() => load(true)} disabled={loading}>刷新</button>
-        <button className="primary" style={{ flex: 0, marginLeft: 8 }} onClick={() => nav('/config')}>去导入源</button>
+        <button style={{ flex: '0 0 auto' }} onClick={() => load(true)} disabled={loading}>刷新</button>
+        {hasSources ? (
+          <button className="primary" style={{ flex: '0 0 auto' }} onClick={() => nav('/')}>回到源主页</button>
+        ) : (
+          <button className="primary" style={{ flex: '0 0 auto' }} onClick={() => nav('/config')}>去导入源</button>
+        )}
       </div>
       <div className="content">
         {loading && !sections ? (

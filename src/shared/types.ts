@@ -260,6 +260,9 @@ export interface MetaExtra {
   cast: MetaCastMember[];
   genres: string[];
   recommendations: MetaRecommendation[];
+  /** ★ 2026-09-24：导演名（TMDB `credits.crew[job=Director]` / 剧集 `created_by`）；
+   *  详情页在源数据缺导演时用它补展示 */
+  directors: string[];
 }
 
 // ---------- 发现页（无源时的默认主页；数据来自 TMDB 榜单） ----------
