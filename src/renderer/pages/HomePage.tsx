@@ -486,14 +486,22 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         setAgg(mergeSearchResults(acc));
         if (progressed) setAggProgress(progressed);
       };
-      const off = client.onSearchAllProgress((ev) => {
-        if (ev.wd !== term) return;
-        // ★ 快速窗口的「tick」不带 source（只更新进度文字），只有带 source 的才入库
-        if (ev.source) acc.push(ev.source);
-        progressed = { done: ev.done, total: ev.total, pending: ev.pending ?? Math.max(0, ev.total - ev.done) };
-        setAggProgress(progressed); // 进度文字实时（极轻量）
-        if (ev.source && !flushTimer) flushTimer = setTimeout(flush, 200);
-      });
+      // ★★ 2026-09-24 教训（「全源搜索搜不出来」的真因）：进度订阅是**可选增强**，
+      //   一旦它抛异常（当时 preload 把 onSearchAllProgress 挂错在 api.config 下，
+      //   渲染层调 window.api.vod.onSearchAllProgress → TypeError），且抛点在 try 之外 →
+      //   `client.searchAll` 从不执行、`loading` 永久 true → 界面永远卡在「正在逐源检索…」。
+      //   这里兜住：订阅失败只退化「边搜边出」，搜索结果本身照常返回并渲染。
+      let off: () => void = () => undefined;
+      try {
+        off = client.onSearchAllProgress((ev) => {
+          if (ev.wd !== term) return;
+          // ★ 快速窗口的「tick」不带 source（只更新进度文字），只有带 source 的才入库
+          if (ev.source) acc.push(ev.source);
+          progressed = { done: ev.done, total: ev.total, pending: ev.pending ?? Math.max(0, ev.total - ev.done) };
+          setAggProgress(progressed); // 进度文字实时（极轻量）
+          if (ev.source && !flushTimer) flushTimer = setTimeout(flush, 200);
+        });
+      } catch { /* 订阅不可用：仅失去逐源进度，不影响结果 */ }
       try {
         const r = await client.searchAll(term, { refresh: force });
         flush(); // 收尾：把节流窗口里最后一批结果落屏

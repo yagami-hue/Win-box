@@ -30,12 +30,6 @@ const api = {
     cfgProfiles: () => invoke(IPC.CFG_PROFILES),
     vodDebug: (key: string) => invoke(IPC.VOD_DEBUG, key),
     audit: () => invoke(IPC.VOD_AUDIT),
-    /** ★ 聚合搜索逐源进度（边搜边出）：订阅后返回退订函数 */
-    onSearchAllProgress: (cb: (ev: unknown) => void) => {
-      const l = (_e: unknown, ev: unknown) => cb(ev);
-      ipcRenderer.on(IPC.VOD_SEARCH_ALL_PROGRESS, l);
-      return () => { ipcRenderer.removeListener(IPC.VOD_SEARCH_ALL_PROGRESS, l); };
-    },
     cacheClear: () => invoke<{ freedBytes: number; cleared: string[]; failed: string[] }>(IPC.CACHE_CLEAR),
     // ★ 播放网盘资源未绑定 cookie → 请求主窗口跳到「配置 → 账号与凭据」tab
     gotoAccount: () => invoke<void>(IPC.CFG_GOTO_ACCOUNT),
@@ -53,6 +47,18 @@ const api = {
     search: (a: { key: string; wd: string }) => invoke(IPC.VOD_SEARCH, a),
     /** ★ opts.refresh=true 忽略本地缓存强制重搜（UI「重新搜索」）；缺省命中 5 分钟缓存即秒回 */
     searchAll: (wd: string, opts?: { refresh?: boolean }) => invoke(IPC.VOD_SEARCH_ALL, { wd, refresh: !!opts?.refresh }),
+    /**
+     * ★ 聚合搜索逐源进度（边搜边出）：订阅后返回退订函数。
+     * ★★ 2026-09-24 修复：本方法此前被错放在 `api.config` 下，而渲染层调用的是
+     *   `window.api.vod.onSearchAllProgress` → 调用即抛 TypeError（且在 doSearch 的 try 之外）
+     *   → `client.searchAll` 从未执行、`loading` 永远为 true → 界面卡在「正在逐源检索…」，
+     *   用户侧表现就是「全源搜索搜不出来」。必须挂在 vod 组内。
+     */
+    onSearchAllProgress: (cb: (ev: unknown) => void) => {
+      const l = (_e: unknown, ev: unknown) => cb(ev);
+      ipcRenderer.on(IPC.VOD_SEARCH_ALL_PROGRESS, l);
+      return () => { ipcRenderer.removeListener(IPC.VOD_SEARCH_ALL_PROGRESS, l); };
+    },
     play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => invoke(IPC.VOD_PLAY, a),
   },
   live: {

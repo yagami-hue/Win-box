@@ -926,10 +926,15 @@ export class SpiderHost {
       results[i] = input;
       done++;
       if (input.status === 'ok' && !firstHitAt) firstHitAt = Date.now() - searchT0;
-      try {
-        this.onSearchAllProgress?.({ wd: term, source: input, done, total, pending: Math.max(0, total - done) });
-        pushed++;
-      } catch { /* 进度推送失败不影响搜索本身 */ }
+      // ★ 2026-09-24：`pushed` 只在**回调真实存在且推送成功**时自增 —— 此前 `?.()` 之后
+      //   无条件 `pushed++`，日志会打出「推送进度 32 条」而 IPC 实际上一条都没发（排障被误导）。
+      const cb = this.onSearchAllProgress;
+      if (cb) {
+        try {
+          cb({ wd: term, source: input, done, total, pending: Math.max(0, total - done) });
+          pushed++;
+        } catch { /* 进度推送失败不影响搜索本身 */ }
+      }
     };
     // ★ 快速窗口：3s 后推一条「不带 source」的进度 → UI 明确显示「已出 X 个 · 其余 N 个仍在补搜」
     const quickTimer = setTimeout(() => {
