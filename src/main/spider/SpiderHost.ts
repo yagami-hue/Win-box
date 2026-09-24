@@ -55,9 +55,9 @@ import { DanmakuStore } from '../danmaku/DanmakuStore';
 import { dandanplaySearch, dandanplayBangumi, dandanplayComment } from '../danmaku/dandanplayProvider';
 import { getDanmakuCredentials } from '../danmaku/credentials';
 import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
-import type { MetaHit } from '../../shared/types';
+import type { MetaHit, MetaExtra, DiscoverSection } from '../../shared/types';
 import { MetaStore } from '../meta/MetaStore';
-import { tmdbSearchTitle, metaCacheKey, metaQueryVariants } from '../meta/tmdbProvider';
+import { tmdbSearchTitle, tmdbExtras, tmdbDiscover, metaCacheKey, metaQueryVariants } from '../meta/tmdbProvider';
 import { doubanSearchTitle, isCjkName, DOUBAN_CACHE_PREFIX } from '../meta/doubanProvider';
 import { so360SearchCover, SO360_CACHE_PREFIX } from '../meta/so360Provider';
 
@@ -512,6 +512,31 @@ export class SpiderHost {
     } catch (e) {
       this.logger.e('meta:搜索失败', e);
       return null;
+    }
+  }
+
+  /**
+   * ★ 2026-09-24 详情页增强：TMDB 演职员 / 类型 / 相关推荐（详情页「演员名单 + 相关推荐」区块用）。
+   * 无凭据或无命中返回 null（渲染层用详情自带 actor 串兜底），绝不抛错。
+   */
+  async metaExtra(name: string, year?: string): Promise<MetaExtra | null> {
+    const n = (name || '').trim();
+    if (!n) return null;
+    try {
+      return await tmdbExtras(this.metaStore, this.logger, n, year || undefined);
+    } catch (e) {
+      this.logger.w(`meta:详情增强查询失败: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** ★ 2026-09-24 发现页：TMDB 榜单（无源默认主页；无凭据返回空数组，渲染层给提示） */
+  async metaDiscover(refresh = false): Promise<DiscoverSection[]> {
+    try {
+      return await tmdbDiscover(this.logger, !!refresh);
+    } catch (e) {
+      this.logger.w(`meta:发现页查询失败: ${(e as Error).message}`);
+      return [];
     }
   }
 
@@ -1005,6 +1030,29 @@ export class SpiderHost {
     return report;
   }
 
+  /**
+   * ★ 2026-09-24：**.py 源后台预热**（脚本下载 + 嵌入式 Python 运行时准备）。
+   * 背景：用户反馈「py 源加载太慢，尤其首次」——根因是首次进源才现付
+   *   「11MB embed 下载 + 解压 + 6 个 wheel 安装 + 脚本下载」，全在关键路径上。
+   * 与 prewarmSpiders 分开做：那条只预热前 3 个池 key 且 30s 节流，py 源常排不上号。
+   * 预热完全后台、可重复调用（在途工作由 bridge/PySpider 共享），失败静默（首次正常调用会重试）。
+   */
+  prewarmPythonSources(maxSources = 5): void {
+    let n = 0;
+    for (const b of this.config?.sites ?? []) {
+      if (n >= maxSources) break;
+      if (!(b.api || '').toLowerCase().includes('.py')) continue;
+      try {
+        const sp = this.vm.spiderFactory.getCSP(b, this.host) as { warmup?: () => void };
+        if (typeof sp.warmup === 'function') {
+          sp.warmup();
+          n++;
+        }
+      } catch { /* 源不可用/类型不支持：静默 */ }
+    }
+    if (n > 0) this.logger.i(`python: 已调度 ${n} 个 .py 源的后台预热（脚本 + 嵌入式运行时），首次进源直接可用`);
+  }
+
   /** 池内常驻蜘蛛进程数（诊断/日志/基准脚本用） */
   poolAliveCount(): number {
     return this.bridge.alivePoolCount();
@@ -1022,6 +1070,7 @@ export class SpiderHost {
     }
     setTimeout(() => {
       try { this.prewarmSpiders(3, 1); } catch { /* 静默 */ }
+      try { this.prewarmPythonSources(); } catch { /* 静默 */ }
     }, 500).unref?.();
   }
 
@@ -1202,8 +1251,10 @@ export class SpiderHost {
     this.unsupportedSources.clear(); // 源列表变了 → 「不支持」判定重新学习
     // ★ 预热常驻蜘蛛进程（延后 1s：只要不抢窗口首帧即可，越早预热用户越早受益）。
     //   深度预热（__warm__：加载类 + 预建实例）覆盖前 3 个不同 key。
+    //   ★ 2026-09-24 起同时调度 .py 源预热（脚本 + 嵌入式 Python 运行时）——见 prewarmPythonSources。
     setTimeout(() => {
       try { this.prewarmSpiders(3, 1); } catch { /* 预热失败静默 */ }
+      try { this.prewarmPythonSources(); } catch { /* 预热失败静默 */ }
     }, 1000).unref?.();
   }
 }

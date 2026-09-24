@@ -23,6 +23,8 @@ export class PySpider extends Spider {
   private ready = false;
   /** 准备期失败原因（脚本下载/缓存），优先于调用期原因 */
   private loadError = '';
+  /** ★ 后台预热进行中标记（幂等：预热失败时 prewarm 会再次触发，避免递归/重复下载） */
+  private warmupRunning = false;
 
   constructor(init: SpiderInit, bridge: JarSpiderBridge) {
     super(init);
@@ -72,6 +74,34 @@ export class PySpider extends Spider {
     return null;
   }
 
+  /**
+   * ★ 2026-09-24 后台预热（不阻塞、幂等）：由 SpiderHost 在配置就绪/清缓存后调度 ——
+   *   ① 脚本未落盘 → 后台下载（首次进源不再现付脚本下载）；
+   *   ② 嵌入式 Python 运行时未就绪 → 后台下载 + 解压 + 装依赖（11MB 级，本项是「首次特别慢」的主因）；
+   *   ③ 两者都就绪 → 顺带深度预热一个常驻进程（预建实例，含 init(ext)）。
+   *   任何失败静默：首次正常调用时会重试并把真实原因上屏。
+   */
+  warmup(): void {
+    if (this.warmupRunning) return; // 幂等：同一源只跑一份预热
+    this.warmupRunning = true;
+    void (async () => {
+      try {
+        await this.ensureReady();
+        await this.bridge.prewarmPythonRuntime();
+        // 运行时确已就绪 → 顺带深度预热常驻进程（直接调 bridge，避免再落回 warmup 造成递归）
+        if (this.bridge.pyRuntimeReady()) {
+          const base = (this.api || '').split('?')[0];
+          const path = base.startsWith('file://') ? fileURLToPath(base) : join(this.bridge.pyCacheDir, `${md5Hex(base)}.py`);
+          if (existsSync(path)) {
+            this.bridge.prewarmPython(path, this.clsName, 1, enrichExt(this.ext || '', this.host?.driveTokens?.()));
+          }
+        }
+      } catch { /* 预热失败静默：首次正常调用会重试并上屏真实原因 */ } finally {
+        this.warmupRunning = false;
+      }
+    })();
+  }
+
   prewarm(count = 1): number {
     const base = (this.api || '').split('?')[0];
     let path = '';
@@ -80,7 +110,11 @@ export class PySpider extends Spider {
     } else if (/^https?:\/\//i.test(base)) {
       path = join(this.bridge.pyCacheDir, `${md5Hex(base)}.py`);
     }
-    if (!path || !existsSync(path)) return 0;
+    // ★ 脚本/运行时尚未就绪 → 转入后台预热（脚本下载 + 运行时准备），本轮不新起进程
+    if (!path || !existsSync(path) || !this.bridge.pyRuntimeReady()) {
+      this.warmup();
+      return 0;
+    }
     // ★ 深度预热：同 Java 侧 —— 预建实例（含 init(ext)）进 python 侧实例缓存
     return this.bridge.prewarmPython(path, this.clsName, count, enrichExt(this.ext || '', this.host?.driveTokens?.()));
   }

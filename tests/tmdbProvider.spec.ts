@@ -1,6 +1,88 @@
 // tests/tmdbProvider.spec.ts — TMDB 元数据补全的纯函数测试（解析/缓存键/名称规范化，不依赖网络）
 import { describe, expect, it } from 'vitest';
-import { parseTmdbSearch, metaCacheKey, metaQueryName, metaQueryVariants, truncAtYear } from '../src/main/meta/tmdbProvider';
+import { parseTmdbSearch, metaCacheKey, metaQueryName, metaQueryVariants, truncAtYear, parseTmdbExtras, toDiscoverItems } from '../src/main/meta/tmdbProvider';
+
+// ★ 2026-09-24：TMDB id 随搜索结果带出（详情页「演职员/相关推荐」需要它再查一次详情）
+describe('parseTmdbSearch — tmdbId', () => {
+  it('带 id 的条目 → tmdbId 透出；无 id/非法 id → 不产出该字段', () => {
+    const r = parseTmdbSearch(
+      {
+        results: [
+          { id: 93405, title: '狂飙', release_date: '2023-01-14', poster_path: '/abc.jpg' },
+          { title: '无ID', release_date: '2020-01-01', poster_path: '/def.jpg' },
+          { id: 'x', title: '坏ID', release_date: '2020-01-01', poster_path: '/ghi.jpg' },
+        ],
+      },
+      'movie',
+    );
+    expect(r[0].tmdbId).toBe(93405);
+    expect(r[1].tmdbId).toBeUndefined();
+    expect(r[2].tmdbId).toBeUndefined();
+  });
+});
+
+// ★ 2026-09-24：详情页增强（演职员/类型/相关推荐）解析
+describe('parseTmdbExtras', () => {
+  const sample = {
+    genres: [{ id: 18, name: '剧情' }, { id: 80, name: '犯罪' }, { id: 18, name: '剧情' }],
+    credits: {
+      cast: [
+        { name: '张译', character: '安欣' },
+        { name: '张颂文', character: '高启强' },
+        { name: '张译', character: '重复项' }, // 同名去重
+        { name: '', character: '空名' }, // 空名跳过
+        { name: '无角色演员' },
+      ],
+    },
+    recommendations: {
+      results: [
+        { id: 1, title: '推荐A', release_date: '2021-05-01', poster_path: '/a.jpg' },
+        { id: 2, name: '推荐剧B', first_air_date: '2022-01-01', poster_path: '/b.jpg' },
+        { id: 3, title: '无图推荐', release_date: '', poster_path: '' }, // 无封面 → 跳过
+      ],
+    },
+  };
+
+  it('genres/cast/recommendations 全解析，含去重与无图跳过', () => {
+    const r = parseTmdbExtras(sample, 'movie');
+    expect(r.genres).toEqual(['剧情', '犯罪']); // 去重
+    expect(r.cast).toEqual([
+      { name: '张译', character: '安欣' },
+      { name: '张颂文', character: '高启强' },
+      { name: '无角色演员' },
+    ]);
+    expect(r.recommendations.length).toBe(2);
+    expect(r.recommendations[0]).toMatchObject({ title: '推荐A', year: 2021, posterPath: '/a.jpg', tmdbId: 1, mediaType: 'movie' });
+    expect(r.recommendations[1]).toMatchObject({ title: '推荐剧B', year: 2022, mediaType: 'movie' }); // mediaType 跟随父条目
+  });
+
+  it('字段缺失/非法 → 空数组，不抛错', () => {
+    expect(parseTmdbExtras(null, 'tv')).toEqual({ genres: [], cast: [], recommendations: [] });
+    expect(parseTmdbExtras({ credits: {}, recommendations: {} }, 'tv')).toEqual({ genres: [], cast: [], recommendations: [] });
+  });
+});
+
+// ★ 2026-09-24：发现页（无源默认主页）条目映射
+describe('toDiscoverItems', () => {
+  it('列表项 → 发现页条目（封面包装为本地 /img 中继，无图条目跳过）', () => {
+    const items = toDiscoverItems(
+      {
+        results: [
+          { id: 7, title: '流浪地球', release_date: '2019-02-05', poster_path: '/p1.jpg' },
+          { id: 8, name: '某剧', first_air_date: '2024-01-01', poster_path: '' },
+        ],
+      },
+      'movie',
+    );
+    expect(items.length).toBe(1);
+    expect(items[0].title).toBe('流浪地球');
+    expect(items[0].year).toBe(2019);
+    expect(items[0].tmdbId).toBe(7);
+    expect(items[0].mediaType).toBe('movie');
+    expect(items[0].poster).toMatch(/^http:\/\/127\.0\.0\.1:9978\/img\?u=/);
+    expect(decodeURIComponent(items[0].poster)).toContain('https://image.tmdb.org/t/p/w342/p1.jpg');
+  });
+});
 
 describe('parseTmdbSearch', () => {
   const sample = {

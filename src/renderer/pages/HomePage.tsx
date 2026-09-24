@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { client } from '../api/client';
 import type { SourceBean, VodItem, SearchAllReport, AggVodItem, FilterGroup } from '../../shared/types';
 import { sourceAvailability } from '../../engine/vod/sourceAvailability';
@@ -6,6 +7,7 @@ import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSea
 import { uiMem, schedulePersist } from '../lib/uiMemory';
 import { getSessionSort, setSessionSort } from '../lib/sessionSort';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
+import { pickCover } from '../lib/coverPick';
 
 type SortClassView = { id: string; name: string; flag?: string; filters?: FilterGroup[] };
 
@@ -20,6 +22,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const [pg, setPg] = useState(1);
   const [pageInfo, setPageInfo] = useState({ page: 0, pagecount: 0, total: 0 });
   const [wd, setWd] = useState('');
+  /** ★ 外部入口：/search?agg=<关键词>（详情页演员/推荐、发现页卡片点击跳来）→ 自动执行一次全源搜索 */
+  const [searchParams, setSearchParams] = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
   /** 首页内容由回退产出（蜘蛛无推荐列表 → homeVideoContent/首分类兜底），用于顶部轻提示 */
@@ -48,28 +52,32 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const filtersRef = useRef<Record<string, string>>({});
   /** 挂载恢复：数据就绪后回滚一次滚动位置（loadCategory 异步，须等 items 渲染） */
   const memRestoreRef = useRef(false);
-  // ---- TMDB 封面补全（★ 2026-09-19 重新理解用户意图：所有封面一律先走 TMDB）----
-  //   原因：源自带大量「能加载但内容是坏的」图（防盗链占位/错图），此前只补
-  //   「缺图/加载失败(onError)」的项 → 坏图仍被当做好图展示、感知为 TMDB 没生效。
-  //   新策略：**未补齐过的一律查 TMDB**，命中即回写覆盖（源图仅作查完前的占位/TMDB miss 兜底）。
-  //   控制手段：按 归一化片名(+年份) 去重 —— 一个分类页重复的同名条目（如整季列表）
-  //   只打一次 TMDB；每页最多查 30 个唯一片名；命中一次覆盖整组，防翻页打爆 API。
+  // ---- 封面策略（★ 2026-09-24 改回「源封面优先」，见 lib/coverPick.ts）----
+  //   此前（2026-09-19）是「未补齐过的一律查 TMDB，命中即覆盖」，用户看到的是
+  //   封面先出源图、随后被补图替换 → 「已有正常封面还会走 360 搜索、封面忽然变化」。
+  //   现在：**只有源封面缺失或加载失败（onError）的条目才查补图**，命中写 picOver 兜底。
+  //   控制手段不变：按 归一化片名(+年份) 去重（同名条目只查一次），每页最多 30 个唯一片名。
   const [picOver, setPicOver] = useState<Record<string, string>>({});
   const metaBusyRef = useRef(false);
-  /** ★ 聚合搜索结果同样走 TMDB 补全（release76：搜索结果显示大量"无图/坏图"→ 缺封面的主入口） */
+  /** ★ 聚合搜索结果同样走补图兜底（release76：搜索结果显示大量"无图/坏图"→ 缺封面的主入口） */
   const [aggPicOver, setAggPicOver] = useState<Record<string, string>>({});
   const aggBusyRef = useRef(false);
-  /** ★ 源自带图已证明是坏图（onError）→ 交回 TMDB 再补（坏图不残留界面） */
+  /** ★ 源封面已证明是坏图（onError）→ 该条改用补图（源图不再回填） */
   const [badPics, setBadPics] = useState<Record<string, boolean>>({});
+  /** ★ 聚合搜索结果的源封面坏图标记（同上） */
+  const [aggBadPics, setAggBadPics] = useState<Record<string, boolean>>({});
   /** ★ 源封面经本地 /play 中继重试（同源 Referer 破防盗链）的地址；每个 id 只试一次 */
   const [picRelay, setPicRelay] = useState<Record<string, string>>({});
   const [aggPicRelay, setAggPicRelay] = useState<Record<string, string>>({});
+  /** 已触发过单条补查的 id（幂等：同一 id 只补查一次，避免与批量补图重复打 API） */
+  const retryMetaFor = useRef<Set<string>>(new Set());
   const tmdbTitleOf = (it: VodItem) => (it.name || '').split(' - ')[0]?.trim() || '';
   const tmdbYearOf = (it: VodItem) => /((?:19|20)\d{2})/.exec(`${it.name} ${it.remarks || ''}`)?.[1];
   useEffect(() => {
     const MAX_UNIQUE_QUERY = 30; // 单页最多查 30 个唯一片名，防翻页打爆 API
     if (metaBusyRef.current) return;
-    const missing = items.filter((it) => !picOver[it.id] && tmdbTitleOf(it));
+    // ★ 只补「无封面 / 封面已坏」的条目（源封面正常的一律不动）
+    const missing = items.filter((it) => !picOver[it.id] && tmdbTitleOf(it) && (!it.pic || badPics[it.id]));
     if (missing.length === 0) return;
     // 按 归一化片名|年份 分组：同标题的重复条目只查一次 TMDB，命中覆盖整组
     const groups = new Map<string, { name: string; year?: string; ids: string[] }>();
@@ -100,11 +108,11 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       if (Object.keys(next).length) setPicOver((prev) => ({ ...prev, ...next }));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items]);
-  // 封面取值：TMDB 补全优先，其次「源图中继重试（防盗链兜底）」，最后源图
-  const picOf = (it: VodItem) => picOver[it.id] || picRelay[it.id] || it.pic;
-  /** ★ 源封面加载失败/为空 → 显式触发一次单条 TMDB 查询覆盖（原逻辑只置透明，从不重查 TMDB） */
-  const retryMetaFor = useRef<Set<string>>(new Set());
+  }, [items, badPics]);
+  // 封面取值：统一规则（源封面优先 → 中继重试 → 补图 → 源图占位）
+  const picOf = (it: VodItem) =>
+    pickCover({ srcPic: it.pic, srcBad: badPics[it.id], relay: picRelay[it.id], meta: picOver[it.id] });
+  /** ★ 源封面加载失败/为空 → 显式触发一次单条补图（原逻辑只置透明，从不重查 TMDB） */
   const ensureMetaSingle = (it: VodItem) => {
     if (retryMetaFor.current.has(it.id)) return; // 幂等：同一 id 只补查一次
     const name = tmdbTitleOf(it);
@@ -121,9 +129,16 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const picErr = (it: VodItem) => (e: React.SyntheticEvent<HTMLImageElement>) => {
     const el = e.target as HTMLImageElement;
     const src = el.currentSrc || el.src || '';
-    // ★ 源图中继（/img?u=…&ref=…）失败 → 置灰收手（避免与「TMDB 补图失败」混淆）
+    // ★ 源图中继（/img?u=…&ref=…）失败 → 有补图就交补图，否则置灰收手（不再反复重试）
     if (/[?&]ref=/.test(src)) {
-      el.style.opacity = '0.15';
+      if (picOver[it.id]) {
+        setPicRelay((prev) => {
+          if (prev[it.id] === undefined) return prev;
+          const n = { ...prev };
+          delete n[it.id];
+          return n;
+        });
+      } else el.style.opacity = '0.15';
       return;
     }
     if (/\/img\?/.test(src)) {
@@ -149,8 +164,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       el.style.opacity = '0.15';
     }
   };
-  // ★★ 聚合搜索结果 TMDB 补全（release76 新接入）：与浏览态同机制 —— 未补过的一律查，
-  //   按归一化片名去重（每页 ≤30 唯一名、6 并发分波），命中覆盖整组；补图失败移除覆盖。
+  // ★★ 聚合搜索结果的补图兜底：与浏览态同机制 —— 只补「无封面 / 封面已坏」的条目，
+  //   按归一化片名去重（每页 ≤30 唯一名、6 并发分波），补图失败移除覆盖。
   const aggKeyOf = (it: AggVodItem) => `${it.sourceKey}\u0000${it.id}`;
   useEffect(() => {
     // ★ 2026-09-23 三轮：**搜索进行中不做元数据补图**（loading 为真时直接跳过）。
@@ -159,7 +174,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     //   搜索结果落定后再补图（源封面本身照常立即显示，不影响首屏观感）。
     if (loading) return;
     if (!aggMode || !agg || agg.items.length === 0 || aggBusyRef.current) return;
-    const missing = agg.items.filter((it) => !aggPicOver[aggKeyOf(it)]);
+    const missing = agg.items.filter((it) => !aggPicOver[aggKeyOf(it)] && (!it.pic || aggBadPics[aggKeyOf(it)]));
     if (missing.length === 0) return;
     const groups = new Map<string, { name: string; year?: string; keys: string[] }>();
     for (const it of missing) {
@@ -189,9 +204,13 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       if (Object.keys(next).length) setAggPicOver((prev) => ({ ...prev, ...next }));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agg, aggMode, loading]);
-  const aggPicOf = (it: AggVodItem) => aggPicOver[aggKeyOf(it)] || aggPicRelay[aggKeyOf(it)] || it.pic;
-  /** ★ 聚合搜索的源封面失败 → 与浏览态同款兜底（中继重试 + 单条 TMDB 补查，各一次） */
+  }, [agg, aggMode, loading, aggBadPics]);
+  // 聚合结果封面取值：与浏览态同一套规则（源封面优先 → 中继 → 补图 → 源图占位）
+  const aggPicOf = (it: AggVodItem) => {
+    const k = aggKeyOf(it);
+    return pickCover({ srcPic: it.pic, srcBad: aggBadPics[k], relay: aggPicRelay[k], meta: aggPicOver[k] });
+  };
+  /** ★ 聚合搜索的源封面失败 → 与浏览态同款兜底（中继重试 + 单条补图，各一次） */
   const aggMetaRetried = useRef<Set<string>>(new Set());
   const ensureAggMetaSingle = (it: AggVodItem) => {
     const k = aggKeyOf(it);
@@ -215,7 +234,15 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     const src = el.currentSrc || el.src || '';
     const k = aggKeyOf(it);
     if (/[?&]ref=/.test(src)) {
-      el.style.opacity = '0.15';
+      // 源图中继失败 → 有补图交补图，否则置灰收手
+      if (aggPicOver[k]) {
+        setAggPicRelay((prev) => {
+          if (prev[k] === undefined) return prev;
+          const n = { ...prev };
+          delete n[k];
+          return n;
+        });
+      } else el.style.opacity = '0.15';
       return;
     }
     if (/\/img\?/.test(src)) {
@@ -231,6 +258,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       el.style.opacity = '0.15';
       return;
     }
+    // 源封面失败（防盗链/DNS 污染/坏图）→ 标记坏图（交补图）+ 中继重试一次
+    setAggBadPics((prev) => (prev[k] ? prev : { ...prev, [k]: true }));
     ensureAggMetaSingle(it);
     const relay = wrapImageUrlForRelay(src, navigator.userAgent);
     if (relay) {
@@ -316,6 +345,18 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         if (cancelled) return;
         const s = cfg.sources;
         setSites(s);
+        // ★ 外部入口：/search?agg=<关键词> —— 详情页「演员 / 相关推荐」与发现页卡片点击后跳来，
+        //   自动跑一次全源搜索。先清 URL 参数（返回/重进不重复触发），再置关键词与「全源」范围后执行。
+        const aggParam = (searchParams.get('agg') || '').trim();
+        if (aggParam) {
+          setSearchParams({}, { replace: true });
+          setWd(aggParam);
+          setSearchAllSources(true);
+          // ★ 显式传「全源」：setState 尚未生效，闭包里读 searchAllSources 会是 false（曾误走单源分支报
+          //   「当前未选中任何源，无法搜索」）
+          requestAnimationFrame(() => { void doSearch(false, aggParam, true); });
+          return;
+        }
         // ★ 搜索 → 详情 → 返回：恢复上次搜索结果界面（不重新浏览首页）
         const memSearch = uiMem.home.search;
         if (memSearch && memSearch.aggMode) {
@@ -452,16 +493,21 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    *   `force=true`（「重新搜索」按钮）忽略缓存强制重搜。
    */
   /** 保存搜索态到 uiMem（搜索 → 详情 → 返回时恢复搜索结果界面） */
-  function saveSearchMem(term: string, agg: SearchAllReport | null, scope: 'current' | 'all') {
-    uiMem.home.search = { wd: term, aggMode: true, aggScope: scope, searchAllSources, agg };
+  function saveSearchMem(term: string, agg: SearchAllReport | null, scope: 'current' | 'all', allScope = searchAllSources) {
+    uiMem.home.search = { wd: term, aggMode: true, aggScope: scope, searchAllSources: allScope, agg };
     schedulePersist();
   }
 
-  async function doSearch(force = false) {
-    const term = wd.trim();
+  /**
+   * @param termOverride 显式关键词（外部入口 /search?agg= 用，避免依赖尚未生效的 state）
+   * @param forceAllScope 显式「全源」范围（同上：setState 是异步的，闭包里读不到新值）
+   */
+  async function doSearch(force = false, termOverride?: string, forceAllScope?: boolean) {
+    const term = (termOverride ?? wd).trim();
     if (!term) return;
+    const allScope = forceAllScope ?? searchAllSources;
     const k = keyRef.current;
-    if (searchAllSources) {
+    if (allScope) {
       setLoading(true);
       setErr('');
       setAggMode(true);
@@ -506,7 +552,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         const r = await client.searchAll(term, { refresh: force });
         flush(); // 收尾：把节流窗口里最后一批结果落屏
         setAgg(r);
-        saveSearchMem(term, r, 'all');
+        saveSearchMem(term, r, 'all', true);
         // ★ 2026-09-24：有源因「运行时正在下载/转换」未参与（清缓存/首装后常见）→
         //   横幅提示 + **自动重搜一次**（25s 后），不让用户面对空结果不知道下一步做什么。
         if (r.pendingSources && r.pendingSources > 0 && !force) {

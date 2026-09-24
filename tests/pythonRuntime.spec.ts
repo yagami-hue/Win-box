@@ -1,7 +1,7 @@
 // tests/pythonRuntime.spec.ts — 嵌入式 CPython 运行时（JarSpiderBridge.callPython）适配层单测
 // 不触网、不跑真 python.exe：http 用桩返回 embed zip / wheel zip 字节，spawn 用 mock。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
@@ -143,6 +143,59 @@ describe('JarSpiderBridge.ensurePythonRuntime — 下载/解压嵌入式 CPython
     expect(got).toBe(dir);
     const reqs = (host as never as { http: { request: { mock: { calls: unknown[][] } } } }).http.request.mock.calls;
     expect(reqs.filter((c) => String((c[0] as { url: string }).url).includes('embed-amd64')).length).toBe(0);
+  });
+});
+
+describe('JarSpiderBridge.prewarmPythonRuntime — 后台预热（★ 2026-09-24 治「py 源首次特别慢」）', () => {
+  it('未就绪 → 预热完成下载/解压/装依赖/放 runner，且不 spawn 任何进程', async () => {
+    const { jvmDir, pyDir } = tmpCache();
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, makeHost(fakeEmbedZip()));
+    await bridge.prewarmPythonRuntime();
+    expect(existsSync(join(pyDir, '3.11.6', 'python.exe'))).toBe(true);
+    expect(existsSync(join(pyDir, '3.11.6', 'Lib', 'site-packages', 'requests', '__init__.py'))).toBe(true);
+    expect(existsSync(join(pyDir, '3.11.6', 'runner.py'))).toBe(true);
+    expect(bridge.pyRuntimeReady()).toBe(true);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('预热与调用并发 → 共享同一份工作，embed 只下载一次', async () => {
+    const { jvmDir, pyDir } = tmpCache();
+    const host = makeHost(fakeEmbedZip());
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, host);
+    const runtime = (b: JarSpiderBridge) => (b as never as { ensurePythonRuntime(): Promise<string> }).ensurePythonRuntime();
+    await Promise.all([bridge.prewarmPythonRuntime(), runtime(bridge), bridge.prewarmPythonRuntime()]);
+    const reqs = (host as never as { http: { request: { mock: { calls: unknown[][] } } } }).http.request.mock.calls;
+    expect(reqs.filter((c) => String((c[0] as { url: string }).url).includes('embed-amd64')).length).toBe(1);
+  });
+
+  it('预热失败 → 静默返回空串（不抛错），首次正常调用会再试', async () => {
+    const { jvmDir, pyDir } = tmpCache();
+    const host = makeHost(fakeEmbedZip());
+    (host as never as { http: { request: unknown } }).http.request = vi.fn(async () => {
+      throw new Error('connect timeout');
+    });
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, host);
+    await expect(bridge.prewarmPythonRuntime()).resolves.toBe('');
+    expect(bridge.pyRuntimeReady()).toBe(false);
+  });
+
+  it('已就绪再预热 → 不重拷 runner（避免每次调用递归复制 base/）', async () => {
+    const { jvmDir, pyDir } = tmpCache();
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, makeHost(fakeEmbedZip()));
+    await bridge.prewarmPythonRuntime();
+    const dst = join(pyDir, '3.11.6', 'runner.py');
+    writeFileSync(dst, '# 本地已是最新'); // 模拟已落盘且随包文件未更新
+    await bridge.prewarmPythonRuntime();
+    expect(readFileSync(dst, 'utf8')).toBe('# 本地已是最新'); // 未被覆盖
+  });
+
+  it('runner 被删 → 预热补齐（自愈）', async () => {
+    const { jvmDir, pyDir } = tmpCache();
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, makeHost(fakeEmbedZip()));
+    await bridge.prewarmPythonRuntime();
+    rmSync(join(pyDir, '3.11.6', 'runner.py'), { force: true });
+    await bridge.prewarmPythonRuntime();
+    expect(existsSync(join(pyDir, '3.11.6', 'runner.py'))).toBe(true);
   });
 });
 

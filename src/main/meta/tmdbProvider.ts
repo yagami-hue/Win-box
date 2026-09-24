@@ -7,7 +7,7 @@ import { createDohAgent } from '../net/DnsResolver';
 import { getTmdbCredentials } from './credentials';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import type { Logger } from '../../shared/types';
-import type { MetaHit } from '../../shared/types';
+import type { MetaHit, MetaExtra, DiscoverItem, DiscoverSection } from '../../shared/types';
 import type { MetaStore } from './MetaStore';
 
 const agent = createDohAgent();
@@ -43,12 +43,15 @@ export function parseTmdbSearch(json: unknown, type: 'movie' | 'tv'): MetaHit[] 
     const date = String(r.release_date ?? r.first_air_date ?? '').trim();
     const year = /^(\d{4})/.exec(date)?.[1] ? Number(/^(\d{4})/.exec(date)![1]) : ('' as const);
     if (!title) continue;
+    const id = Number(r.id);
     const hit: MetaHit = {
       title,
       year: year as number | '',
       poster: posterPath ? `${POSTER_BASE}${posterPath}` : '',
       overview,
       type,
+      // ★ 2026-09-24：带出 TMDB id —— 详情页「演职员/相关推荐」用它再查一次详情
+      ...(Number.isFinite(id) && id > 0 ? { tmdbId: id } : {}),
     };
     if (usable(hit)) out.push(hit);
   }
@@ -214,20 +217,25 @@ export async function tmdbSearchTitle(
   logger: Logger,
   name: string,
   year?: string,
+  opts?: { forceFresh?: boolean },
 ): Promise<MetaHit | null> {
   const cred = getTmdbCredentials();
   const variants = metaQueryVariants(name || '').slice(0, MAX_QUERY_VARIANTS);
   if (!cred || variants.length === 0) return null;
   const primaryKey = metaCacheKey(variants[0], year);
 
-  // 内存 LRU
-  if (memCache.has(primaryKey)) return memCache.get(primaryKey) ?? null;
+  // ★ forceFresh：跳过缓存直接重查（2026-09-24 详情页增强用 —— 老缓存条目没有 tmdbId，
+  //   需要一次「带 id」的新结果才能查演职员/推荐；结果照常写回缓存）
+  if (!opts?.forceFresh) {
+    // 内存 LRU
+    if (memCache.has(primaryKey)) return memCache.get(primaryKey) ?? null;
 
-  // 磁盘缓存（命中且 vv 未过期才直接返回；旧/过期缓存返回 undefined 触发重查+重校验）
-  const disk = store.cacheGet(primaryKey);
-  if (disk && disk.hit) {
-    memSet(primaryKey, disk.hit);
-    return disk.hit;
+    // 磁盘缓存（命中且 vv 未过期才直接返回；旧/过期缓存返回 undefined 触发重查+重校验）
+    const disk = store.cacheGet(primaryKey);
+    if (disk && disk.hit) {
+      memSet(primaryKey, disk.hit);
+      return disk.hit;
+    }
   }
 
   const y0 = (year || '').trim().replace(/\D/g, '');
@@ -296,6 +304,175 @@ export async function tmdbSearchTitle(
   return null;
 }
 
+// ==================== 详情页增强：演职员 / 类型 / 相关推荐（★ 2026-09-24） ====================
+
+/** 演职员/推荐缓存 TTL（详情页反复进出不重复打 API） */
+const EXTRAS_TTL_MS = 24 * 3600 * 1000;
+const MAX_CAST = 12;
+const MAX_RECS = 12;
+const extrasCache = new Map<string, { t: number; data: MetaExtra }>();
+
+/** TMDB 详情（append_to_response=credits,recommendations）解析结果（原样字段，供单测） */
+export interface TmdbExtrasRaw {
+  genres: string[];
+  cast: Array<{ name: string; character?: string }>;
+  recommendations: Array<{ title: string; year: number | ''; posterPath: string; tmdbId?: number; mediaType: 'movie' | 'tv' }>;
+}
+
+/**
+ * 解析 `/movie/{id}?append_to_response=credits,recommendations` 响应（纯函数）。
+ * genres[].name / credits.cast[].{name,character} / recommendations.results[].{title,poster_path,release_date,id}
+ * 演员按出现顺序去重（同名只留首次），无封面的推荐项跳过（详情页卡片必须有图）。
+ */
+export function parseTmdbExtras(json: unknown, mediaType: 'movie' | 'tv'): TmdbExtrasRaw {
+  const j = json as { genres?: unknown; credits?: unknown; recommendations?: unknown } | null;
+  const genres: string[] = [];
+  if (Array.isArray(j?.genres)) {
+    for (const g of j!.genres as Record<string, unknown>[]) {
+      const n = String(g?.name ?? '').trim();
+      if (n && !genres.includes(n)) genres.push(n);
+    }
+  }
+  const cast: TmdbExtrasRaw['cast'] = [];
+  const castRaw = (j?.credits as { cast?: unknown } | undefined)?.cast;
+  if (Array.isArray(castRaw)) {
+    for (const c of castRaw as Record<string, unknown>[]) {
+      const name = String(c?.name ?? '').trim();
+      if (!name || cast.some((x) => x.name === name)) continue;
+      const character = String(c?.character ?? '').trim();
+      cast.push(character ? { name, character } : { name });
+    }
+  }
+  const recommendations: TmdbExtrasRaw['recommendations'] = [];
+  const recRaw = (j?.recommendations as { results?: unknown } | undefined)?.results;
+  if (Array.isArray(recRaw)) {
+    for (const r of recRaw as Record<string, unknown>[]) {
+      const title = String(r?.title ?? r?.name ?? '').trim();
+      const posterPath = typeof r?.poster_path === 'string' ? r.poster_path : '';
+      if (!title || !posterPath) continue;
+      const date = String(r?.release_date ?? r?.first_air_date ?? '').trim();
+      const y = /^(\d{4})/.exec(date)?.[1];
+      const id = Number(r?.id);
+      recommendations.push({
+        title,
+        year: y ? Number(y) : ('' as const),
+        posterPath,
+        mediaType,
+        ...(Number.isFinite(id) && id > 0 ? { tmdbId: id } : {}),
+      });
+    }
+  }
+  return { genres, cast, recommendations };
+}
+
+/**
+ * 详情页增强查询：TMDB 搜索（拿 id）→ 详情（append credits/recommendations）→ MetaExtra。
+ * - 无内置凭据 / 无 TMDB 命中 → null（渲染层用详情自带 actor 串兜底，不报错）；
+ * - 命中条目来自旧缓存（无 tmdbId）→ forceFresh 重查一次拿 id；
+ * - 内存缓存 24h（详情页来回切换不重复请求）。
+ */
+export async function tmdbExtras(
+  store: MetaStore,
+  logger: Logger,
+  name: string,
+  year?: string,
+): Promise<MetaExtra | null> {
+  const n = (name || '').trim();
+  if (!n) return null;
+  const cred = getTmdbCredentials();
+  if (!cred) return null;
+  try {
+    let hit = await tmdbSearchTitle(store, logger, n, year);
+    if (hit && !hit.tmdbId) hit = await tmdbSearchTitle(store, logger, n, year, { forceFresh: true });
+    if (!hit?.tmdbId) return null;
+    const mediaType: 'movie' | 'tv' = hit.type === 'tv' ? 'tv' : 'movie';
+    const key = `${mediaType}:${hit.tmdbId}`;
+    const c = extrasCache.get(key);
+    if (c && Date.now() - c.t < EXTRAS_TTL_MS) return c.data;
+    const url = `${TMDB_API}/${mediaType}/${hit.tmdbId}?language=zh-CN&append_to_response=credits,recommendations`;
+    const resp = await getJson(url, cred.accessToken, 12000);
+    if (resp.status !== 200) {
+      logger.w(`meta:TMDB 详情(${key}) 失败 status=${resp.status} ${resp.text.slice(0, 120)}`);
+      return null;
+    }
+    const raw = parseTmdbExtras(JSON.parse(resp.text), mediaType);
+    const data: MetaExtra = {
+      cast: raw.cast.slice(0, MAX_CAST),
+      genres: raw.genres,
+      recommendations: raw.recommendations
+        .slice(0, MAX_RECS)
+        .map((r) => ({ ...r, poster: `${IMG_PROXY}?u=${encodeURIComponent(`${POSTER_BASE}${r.posterPath}`)}` }))
+        .map(({ posterPath: _p, ...rest }) => rest),
+    };
+    extrasCache.set(key, { t: Date.now(), data });
+    return data;
+  } catch (e) {
+    logger.w(`meta:TMDB 详情查询异常: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+// ==================== 发现页（无源时的默认主页；★ 2026-09-24） ====================
+
+/** 发现页分区（TMDB 榜单；标题用中文，language=zh-CN 片名也走中文） */
+const DISCOVER_SECTIONS: Array<{ id: string; title: string; path: string; mediaType: 'movie' | 'tv' }> = [
+  { id: 'movie-popular', title: '热门电影', path: '/movie/popular', mediaType: 'movie' },
+  { id: 'movie-upcoming', title: '即将上映', path: '/movie/upcoming', mediaType: 'movie' },
+  { id: 'movie-top', title: '高分电影', path: '/movie/top_rated', mediaType: 'movie' },
+  { id: 'tv-popular', title: '热门剧集', path: '/tv/popular', mediaType: 'tv' },
+  { id: 'tv-top', title: '高分剧集', path: '/tv/top_rated', mediaType: 'tv' },
+];
+/** 榜单缓存 TTL：6h（榜单变化慢；重启/刷新按钮可绕过） */
+const DISCOVER_TTL_MS = 6 * 3600 * 1000;
+let discoverCache: { t: number; data: DiscoverSection[] } | null = null;
+let discoverInflight: Promise<DiscoverSection[]> | null = null;
+
+/** TMDB 列表项 → 发现页条目（封面包装为本地 /img 中继，渲染层直连图床可能被 DNS 污染） */
+export function toDiscoverItems(json: unknown, mediaType: 'movie' | 'tv'): DiscoverItem[] {
+  return parseTmdbSearch(json, mediaType).map((h) => ({
+    title: h.title,
+    year: h.year,
+    tmdbId: h.tmdbId,
+    mediaType,
+    poster: h.poster ? `${IMG_PROXY}?u=${encodeURIComponent(h.poster)}` : '',
+  })).filter((it) => it.poster);
+}
+
+/**
+ * 拉取发现页全部榜单（并行；单个分区失败只丢该分区）。
+ * - 无内置凭据 → 返回空数组（渲染层提示「未内置凭据」而不是报错）；
+ * - 结果内存缓存 6h；`refresh=true` 绕过缓存重拉；并发调用共享同一 in-flight promise。
+ */
+export async function tmdbDiscover(logger: Logger, refresh = false): Promise<DiscoverSection[]> {
+  const cred = getTmdbCredentials();
+  if (!cred) return [];
+  if (!refresh && discoverCache && Date.now() - discoverCache.t < DISCOVER_TTL_MS) return discoverCache.data;
+  if (discoverInflight) return discoverInflight;
+  const task = (async (): Promise<DiscoverSection[]> => {
+    const parts = await Promise.all(
+      DISCOVER_SECTIONS.map(async (s) => {
+        try {
+          const resp = await getJson(`${TMDB_API}${s.path}?language=zh-CN&page=1`, cred.accessToken, 12000);
+          if (resp.status !== 200) {
+            logger.w(`meta:发现页 ${s.id} 失败 status=${resp.status} ${resp.text.slice(0, 120)}`);
+            return null;
+          }
+          const items = toDiscoverItems(JSON.parse(resp.text), s.mediaType);
+          return items.length ? { id: s.id, title: s.title, items } : null;
+        } catch (e) {
+          logger.w(`meta:发现页 ${s.id} 异常: ${(e as Error).message}`);
+          return null;
+        }
+      }),
+    );
+    const out = parts.filter((x): x is DiscoverSection => x !== null);
+    if (out.length) discoverCache = { t: Date.now(), data: out };
+    return out;
+  })();
+  discoverInflight = task.catch(() => [] as DiscoverSection[]).finally(() => { discoverInflight = null; });
+  return discoverInflight;
+}
+
 function memSet(cacheKey: string, hit: MetaHit | null): void {
   if (memCache.size >= MAX_MEM) {
     const first = memCache.keys().next().value;
@@ -304,7 +481,9 @@ function memSet(cacheKey: string, hit: MetaHit | null): void {
   memCache.set(cacheKey, hit);
 }
 
-/** 测试用：清空内存缓存 */
+/** 测试用：清空内存缓存（封面/详情增强/发现页三处） */
 export function __resetMemCacheForTest(): void {
   memCache.clear();
+  extrasCache.clear();
+  discoverCache = null;
 }

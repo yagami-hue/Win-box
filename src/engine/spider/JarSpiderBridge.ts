@@ -63,6 +63,12 @@ export class JarSpiderBridge {
   /** ★ 子进程常驻复用池（--serve/-serve；进程复用加速首页/搜索；单测与显式关闭时禁用） */
   private readonly pool: SpiderProcPool | null;
   private readonly poolReclaimTimer?: ReturnType<typeof setInterval>;
+  /**
+   * ★ 2026-09-24：嵌入式 Python 运行时的**在途准备任务**（下载/解压/装依赖/放 runner）。
+   * 作用有二：① 后台预热与首次调用共享同一份工作，绝不并发下载两份；
+   *          ② 预热在用户进源前完成时，首次使用只需 spawn + init（去掉 11MB 下载与装包）。
+   */
+  private pyRuntimeTask: Promise<string> | null = null;
 
   constructor(opts: JarBridgeOptions, private host?: EngineHost) {
     this.jvmDir = opts.jvmDir;
@@ -676,7 +682,30 @@ export class JarSpiderBridge {
     'https://mirrors.huaweicloud.com/repository/pypi/simple/',
   ];
 
+  /**
+   * ★ 2026-09-24 后台预热嵌入式 Python 运行时（不阻塞、幂等）：
+   * 由 SpiderHost 在配置就绪/清缓存后调用 —— 把「11MB embed 下载 + 解压 + wheel 安装」提前到
+   * 用户第一次进 .py 源之前完成，首次加载只剩「spawn 进程 + 蜘蛛 init」。
+   * 失败静默（首次正常调用时会重试并上屏真实原因）。
+   */
+  prewarmPythonRuntime(): Promise<string> {
+    return this.ensurePythonRuntime().catch(() => '');
+  }
+
   private async ensurePythonRuntime(): Promise<string> {
+    // ★ 在途任务共享：预热与调用并发时不再下载两份运行时
+    if (this.pyRuntimeTask) {
+      const d = await this.pyRuntimeTask;
+      if (d && existsSync(join(d, 'python.exe'))) return d;
+    }
+    const task = this.preparePythonRuntime();
+    this.pyRuntimeTask = task
+      .catch(() => '')
+      .finally(() => { this.pyRuntimeTask = null; });
+    return task;
+  }
+
+  private async preparePythonRuntime(): Promise<string> {
     if (!this.pyRuntimeDir) throw new Error('python 源需要嵌入式 Python 运行时，但未配置下载目录');
     const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
     const pyExe = join(dir, 'python.exe');
@@ -690,7 +719,7 @@ export class JarSpiderBridge {
     let lastErr = '';
     for (const url of JarSpiderBridge.PYTHON_EMBED_URLS) {
       try {
-        logger?.i?.(`python: 首次使用 .py 源，正在下载嵌入式 Python 运行时（约 ${JarSpiderBridge.PY_VER} embed 11MB）…`);
+        logger?.i?.(`python: 正在准备嵌入式 Python 运行时（${JarSpiderBridge.PY_VER} embed 约 11MB + 依赖安装；配置就绪后会后台预热）…`);
         const res = await this.host!.http.request({ url, method: 'get', timeoutMs: 180000, buffer: 2 });
         const buf = Buffer.from(Array.isArray(res.content) ? res.content as unknown as number[] : Buffer.from(String(res.content), 'base64'));
         if (buf.length < 1024 * 1024) { lastErr = `下载内容过小(${buf.length}B)`; continue; }
@@ -726,21 +755,28 @@ export class JarSpiderBridge {
     }
   }
 
-  /** 解压各 wheel 到 site-packages；lxml 失败仅警告，requests 族失败抛错。 */
+  /** 解压各 wheel 到 site-packages；lxml 失败仅警告，requests 族失败抛错。
+   *  ★ 2026-09-24：**分波并行**（每波 3 个）—— wheel 之间互不依赖，此前 6 个串行
+   *  （每包「索引页 + 包体」两次往返）是首次加载时间的大头之一。 */
   private async ensureRuntimeLibs(dir: string): Promise<void> {
     const sp = join(dir, 'Lib', 'site-packages');
-    for (const w of JarSpiderBridge.PY_WHEELS) {
-      const pkgDir = join(sp, w.name);
-      if (this.dirNonEmpty(pkgDir)) continue;
-      const ok = await this.downloadWheel(dir, w).catch((e) => {
-        if (w.required) throw e;
-        this.host?.logger?.w?.(`python: 可选依赖 ${w.name} 下载失败（不影响纯 py 源）: ${(e as Error).message}`);
-        return false;
-      });
-      if (ok && !this.dirNonEmpty(pkgDir)) {
-        if (w.required) throw new Error(`python: ${w.name} 解压后为空`);
-        this.host?.logger?.w?.(`python: 可选依赖 ${w.name} 解压后为空（跳过）`);
-      }
+    const pending = JarSpiderBridge.PY_WHEELS.filter((w) => !this.dirNonEmpty(join(sp, w.name)));
+    const WAVE = 3;
+    for (let i = 0; i < pending.length; i += WAVE) {
+      await Promise.all(
+        pending.slice(i, i + WAVE).map(async (w) => {
+          const pkgDir = join(sp, w.name);
+          const ok = await this.downloadWheel(dir, w).catch((e) => {
+            if (w.required) throw e;
+            this.host?.logger?.w?.(`python: 可选依赖 ${w.name} 下载失败（不影响纯 py 源）: ${(e as Error).message}`);
+            return false;
+          });
+          if (ok && !this.dirNonEmpty(pkgDir)) {
+            if (w.required) throw new Error(`python: ${w.name} 解压后为空`);
+            this.host?.logger?.w?.(`python: 可选依赖 ${w.name} 解压后为空（跳过）`);
+          }
+        }),
+      );
     }
   }
 
@@ -795,21 +831,36 @@ export class JarSpiderBridge {
     throw new Error(`python: wheel ${w.file} 全部镜像下载失败`);
   }
 
-  /** 把随包的 runner.py + base/ 拷贝进运行时目录（幂等）。 */
+  /** 把随包的 runner.py + base/ 拷贝进运行时目录（幂等）。
+   *  ★ 2026-09-24：**内容未变则跳过**——此前每次 callPython 都会递归复制一遍 base/，
+   *  属于「已就绪」路径上的无谓 IO（预热后每次调用都会走这里）。 */
   private placeRunnerFiles(dir: string): void {
     try {
       const fs = require('node:fs') as typeof import('node:fs');
       const src = join(this.jvmDir, 'python-runner');
-      if (!existsSync(src) || !existsSync(join(src, 'runner.py'))) {
+      const srcRunner = join(src, 'runner.py');
+      if (!existsSync(srcRunner)) {
         this.host?.logger?.w?.('python: 随包 runner 缺失（resources/jvm/python-runner），py 源将无法运行');
         return;
       }
-      fs.cpSync(join(src, 'runner.py'), join(dir, 'runner.py'), { force: true });
+      const dstRunner = join(dir, 'runner.py');
+      const dstBase = join(dir, 'base');
+      // 随包文件不比已落盘的更新（且 base/ 存在）→ 无需重拷
+      if (existsSync(dstBase) && this.mtimeMs(srcRunner) <= this.mtimeMs(dstRunner)) return;
+      fs.cpSync(srcRunner, dstRunner, { force: true });
       const bSrc = join(src, 'base');
-      if (existsSync(bSrc)) fs.cpSync(bSrc, join(dir, 'base'), { recursive: true, force: true });
+      if (existsSync(bSrc)) fs.cpSync(bSrc, dstBase, { recursive: true, force: true });
     } catch (e) {
       this.host?.logger?.w?.(`python: runner 落盘失败: ${(e as Error).message}`);
     }
+  }
+
+  /** 文件 mtime（毫秒）；不存在/读不到 → 0（按「需要拷贝」处理） */
+  private mtimeMs(p: string): number {
+    try {
+      const fs = require('node:fs') as typeof import('node:fs');
+      return fs.statSync(p).mtimeMs;
+    } catch { return 0; }
   }
 
   /** 生成 JVM 子进程的公共前置参数（旗标 + classpath），jar/python 模式共用。 */

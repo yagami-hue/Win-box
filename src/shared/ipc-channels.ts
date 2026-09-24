@@ -18,6 +18,9 @@ export const IPC = {
   DANMAKU_FETCH: 'danmaku:fetch',
   // TMDB 元数据补全（缺封面/缺简介兜底；凭据内置密文，仅查询通道）
   META_SEARCH: 'meta:search',
+  // ★ 详情页增强（演职员/类型/相关推荐）与发现页榜单（无源默认主页）
+  META_EXTRA: 'meta:extra',
+  META_DISCOVER: 'meta:discover',
   DRIVE_GET: 'drive:get',
   DRIVE_SET: 'drive:set',
   DRIVE_REMOVE: 'drive:remove',

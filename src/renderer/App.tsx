@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import ConfigPage from './pages/ConfigPage';
 import HomePage from './pages/HomePage';
+import DiscoverPage from './pages/DiscoverPage';
 import DetailPage from './pages/DetailPage';
 import PlayerPage from './pages/PlayerPage';
 import LivePage from './pages/LivePage';
@@ -18,6 +19,24 @@ const NAV = [
   { to: '/live', label: '直播', ico: '📡' },
   { to: '/config', label: '配置', ico: '⚙' },
 ];
+
+/**
+ * ★ 2026-09-24 根路由分流：**没有任何站源 → 发现页**（TMDB 榜单，点击影片走全源搜索）；
+ * 有源 → 源主页（HomePage 自己会恢复「上次选中的源」，所以选过源的用户不会看到发现页）。
+ */
+function RootPage({ onOpenDetail }: { onOpenDetail: (key: string, id: string, pic?: string) => void }) {
+  const [mode, setMode] = useState<'checking' | 'discover' | 'home'>('checking');
+  useEffect(() => {
+    let alive = true;
+    client
+      .cfgGet()
+      .then((cfg) => { if (alive) setMode(cfg.sources.length === 0 ? 'discover' : 'home'); })
+      .catch(() => { if (alive) setMode('home'); }); // 读配置失败按有源处理（源主页有完整错误提示）
+    return () => { alive = false; };
+  }, []);
+  if (mode === 'checking') return <div className="empty">加载中…</div>;
+  return mode === 'discover' ? <DiscoverPage /> : <HomePage onOpenDetail={onOpenDetail} />;
+}
 
 export default function App() {
   const nav = useNavigate();
@@ -238,7 +257,13 @@ export default function App() {
         {/* 自定义无边框标题栏：整条可拖拽，右侧为窗口控制（最小化/最大化/关闭） */}
         <TitleBar />
         <Routes>
-          <Route path="/" element={<HomePage onOpenDetail={(k, id, pic) => nav(`/detail/${encodeURIComponent(k)}/${encodeURIComponent(id)}${pic ? `?pic=${encodeURIComponent(pic)}` : ''}`)} />} />
+          <Route path="/" element={<RootPage onOpenDetail={(k, id, pic) => nav(`/detail/${encodeURIComponent(k)}/${encodeURIComponent(id)}${pic ? `?pic=${encodeURIComponent(pic)}` : ''}`)} />} />
+          {/**
+            * ★ 2026-09-24：全源搜索专用路由 —— 详情页「演员/相关推荐」与发现页卡片点击后跳这里，
+            * 由 HomePage 读 `?agg=<关键词>` 自动执行一次全源搜索。
+            * 不挂在 `/` 上：那时 RootPage 会按「有无源」重新分流（无源→发现页），跳转等于没跳。
+            */}
+          <Route path="/search" element={<HomePage onOpenDetail={(k, id, pic) => nav(`/detail/${encodeURIComponent(k)}/${encodeURIComponent(id)}${pic ? `?pic=${encodeURIComponent(pic)}` : ''}`)} />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/detail/:key/:id" element={<DetailPage onPlay={onDetailPlay} />} />
           <Route path="/live" element={<LivePage />} />

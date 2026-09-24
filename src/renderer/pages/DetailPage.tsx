@@ -1,11 +1,12 @@
 // src/renderer/pages/DetailPage.tsx — 详情页（返回键 + 播放源/集数/滚动记忆 + 回播放页可继续）
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { client } from '../api/client';
 import BackButton from '../components/BackButton';
 import { uiMem, schedulePersist } from '../lib/uiMemory';
-import type { Episode, MetaHit, VodDetail } from '../../shared/types';
+import type { Episode, MetaExtra, MetaHit, VodDetail } from '../../shared/types';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
+import { pickCover } from '../lib/coverPick';
 
 export default function DetailPage({
   onPlay,
@@ -14,6 +15,7 @@ export default function DetailPage({
 }) {
   const { key, id } = useParams<{ key: string; id: string }>();
   const [searchParams] = useSearchParams();
+  const nav = useNavigate();
   // 从列表页经 URL query 携带的封面（fty 等源 detail 接口偶发不返回 vod_pic，用作兜底）
   const fromListPic = searchParams.get('pic') || '';
   const [detail, setDetail] = useState<VodDetail | null>(null);
@@ -32,6 +34,8 @@ export default function DetailPage({
     setErr('');
     setMetaHit(null);
     setSrcPicBad(false);
+    setSrcPicRelay('');
+    setRelayBad(false);
     metaRetried.current = false;
     client
       .detail({ key: k, ids: [i] })
@@ -53,15 +57,17 @@ export default function DetailPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, id]);
 
-  // ---- TMDB 元数据补全（★ 2026-09-19：封面一律优先 TMDB —— 源自带图可能是坏图）----
-  //   查询条件不再要求「源封面缺失/坏」：详情一进来就按片名查 TMDB，命中即覆盖封面；
-  //   源封面（detail.pic / fromListPic）只作查询完成前的占位与 TMDB miss 兜底。
-  //   简介缺（<8 字符）时同一次查询直接补 TMDB overview。
+  // ---- 元数据（★ 2026-09-24 封面策略改回「源封面优先」，见 lib/coverPick.ts）----
+  //   查询本身照常进行（简介兜底 + 演职员/相关推荐区块要用），但**封面只在源封面缺失或
+  //   加载失败时才用它** —— 此前是「TMDB 命中即覆盖」，用户看到封面先出源图、随后被换成
+  //   补图（含 360），即「已有正常封面还会走 360 搜索、封面忽然变化」。
   const [metaHit, setMetaHit] = useState<MetaHit | null>(null);
-  /** ★ 源封面（detail.pic / fromListPic）onError 证明是坏图 → 维持 TMDB 优先 */
+  /** ★ 源封面（detail.pic / fromListPic）onError 证明是坏图 → 才启用补图 */
   const [srcPicBad, setSrcPicBad] = useState(false);
-  /** ★ 源封面经本地 /play 中继重试（注入同源 Referer 破防盗链）的地址；只试一次 */
+  /** ★ 源封面经本地 /img 中继重试（注入同源 Referer 破防盗链）的地址；只试一次 */
   const [srcPicRelay, setSrcPicRelay] = useState('');
+  /** ★ 中继重试也失败 → 交补图（无补图则置灰收手） */
+  const [relayBad, setRelayBad] = useState(false);
   useEffect(() => {
     if (!detail) { setMetaHit(null); return; }
     const name = (detail.name || '').trim().split(' - ')[0]?.trim();
@@ -76,16 +82,35 @@ export default function DetailPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail]);
 
-  // ★ 封面加载失败兜底：
-  //   · 失败的是 TMDB 补图（/img 中继 4xx/超时）→ 移除 metaHit；
-  //   · 失败的是源封面 → 标记 srcPicBad 且若无 TMDB 命中则重查一次，让 TMDB 有机会替换坏图。
+  // ---- ★ 2026-09-24 详情页增强：TMDB 演职员 / 类型 / 相关推荐 ----
+  //   供下方「演员名单 + 相关推荐」区块使用；点击演员或推荐影片 → 回首页对关键词跑一次全源搜索。
+  const [extra, setExtra] = useState<MetaExtra | null>(null);
+  useEffect(() => {
+    if (!detail) { setExtra(null); return; }
+    const name = (detail.name || '').trim().split(' - ')[0]?.trim();
+    if (!name) return;
+    const y = /((?:19|20)\d{2})/.exec(`${detail.name} ${detail.year || ''} ${detail.remarks || ''}`);
+    let alive = true;
+    client
+      .metaExtra(name, y ? y[1] : undefined)
+      .then((x) => { if (alive) setExtra(x); })
+      .catch(() => undefined);
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail]);
+
+  // ★ 封面加载失败兜底（源封面优先策略下的三段式）：
+  //   · 失败的是补图（/img 中继 4xx/超时）→ 移除 metaHit，落回源图；
+  //   · 失败的是源封面的中继重试 → 标记 relayBad（有补图就交补图）；
+  //   · 失败的是源封面本体 → 标记 srcPicBad + 走中继重试一次 + 若无补图则重查一次。
   const metaRetried = useRef(false);
   const coverErr = (e: React.SyntheticEvent<HTMLImageElement>) => {
     const el = e.target as HTMLImageElement;
     const src = el.currentSrc || el.src || '';
-    // 源图中继（/img?u=…&ref=…）失败 → 置灰收手
+    // 源图中继（/img?u=…&ref=…）失败 → 有补图交补图，否则置灰收手
     if (/[?&]ref=/.test(src)) {
-      el.style.opacity = '0.2';
+      if (metaHit?.poster) setRelayBad(true);
+      else el.style.opacity = '0.2';
       return;
     }
     if (/\/img\?/.test(src)) {
@@ -177,6 +202,23 @@ export default function DetailPage({
     }
   }
 
+  /** 源封面（详情自带 → 列表带入）与最终封面：统一策略「源封面优先」（见 lib/coverPick.ts） */
+  const srcCover = detail?.pic || fromListPic || '';
+  const cover = pickCover({ srcPic: srcCover, srcBad: srcPicBad, relay: srcPicRelay, relayBad, meta: metaHit?.poster });
+  /** 演员名单：TMDB 演职员优先；TMDB miss 时用详情自带的演员串拆分兜底 */
+  const castList: Array<{ name: string; character?: string }> = extra?.cast?.length
+    ? extra.cast
+    : (detail?.actor || '')
+        .split(/[,，/、;；|]+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+        .slice(0, 24)
+        .map((name) => ({ name }));
+  const genres = extra?.genres || [];
+  const recs = extra?.recommendations || [];
+  /** 点击演员 / 推荐影片 → 走 /search 路由对该关键词执行一次全源搜索（HomePage 的 ?agg= 入口） */
+  const goSearch = (kw: string): void => { nav(`/search?agg=${encodeURIComponent(kw)}`); };
+
   return (
     <>
       <div className="topbar">
@@ -193,9 +235,9 @@ export default function DetailPage({
         ) : (
           <>
             <div className="row" style={{ alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
-              {/** 封面（★ TMDB 优先）：metaHit.poster(中继图) > 源图中继重试 > 源自带 > 列表带入；TMDB miss 才落到源图 */}
-              {metaHit?.poster || srcPicRelay || detail.pic || fromListPic ? (
-                <img src={metaHit?.poster || srcPicRelay || detail.pic || fromListPic || ''} style={{ width: 120, aspectRatio: '2/3', objectFit: 'cover', borderRadius: 8, background: 'var(--bg-elev2)' }} onError={coverErr} />
+              {/** 封面（★ 源封面优先）：源图 > 源图中继重试 > 补图（仅源图缺失/坏图时启用） */}
+              {cover ? (
+                <img src={cover} style={{ width: 120, aspectRatio: '2/3', objectFit: 'cover', borderRadius: 8, background: 'var(--bg-elev2)' }} onError={coverErr} />
               ) : (
                 <div style={{
                   width: 120, aspectRatio: '2/3', borderRadius: 8, background: 'var(--bg-elev2)', flex: 'none',
@@ -234,6 +276,55 @@ export default function DetailPage({
                   <button className="primary" onClick={play}>▶ 播放选中</button>
                 </div>
               </>
+            )}
+            {/* ★ 2026-09-24 详情页增强：类型 / 演员名单 / 相关推荐（TMDB；点击 → 全源搜索） */}
+            {genres.length > 0 && (
+              <div className="row" style={{ marginTop: 16 }}>
+                <span className="muted">类型：</span>
+                {genres.map((g) => (
+                  <span key={g} className="tag" style={{ cursor: 'default' }}>{g}</span>
+                ))}
+              </div>
+            )}
+            {castList.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div className="muted" style={{ marginBottom: 6 }}>演员（点击搜索 TA 的作品）</div>
+                <div className="row">
+                  {castList.map((c) => (
+                    <span
+                      key={c.name}
+                      className="tag"
+                      title={c.character ? `饰 ${c.character} · 点击全源搜索` : '点击全源搜索'}
+                      onClick={() => goSearch(c.name)}
+                    >
+                      {c.name}{c.character ? ` · ${c.character}` : ''}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {recs.length > 0 && (
+              <div style={{ marginTop: 18 }}>
+                <div className="muted" style={{ marginBottom: 8 }}>相关推荐（点击全源搜索该影片）</div>
+                <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 6 }}>
+                  {recs.map((r, i) => (
+                    <div
+                      key={`${r.title}-${i}`}
+                      className="card-media"
+                      style={{ flex: '0 0 132px', cursor: 'pointer' }}
+                      onClick={() => goSearch(r.title)}
+                      title={`${r.title}${r.year ? ` (${r.year})` : ''}`}
+                    >
+                      <div className="card">
+                        <img src={r.poster} loading="lazy" decoding="async" />
+                        <div className="meta">
+                          <div className="name">{r.title}</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </>
         )}

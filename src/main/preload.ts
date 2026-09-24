@@ -2,7 +2,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { IpcResult } from '../shared/ipc-result';
 import { IPC } from '../shared/ipc-channels';
-import type { SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile, MetaHit } from '../shared/types';
+import type { SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile, MetaHit, MetaExtra, DiscoverSection } from '../shared/types';
 
 const invoke = <T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> =>
   ipcRenderer.invoke(channel, ...args);
@@ -81,6 +81,10 @@ const api = {
   meta: {
     // TMDB 元数据补全（缺封面/缺简介兜底；凭据内置密文，用户无需填 key）
     search: (name: string, year?: string) => invoke<MetaHit | null>(IPC.META_SEARCH, name, year),
+    // ★ 详情页增强：演职员/类型/相关推荐（详情页下方区块）
+    extra: (name: string, year?: string) => invoke<MetaExtra | null>(IPC.META_EXTRA, name, year),
+    // ★ 发现页榜单（无源时的默认主页；refresh=true 绕过 6h 缓存）
+    discover: (refresh?: boolean) => invoke<DiscoverSection[]>(IPC.META_DISCOVER, !!refresh),
   },
   drives: {
     get: () => invoke(IPC.DRIVE_GET),

@@ -236,6 +236,46 @@ export interface MetaHit {
   poster: string; // 完整可引用 URL（https://image.tmdb.org/t/p/w342/...）
   overview: string;
   type: 'movie' | 'tv';
+  /** ★ 2026-09-24：TMDB 条目 id（详情页「演职员/相关推荐」用它再请求一次详情；无则说明是豆瓣/360 命中） */
+  tmdbId?: number;
+}
+
+// ---------- 详情页增强：演职员 / 类型 / 相关推荐（TMDB，`meta:extra`） ----------
+export interface MetaCastMember {
+  name: string;
+  /** 饰演角色（TMDB `character`，可能为空） */
+  character?: string;
+}
+
+export interface MetaRecommendation {
+  title: string;
+  year: number | '';
+  /** 已包装为本地 /img 中继的封面 URL */
+  poster: string;
+  tmdbId?: number;
+  mediaType: 'movie' | 'tv';
+}
+
+export interface MetaExtra {
+  cast: MetaCastMember[];
+  genres: string[];
+  recommendations: MetaRecommendation[];
+}
+
+// ---------- 发现页（无源时的默认主页；数据来自 TMDB 榜单） ----------
+export interface DiscoverItem {
+  title: string;
+  year: number | '';
+  /** 已包装为本地 /img 中继的封面 URL */
+  poster: string;
+  tmdbId?: number;
+  mediaType: 'movie' | 'tv';
+}
+
+export interface DiscoverSection {
+  id: string;
+  title: string;
+  items: DiscoverItem[];
 }
 
 // ---------- 导入诊断 ----------

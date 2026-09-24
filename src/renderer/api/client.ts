@@ -22,7 +22,7 @@ import type {
 } from '../../shared/types';
 import type { SubtitleCandidate, SubtitleSettings } from '../../shared/subtitle';
 import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
-import type { MetaHit } from '../../shared/types';
+import type { MetaHit, MetaExtra, DiscoverSection } from '../../shared/types';
 
 interface HomeResult {
   sortClasses: { id: string; name: string; flag?: string; filters?: FilterGroup[] }[];
@@ -101,6 +101,10 @@ declare global {
       };
       meta: {
         search: (name: string, year?: string) => Promise<IpcResult<MetaHit | null>>;
+        /** ★ 详情页增强：演职员/类型/相关推荐 */
+        extra: (name: string, year?: string) => Promise<IpcResult<MetaExtra | null>>;
+        /** ★ 发现页榜单（无源默认主页） */
+        discover: (refresh?: boolean) => Promise<IpcResult<DiscoverSection[]>>;
       };
       drives: {
         get: () => Promise<IpcResult<Record<string, string>>>;
@@ -234,6 +238,10 @@ export const client = {
   danmakuFetch: (episodeId: number) => unwrap(window.api.danmaku.fetch(episodeId)),
   // TMDB 元数据补全（缺封面/缺简介兜底，凭据内置密文）
   metaSearch: (name: string, year?: string) => unwrap(window.api.meta.search(name, year)),
+  /** ★ 详情页增强：演职员/类型/相关推荐 */
+  metaExtra: (name: string, year?: string) => unwrap(window.api.meta.extra(name, year)),
+  /** ★ 发现页榜单（无源默认主页；refresh 绕过 6h 缓存） */
+  metaDiscover: (refresh?: boolean) => unwrap(window.api.meta.discover(refresh)),
   netSpeed: (cb: (kbs: number) => void) => window.api.net.onSpeed(cb),
 };
 
