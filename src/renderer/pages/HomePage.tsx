@@ -42,6 +42,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    */
   const [aggCap, setAggCap] = useState(60);
   const keyRef = useRef('');
+  /** ★ 运行时准备中的自动重搜计时器（见 doSearch：pendingSources > 0 时 25s 后自动重搜一次） */
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const filtersRef = useRef<Record<string, string>>({});
   /** 挂载恢复：数据就绪后回滚一次滚动位置（loadCategory 异步，须等 items 渲染） */
@@ -497,6 +499,15 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         flush(); // 收尾：把节流窗口里最后一批结果落屏
         setAgg(r);
         saveSearchMem(term, r, 'all');
+        // ★ 2026-09-24：有源因「运行时正在下载/转换」未参与（清缓存/首装后常见）→
+        //   横幅提示 + **自动重搜一次**（25s 后），不让用户面对空结果不知道下一步做什么。
+        if (r.pendingSources && r.pendingSources > 0 && !force) {
+          if (retryTimer.current) clearTimeout(retryTimer.current);
+          retryTimer.current = setTimeout(() => {
+            retryTimer.current = null;
+            if (keyRef.current === k) void doSearch(true); // 自动重搜：跳过缓存
+          }, 25_000);
+        }
       } catch (e) {
         setErr(`聚合搜索失败：${(e as Error).message}`);
       } finally {
@@ -627,6 +638,12 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                     「{wd}」共搜 {sites.length} 个源：命中 {agg.hitSources} 个 · 共 {agg.items.length} 条（各源分别列出，不合并）
                     {agg.failedSources > 0 ? ` · ⚠ ${agg.failedSources} 个源出错（见下）` : ''}
                     {/* ★ 缓存秒回提示：这次结果是本机缓存（5 分钟内搜过同一关键词）→ 给一个「重新搜索」 */}
+                    {agg.pendingSources ? (
+                      <div style={{ marginTop: 6 }}>
+                        ⏳ {agg.pendingSources} 个源正在准备运行时（首次下载/转换 jar，约 10~40 秒），本次未参与 —— 约 25 秒后会自动再搜一次；也可以点
+                        <button className="linkbtn" style={{ margin: '0 4px' }} onClick={() => void doSearch(true)}>立即重搜</button>
+                      </div>
+                    ) : null}
                     {agg.cachedAt ? (
                       <span className="muted">
                         {' '}· 本地缓存（{Math.max(1, Math.round((Date.now() - agg.cachedAt) / 60000))} 分钟前）
@@ -699,7 +716,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
             <div className="empty">
               {loading
                 ? aggScope === 'all'
-                  ? '正在逐源检索（首次调用 jar 蜘蛛较慢），请稍候…'
+                  ? `正在逐源检索${aggProgress ? `（已出 ${aggProgress.done}/${aggProgress.total} 个源的结果${aggProgress.pending > 0 ? `，其余 ${aggProgress.pending} 个仍在补搜` : ''}）` : '（首次调用 jar 蜘蛛较慢）'}，请稍候…`
                   : '搜索中…'
                 : '搜索中，请稍候…'}
             </div>

@@ -49,18 +49,27 @@ export class PySpider extends Spider {
    */
   /**
    * ★ 运行时就绪判定（同步）：脚本与嵌入式 Python 运行时都已落盘才算就绪。
-   * 未就绪 → 返回 false（全源搜索本次跳过该源，绝不触发 11MB 运行时下载）；下载由正常单源使用触发。
+   * 'unavailable' = 还没就绪（全源搜索本次跳过；**绝不触发 11MB 运行时下载**，下载由正常单源使用触发）
    */
-  isRuntimeReady(): boolean {
+  runtimeState(): 'ready' | 'unavailable' {
     const base = (this.api || '').split('?')[0];
     let path = '';
     if (base.startsWith('file://')) {
-      try { path = fileURLToPath(base); } catch { return false; }
+      try { path = fileURLToPath(base); } catch { return 'unavailable'; }
     } else if (/^https?:\/\//i.test(base)) {
       path = join(this.bridge.pyCacheDir, `${md5Hex(base)}.py`);
     }
-    if (!path || !existsSync(path)) return false;
-    return this.bridge.pyRuntimeReady();
+    if (!path || !existsSync(path)) return 'unavailable';
+    return this.bridge.pyRuntimeReady() ? 'ready' : 'unavailable';
+  }
+
+  isRuntimeReady(): boolean {
+    return this.runtimeState() === 'ready';
+  }
+
+  /** Python 侧无「正在进行的准备」概念（不预下载）→ 恒 null */
+  pendingRuntime(): Promise<unknown> | null {
+    return null;
   }
 
   prewarm(count = 1): number {

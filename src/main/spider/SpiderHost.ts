@@ -88,6 +88,12 @@ const SEARCH_ALL_JS_MAX_MS = 5_000;
 const SEARCH_ALL_QUICK_MS = 3_000;
 /** 「这个源在桌面端根本不成立」类错误（命中一次即加入会话级跳过集，后续全源搜索不再浪费时间） */
 const UNSUPPORTED_ERR = /UNSUPPORTED_|SCRIPT_ERROR|PY_UNSUPPORTED|桌面版无法|不支持|未实现/i;
+/**
+ * ★ 预备等待上限（2026-09-24 二次修正）：全源搜索开始时若有源的运行时正在下载/转换，
+ * **先等这么一会儿**（用户看到进度文案「首次调用 jar 蜘蛛较慢」时本来就在等），
+ * 等到了就正常参与本轮 —— 比「一上来就跳过 → 空结果」体验好得多。清缓存后一次转换约 6~10s。
+ */
+const SEARCH_ALL_PREPARE_MS = 12_000;
 
 /** Promise 竞速超时（超时即拒；落地后清掉计时器，避免残留定时器） */
 function raceTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
@@ -830,6 +836,43 @@ export class SpiderHost {
     const searchT0 = Date.now();
     let firstHitAt = 0;
     let pushed = 0;
+    /**
+     * ★★ 预备阶段（2026-09-24 二次修正）：**先等一等，不要直接跳过** ★★
+     *   上一版「未就绪就跳过」在「清缓存/首装」后会把**全部 jar 源**跳过 → 用户看到空结果
+     *   （实测反馈：「只有『正在逐源检查…』然后什么都没有」）。现在：
+     *     ① 收集所有「正在后台下载/转换」的源，**最多等 SEARCH_ALL_PREPARE_MS**；
+     *     ② 等到了就正常参与本轮（这才是用户预期的「首次调用 jar 蜘蛛较慢，请稍候」）；
+     *     ③ 仍未就绪的才跳过，并在报告里给出可读原因 + 计数（UI 据此显示横幅并自动重搜）。
+     */
+    const prepWaiters: Array<Promise<unknown>> = [];
+    const notReadyYet = new Set<number>();
+    for (let i = 0; i < pool.length; i++) {
+      const b = pool[i];
+      if (this.unsupportedSources.has(b.key)) continue;
+      try {
+        const sp = this.vm.spiderFactory.getCSP(b, this.host) as {
+          runtimeState?: () => 'ready' | 'preparing' | 'unavailable';
+          pendingRuntime?: () => Promise<unknown> | null;
+        };
+        if (typeof sp.runtimeState !== 'function') continue;
+        if (sp.runtimeState() === 'ready') continue;
+        notReadyYet.add(i);
+        const w = sp.pendingRuntime?.();
+        if (w) prepWaiters.push(w);
+      } catch { /* 判定失败 → 交给正常调用路径 */ }
+    }
+    if (notReadyYet.size > 0) {
+      this.logger.i(`全源搜索：${notReadyYet.size} 个源的运行时正在准备（首次下载/转换 jar）→ 最多等 ${Math.round(SEARCH_ALL_PREPARE_MS / 1000)}s`);
+      try {
+        this.onSearchAllProgress?.({ wd: term, done: 0, total: pool.length, pending: pool.length });
+      } catch { /* 忽略 */ }
+      if (prepWaiters.length > 0) {
+        await Promise.race([
+          Promise.all(prepWaiters),
+          new Promise((res) => setTimeout(res, SEARCH_ALL_PREPARE_MS)),
+        ]);
+      }
+    }
     for (let i = 0; i < pool.length; i++) {
       const b = pool[i];
       if (this.unsupportedSources.has(b.key)) {
@@ -842,24 +885,24 @@ export class SpiderHost {
         };
         continue;
       }
-      // ★★ 新搜索逻辑（2026-09-24）：**只搜「运行时现在就绪」的源** ★★
-      //   以前一次搜索会被「jar 还没下载/转换（实测 30~40s）」「嵌入式 Python 还没下载」拖住 ——
-      //   33 个源里只要有一个没就绪，整轮搜索就卡在那儿直到超时（用户感受：全源搜索加载不出来）。
-      //   现在：未就绪的源本次直接跳过（同时已在后台启动准备），**搜索永远不等运行时**；
-      //   等后台准备好后，下一次搜索自动包含它们（用户看到的是「秒出 + 逐轮更全」）。
-      try {
-        const sp = this.vm.spiderFactory.getCSP(b, this.host) as { isRuntimeReady?: () => boolean };
-        if (typeof sp.isRuntimeReady === 'function' && !sp.isRuntimeReady()) {
+      if (notReadyYet.has(i)) {
+        // 预备等待后**再判一次**：等到了就照常参与本轮
+        let ready = true;
+        try {
+          const sp = this.vm.spiderFactory.getCSP(b, this.host) as { runtimeState?: () => string };
+          ready = typeof sp.runtimeState !== 'function' || sp.runtimeState() === 'ready';
+        } catch { ready = true; }
+        if (!ready) {
           skipped[i] = {
             key: b.key,
             name: b.name || b.key,
             status: 'error',
-            error: '运行时就绪中（正在后台下载/转换，约 10~40 秒）：本次已跳过，稍后重新搜索即包含该源',
+            error: '运行时就绪中（正在后台下载/转换 jar，约 10~40 秒）：本次未参与，稍后重搜即包含该源',
             ms: 0,
           };
           continue;
         }
-      } catch { /* 就绪判定失败 → 按可用处理，让正常调用路径给出错误 */ }
+      }
       active.push(i);
     }
     const total = active.length;
@@ -871,7 +914,7 @@ export class SpiderHost {
      * ★ 三轮：**当前选中源置顶** —— 用户刚在浏览的那个源最先出结果，
      *   观感就是「一点全源搜索，熟悉的那个源立刻回来了」（单源搜索本来就快）。
      */
-    const order = scheduleOrder(pool.length, (i) => pool[i].key, this.sourceHealth).filter((i) => !this.unsupportedSources.has(pool[i].key));
+    const order = scheduleOrder(pool.length, (i) => pool[i].key, this.sourceHealth).filter((i) => !skipped[i]);
     const activeKey = this.manager.activeSourceKey();
     if (activeKey) {
       const ai = order.findIndex((i) => pool[i].key === activeKey);
@@ -943,6 +986,9 @@ export class SpiderHost {
     clearTimeout(quickTimer);
     const all = pool.map((_, i) => results[i] ?? skipped[i]).filter((r): r is AggSearchInput => r !== null);
     const report = mergeSearchResults(all);
+    // ★ 仍有源在「准备运行时」→ 报告里带计数，UI 据此显示横幅并自动重搜（不让用户面对空屏）
+    const pendingSources = all.filter((r) => r.status === 'error' && (r.error || '').startsWith('运行时就绪中')).length;
+    if (pendingSources > 0) report.pendingSources = pendingSources;
     this.searchCache.set(term, report); // ★ 下次同关键词直接秒回
     // ★ 诊断摘要（2026-09-24）：一行看清「引擎侧到底卡在哪」——首结果耗时/总耗时/推送条数/跳过数。
     //   下次用户再报「慢」，看这一行即可区分是引擎慢还是界面慢（跳过数 > 0 说明有源还在后台准备运行时）。

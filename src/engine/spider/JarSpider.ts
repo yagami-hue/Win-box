@@ -123,22 +123,33 @@ export class JarSpider extends Spider {
   }
 
   /**
-   * ★ 运行时就绪判定（同步、零网络、零转换）：全源搜索用它做「**只搜现在就绪的源**」闸门。
+   * ★ 运行时就绪判定（同步、零网络、零转换）：全源搜索用它做「只搜现在就绪的源」闸门。
    * 未就绪时**顺手在后台启动**下载+转换（caller 不等），下次搜索即包含该源。
-   * 这样搜索永远不会被「下载 + dex2jar（实测 30~40s）」拖死 —— 仓内有缓存与否都不影响首屏。
+   * @returns 'ready' 就绪；'preparing' 正在后台准备（可等待）；'unavailable' 连 jar 地址都没有
    */
-  isRuntimeReady(): boolean {
+  runtimeState(): 'ready' | 'preparing' | 'unavailable' {
     const urls = this.jarUrls();
-    if (urls.length === 0) return false;
-    let allReady = true;
+    if (urls.length === 0) return 'unavailable';
+    let anyPreparing = false;
     for (const u of urls) {
-      if (!this.bridge.peekConverted(u)) {
-        allReady = false;
-        // 后台补：不 await、不抛（失败只影响下次搜索是否包含该源）
-        this.bridge.warmup(u).catch(() => undefined);
-      }
+      if (this.bridge.peekConverted(u)) continue;
+      // 已在转换/下载（或本次顺手启动）→ preparing；否则也算是 preparing（已被 warmup 拉起）
+      if (!this.bridge.pendingConvert(u)) this.bridge.warmup(u).catch(() => undefined);
+      anyPreparing = true;
     }
-    return allReady;
+    return anyPreparing ? 'preparing' : 'ready';
+  }
+
+  /** ★ 等待本轮正在进行的转换（供全源搜索「预备阶段」调用；返回 null 表示无需等待） */
+  pendingRuntime(): Promise<unknown> | null {
+    const urls = this.jarUrls();
+    const waiters = urls.map((u) => this.bridge.pendingConvert(u)).filter((p): p is Promise<string> => !!p);
+    return waiters.length > 0 ? Promise.all(waiters.map((p) => p.catch(() => ''))) : null;
+  }
+
+  /** 就绪与否（字符串版 runtimeState 的便捷封装，供预热/测试用） */
+  isRuntimeReady(): boolean {
+    return this.runtimeState() === 'ready';
   }
 
   /** 预热常驻 JVM（由 SpiderHost.prewarmSpiders 调度）：仅当本源的 jar 转换产物**已在磁盘上**时生效。

@@ -427,6 +427,16 @@ export class JarSpiderBridge {
   }
 
   /**
+   * ★ 正在进行的转换/下载（未完成时返回 promise；已就绪或从未启动返回 null）。
+   * 全源搜索的「预备等待」用它：等一等正在转换的 jar（而不是直接跳过 → 空结果）。
+   */
+  pendingConvert(jarUrl: string): Promise<string> | null {
+    const url = normalizeJarUrl(jarUrl);
+    if (!url || this.converted.has(url)) return null;
+    return this.convertLocks.get(url) ?? null;
+  }
+
+  /**
    * shell-shim（方案 A 影子类）真实实现路径；非空 = 启用，空串 = 默认关闭。
    * 优先级：构造参数 shellShimClasses > 环境变量 TVBOX_SHELL_SHIM_CLASSES。
    * Java 侧 DexNative 影子类自身也认这个环境变量（见 stubs-src/shell-shim/DexNative.java），
