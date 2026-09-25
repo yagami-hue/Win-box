@@ -81,7 +81,7 @@ declare global {
         searchAll: (wd: string, opts?: { refresh?: boolean }) => Promise<IpcResult<SearchAllReport>>;
         /** ★ 聚合搜索逐源进度（边搜边出）：返回退订函数 */
         onSearchAllProgress: (cb: (ev: SearchAllProgressEvent) => void) => () => void;
-        play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => Promise<IpcResult<PlayResult>>;
+        play: (a: { key: string; flag: string; id: string }) => Promise<IpcResult<PlayResult>>;
       };
       live: {
         load: (index: number) => Promise<IpcResult<{ groups: LiveGroup[]; liveName: string }>>;
@@ -137,6 +137,8 @@ declare global {
       };
       net: {
         onSpeed: (cb: (kbs: number) => void) => () => void;
+        proxyGet: () => Promise<IpcResult<{ enabled: boolean; url: string }>>;
+        proxySet: (patch: { enabled?: boolean; url?: string }) => Promise<IpcResult<{ enabled: boolean; url: string }>>;
       };
       player: {
         open: (init: unknown) => Promise<IpcResult<void>>;
@@ -234,7 +236,7 @@ export const client = {
   search: (a: { key: string; wd: string }) => unwrap(window.api.vod.search(a)),
   searchAll: (wd: string, opts?: { refresh?: boolean }) => unwrap(window.api.vod.searchAll(wd, opts)),
   onSearchAllProgress: (cb: (ev: SearchAllProgressEvent) => void) => window.api.vod.onSearchAllProgress(cb as (ev: unknown) => void),
-  play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => unwrap(window.api.vod.play(a)),
+  play: (a: { key: string; flag: string; id: string }) => unwrap(window.api.vod.play(a)),
   loadLive: (index: number) => unwrap(window.api.live.load(index)),
   liveMeta: () => unwrap(window.api.live.meta()),
   subtitleGet: () => unwrap(window.api.subtitle.get()),
@@ -266,6 +268,10 @@ export const client = {
   /** ★ 发现页 Hero 轮播：横版剧照（≤6）/ 竖版海报（≤8），已包装 /img 中继 */
   metaImages: (mediaType: 'movie' | 'tv', tmdbId: number) => unwrap(window.api.meta.images(mediaType, tmdbId)),
   netSpeed: (cb: (kbs: number) => void) => window.api.net.onSpeed(cb),
+  /** ★ 网络代理设置（DNS 污染 / SNI 阻断站点用） */
+  proxyGet: () => unwrap<{ enabled: boolean; url: string }>(window.api.net.proxyGet()),
+  proxySet: (patch: { enabled?: boolean; url?: string }) =>
+    unwrap<{ enabled: boolean; url: string }>(window.api.net.proxySet(patch)),
 };
 
 export type { HomeResult, ImportReturn };

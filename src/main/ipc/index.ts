@@ -9,6 +9,7 @@ import { clearAppCache } from '../util/cacheClean';
 import { join, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IPC } from '../../shared/ipc-channels';
+import { proxySettingsView, setProxySettings, type ProxySettings } from '../net/proxy';
 import { md5Hex } from '../../engine/util/md5';
 // 独立播放器窗口
 import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow } from '../player/PlayerWindow';
@@ -207,8 +208,9 @@ export function registerIpc(host: SpiderHost): void {
       host.onSearchAllProgress = undefined;
     }
   }, log);
-  registerHandler(IPC.VOD_PLAY, (_e: any, a: { key: string; flag: string; id: string; vipFlags: string[] }) =>
-    host.play(a.key, a.flag, a.id, a.vipFlags || []), log);
+  // ★ 2026-09-24：vipFlags 由主进程按订阅顶层 flags 自行决定（渲染层不再传）
+  registerHandler(IPC.VOD_PLAY, (_e: any, a: { key: string; flag: string; id: string }) =>
+    host.play(a.key, a.flag, a.id), log);
 
   // ---- 独立播放器窗口 ----
   registerHandler(IPC.PLAYER_OPEN, (_e: any, init: any) => {
@@ -246,6 +248,15 @@ export function registerIpc(host: SpiderHost): void {
   registerHandler(IPC.QUARK_CLEANUP, () => {
     void host.quarkDeletePending().catch(() => undefined);
     return true;
+  }, log);
+
+  // ---- ★ 网络代理（DNS 污染 / TLS SNI 阻断站点用；改后即时生效，无需重启）----
+  registerHandler(IPC.PROXY_GET, () => proxySettingsView(), log);
+  registerHandler(IPC.PROXY_SET, (_e: any, patch: Partial<ProxySettings>) => {
+    const next = setProxySettings(patch || {});
+    // 代理变了 → 常驻蜘蛛进程的参数已变（池 key 含代理参数）→ 清一次实例缓存，下一轮按新参数拉起
+    host.resetSpidersForProxyChange();
+    return next;
   }, log);
 
   registerHandler(IPC.LIVE_LOAD, (_e: any, index: number) => host.loadLive(index), log);

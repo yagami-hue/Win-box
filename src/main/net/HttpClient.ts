@@ -3,6 +3,8 @@
 // ★ undici v7 不再支持 request({maxRedirections})，改为手动跟随 Location（版本无关、可靠）。
 import { request as undiciRequest, Agent } from 'undici';
 import * as iconv from 'iconv-lite';
+import { createDohAgent } from './DnsResolver';
+import { dispatchChain } from './proxy';
 import type {
   HttpClient as IHttpClient,
   HttpRequest,
@@ -10,6 +12,17 @@ import type {
 } from '../../shared/types';
 
 const agent = new Agent({ connect: { timeout: 30000 } });
+/**
+ * ★ 2026-09-25：DoH 解析专用的 Agent（`HttpRequest.doh = 1` 时启用）。
+ *   用途：**域名被 DNS 污染**的站点 —— 系统 DNS 会解到劫持 IP（返回运营商反诈页/假页面），
+ *   表现为「订阅不是有效的 JSON」「源请求解析失败」，而 DoH 能拿到真实 IP 直连。
+ *   懒创建：不发起 DoH 请求时零开销。
+ */
+let dohAgent: Agent | null = null;
+function dohDispatcher(): Agent {
+  if (!dohAgent) dohAgent = createDohAgent();
+  return dohAgent;
+}
 
 function decodeCharset(buffer: Buffer, charset?: string): string {
   const cs = (charset || '').toLowerCase();
@@ -46,6 +59,8 @@ export class HttpClient implements IHttpClient {
     }
 
     const maxRedir = req.redirect === 0 ? 0 : 10;
+    // 出站链：用户设的**网络代理**（非本机目标）优先，其次 DoH（req.doh），最后直连
+    const dispatcher = dispatchChain(req.url, req.doh ? dohDispatcher() : agent)[0];
     let url = req.url;
     let finalUrl = url;
     for (let i = 0; i <= maxRedir; i++) {
@@ -55,7 +70,7 @@ export class HttpClient implements IHttpClient {
         body: body as any,
         headersTimeout: req.timeoutMs || 30000,
         bodyTimeout: req.timeoutMs || 30000,
-        dispatcher: agent,
+        dispatcher,
       });
       const loc = r.headers['location'];
       if (r.statusCode >= 300 && r.statusCode < 400 && loc && i < maxRedir && method !== 'HEAD') {

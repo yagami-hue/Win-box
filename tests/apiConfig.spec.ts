@@ -4,7 +4,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { parseSiteConfig, parseSiteConfigWithBase, trimJsonObject, parseApiCollection } from '../src/engine/config/ApiConfigParser';
+import { parseSiteConfig, parseSiteConfigWithBase, trimJsonObject, parseApiCollection, looksLikeSubscribeJson } from '../src/engine/config/ApiConfigParser';
 import { parseSite } from '../src/engine/config/SiteParser';
 import { parseParses, makeSuperParse } from '../src/engine/config/ParseConfigParser';
 
@@ -109,6 +109,20 @@ describe('parses — 超级解析插首位', () => {
   it('ext 为对象 → JSON.stringify', () => {
     const list = parseParses([{ name: 'a', url: 'http://x', ext: { k: 1 } }]);
     expect(list[1].ext).toBe('{"k":1}');
+  });
+});
+
+describe('looksLikeSubscribeJson — 识别「按 UA 分流」站点的响应', () => {
+  it('订阅 JSON（含 sites/spider）→ true', () => {
+    expect(looksLikeSubscribeJson('{"spider":"https://x/a.jar","sites":[{"key":"k"}]}')).toBe(true);
+    expect(looksLikeSubscribeJson('  {"urls":[{"url":"http://a"}]}')).toBe(true);
+    expect(looksLikeSubscribeJson('{"parses":[]}')).toBe(true);
+  });
+  it('网页 HTML（浏览器 UA 拿到落地页）→ false（触发 okhttp UA 重试）', () => {
+    expect(looksLikeSubscribeJson('<!DOCTYPE html><html><head><title>摸鱼接口</title>')).toBe(false);
+    expect(looksLikeSubscribeJson('  解析失败')).toBe(false);
+    expect(looksLikeSubscribeJson('')).toBe(false);
+    expect(looksLikeSubscribeJson('{"code":0,"data":[]}')).toBe(false); // 普通 API JSON 不是订阅
   });
 });
 

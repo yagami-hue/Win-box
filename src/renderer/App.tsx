@@ -198,7 +198,6 @@ export default function App() {
       episodes?: Episode[];
       epIndex?: number;
       flag?: string;
-      vipFlags?: string[];
     },
   ) => {
     const eps = meta?.episodes || [];
@@ -211,7 +210,6 @@ export default function App() {
       flag: meta?.flag || '',
       episodes: eps,
       epIndex: idx,
-      vipFlags: meta?.vipFlags || [],
       title: base,
       subtitleTitle: base, // ★ 供字幕检索的剧名副名（独立于集名，避免从集名反推失败）
       lastUrl: target?.url || _url,

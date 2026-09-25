@@ -9,12 +9,13 @@ import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 import { pickCover } from '../lib/coverPick';
 import { formatEpisodeLabel } from '../lib/epName';
 import HScrollRow from '../components/HScrollRow';
+import HeroBackdrop from '../components/HeroBackdrop';
 import { useTheme } from '../lib/theme';
 
 export default function DetailPage({
   onPlay,
 }: {
-  onPlay: (url: string, name: string, fromKey: string, id: string, meta?: { pic?: string; remarks?: string; sourceName?: string; title?: string; vodId?: string; episodes?: Episode[]; epIndex?: number; flag?: string; vipFlags?: string[] }) => void;
+  onPlay: (url: string, name: string, fromKey: string, id: string, meta?: { pic?: string; remarks?: string; sourceName?: string; title?: string; vodId?: string; episodes?: Episode[]; epIndex?: number; flag?: string }) => void;
 }) {
   const { key, id } = useParams<{ key: string; id: string }>();
   const [searchParams] = useSearchParams();
@@ -30,6 +31,8 @@ export default function DetailPage({
   const [ep, setEp] = useState(0);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
+  /** ★ 2026-09-24：播放（可能含解析/嗅探）进行中 → 按钮上屏进度 */
+  const [busy, setBusy] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const memKey = `${decodeURIComponent(key || '')}:${decodeURIComponent(id || '')}`;
   /** ★ 2026-09-24：展示用片名 —— 详情自带优先，缺失时用列表页带入的（立播等源详情不返回 vod_name） */
@@ -187,15 +190,18 @@ export default function DetailPage({
   }
 
   async function play() {
-    if (!detail || !flag) return;
+    if (!detail || !flag || busy) return;
     const eps = detail.episodes[flag] || [];
     const target = eps[ep];
     if (!target) return;
+    setErr('');
+    // ★ parse=1 的地址要走「解析接口 → 隐藏窗口嗅探」，可能耗时十几秒 → 按钮上屏进度，别让用户以为没反应
+    setBusy(true);
     try {
-      const r = await client.play({ key: decodeURIComponent(key!), flag, id: target.url, vipFlags: detail.flags });
-      // parse=1 需网页解析/嗅探，桌面版无 webview 嗅探 → 明确上屏提示而不是黑屏
+      const r = await client.play({ key: decodeURIComponent(key!), flag, id: target.url });
+      // parse=1（需网页解析/嗅探）：主进程已尽力（解析接口 → 隐藏窗口嗅探），仍拿不到直连地址才上屏原因
       if (r.parse === 1) {
-        setErr('该播放地址需要网页解析/嗅探，桌面版暂不支持');
+        setErr(r.message || '该播放地址需要网页解析/嗅探，自动解析未取得直连地址');
         return;
       }
       // ★ 网盘源集名过长 → 播放器标题/历史记录统一用「第N集 · 体积」
@@ -206,14 +212,15 @@ export default function DetailPage({
         sourceName: displayName ? displayName.split(' - ')[0] : undefined,
         title: displayName || undefined, // ★ 剧名副名（详情页主标题），供字幕检索使用，避免从集名反推失败
         vodId: detail.id,
-        // 换集导航数据：完整集列表 + 当前集下标 + 播放源 flag + vip 候选线路
+        // 换集导航数据：完整集列表 + 当前集下标 + 播放源 flag
         episodes: detail.episodes[flag] || [],
         epIndex: ep,
         flag,
-        vipFlags: detail.flags,
       });
     } catch (e) {
       setErr((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -246,6 +253,23 @@ export default function DetailPage({
   /** 点击演员 / 推荐影片 → 走 /search 路由对该关键词执行一次全源搜索（HomePage 的 ?agg= 入口） */
   const goSearch = (kw: string): void => { nav(`/search?agg=${encodeURIComponent(kw)}`); };
 
+  /**
+   * ★ 2026-09-24（用户定稿）：Netflix 详情页背景 = **和首页一样的横版剧照轮播**（TMDB backdrops 长图）。
+   * ★ 2026-09-25：**背景只允许横版图**（用户报「竖版图被裁剪」）——backdrops 取不到时用
+   *   `metaHit.backdrop`（TMDB `backdrop_path`，同为横版剧照）；**绝不再退回竖版封面**。
+   */
+  const [nfBgs, setNfBgs] = useState<string[]>([]);
+  useEffect(() => {
+    if (!nf || !metaHit?.tmdbId) { setNfBgs([]); return; }
+    let alive = true;
+    client
+      .metaImages(metaHit.type, metaHit.tmdbId)
+      .then((imgs) => { if (alive) setNfBgs((imgs?.backdrops || []).slice(0, 4)); })
+      .catch(() => undefined);
+    return () => { alive = false; };
+  }, [nf, metaHit?.tmdbId, metaHit?.type]);
+  const backdropUrls = nfBgs.length ? nfBgs : metaHit?.backdrop ? [metaHit.backdrop] : [];
+
   return (
     <>
       <div className="topbar">
@@ -253,8 +277,12 @@ export default function DetailPage({
         <span className="muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
       </div>
       <div className={`content${nf ? ' nf-detail-wrap' : ''}`} ref={contentRef}>
-        {/* Netflix 皮肤：封面当全宽背景（大图 + 暗渐变），内容压在上面 */}
-        {nf && cover && <div className="nf-detail-backdrop" style={{ backgroundImage: `url(${cover})` }} />}
+        {/* Netflix 皮肤：**横版剧照轮播**当全宽背景（同首页 Hero，交叉淡入淡出），内容压在上面 */}
+        {nf && backdropUrls.length > 0 && (
+          <div className="nf-detail-backdrop">
+            <HeroBackdrop urls={backdropUrls} />
+          </div>
+        )}
         {loading ? (
           <div className="empty">加载中…</div>
         ) : err ? (
@@ -302,7 +330,9 @@ export default function DetailPage({
                   ))}
                 </div>
                 <div className="row" style={{ marginTop: 14 }}>
-                  <button className={`primary${nf ? ' nf-play-btn' : ''}`} onClick={play}>▶ 播放选中</button>
+                  <button className={`primary${nf ? ' nf-play-btn' : ''}`} disabled={busy} onClick={play}>
+                    {busy ? '正在解析播放地址…' : '▶ 播放选中'}
+                  </button>
                 </div>
               </>
             )}

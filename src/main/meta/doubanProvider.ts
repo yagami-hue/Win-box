@@ -5,6 +5,7 @@
 // 封面：豆瓣图床 qnmob3-sign.doubanio.com / img*.doubanio.com，经本地 /img 中继出图（防 DNS 污染/无 Referer）。
 import { request as undiciRequest, Agent } from 'undici';
 import { createDohAgent } from '../net/DnsResolver';
+import { dispatchChain } from '../net/proxy';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import type { Logger, MetaHit } from '../../shared/types';
 import type { MetaSuggestion } from '../../shared/meta';
@@ -111,7 +112,10 @@ export function __resetDoubanBreakerForTest(): void {
 }
 
 async function getJson(url: string, headersTimeoutMs: number): Promise<RexxarResp> {
-  for (const dispatcher of [agent, dohFallback]) {
+  // ★ 2026-09-25：出站链 —— 用户设了代理则代理优先（豆瓣在部分网络被墙），否则 系统 DNS → DoH
+  const chain = dispatchChain(url, agent, dohFallback);
+  for (let i = 0; i < chain.length; i++) {
+    const dispatcher = chain[i];
     try {
       const r = await undiciRequest(url, {
         method: 'GET',
@@ -127,8 +131,8 @@ async function getJson(url: string, headersTimeoutMs: number): Promise<RexxarRes
       const text = Buffer.from(await r.body.arrayBuffer()).toString('utf-8');
       return { status: r.statusCode, text };
     } catch (e) {
-      // 系统 DNS 失败 → 再试 DoH；DoH 也失败 → 记 0（调用方不落缓存，下次重试）
-      if (dispatcher === dohFallback) return { status: 0, text: (e as Error).message || String(e) };
+      // 逐个降级重试；最后一个也失败 → 记 0（调用方不落缓存，下次重试）
+      if (i === chain.length - 1) return { status: 0, text: (e as Error).message || String(e) };
     }
   }
   return { status: 0, text: 'network failed' };
@@ -146,7 +150,7 @@ async function verifyDoubanPoster(url: string): Promise<boolean> {
       headers: { accept: 'image/*', 'User-Agent': 'Win-Box/0.75', Range: 'bytes=0-255' },
       headersTimeout: 8000,
       bodyTimeout: 8000,
-      dispatcher: agent,
+      dispatcher: dispatchChain(url, agent)[0],
     });
     const ct = String(r.headers['content-type'] || '');
     const okStatus = r.statusCode === 200 || r.statusCode === 206;

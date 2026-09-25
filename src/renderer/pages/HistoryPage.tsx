@@ -5,10 +5,20 @@
 //     悬停卡片的操作条里也保留「移除」，两处走同一条逻辑；
 //   · 清空全部：顶栏右侧按钮，行为与文案不变。
 // 单条移除后可**撤销**（无损还原，含原进度与时间），因为它是不可逆的数据丢失操作。
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { recentWatch, clearUiMemory, deleteWatch, restoreWatch, loadUiMemory, loadLatestWatch, type WatchHistory } from '../lib/uiMemory';
 import { client } from '../api/client';
+import { pickCover, preloadImage } from '../lib/coverPick';
+import { wrapImageUrlForRelay } from '../../shared/driveProvider';
+
+/** 单次补图最多查询多少个不同片名（与首页同口径，避免一次性打爆 TMDB 限流） */
+const MAX_UNIQUE_QUERY = 18;
+
+/** 记录名可能是「剧名 - 集/备注」→ 补图按剧名查（同首页/详情页口径） */
+function baseNameOf(name: string): string {
+  return (name || '').split(' - ')[0]?.trim() || '';
+}
 
 function fmtTime(sec: number): string {
   if (!Number.isFinite(sec) || sec <= 0) return '';
@@ -30,10 +40,96 @@ export default function HistoryPage() {
   const [items, setItems] = useState<WatchHistory[]>([]);
   /** ★ 2026-09-24：封面加载失败的记录（渲染「暂无封面」占位，不用内联 opacity 置灰） */
   const [badPics, setBadPics] = useState<Record<string, boolean>>({});
+  /** ★ 2026-09-24：按片名补的图（TMDB→豆瓣→360，主进程 7 天缓存）——历史页封面规则**跟随其他页面** */
+  const [picOver, setPicOver] = useState<Record<string, string>>({});
+  /** ★ 源封面经本地 /img 中继重试（注入同源 Referer 破防盗链）的地址 */
+  const [picRelay, setPicRelay] = useState<Record<string, string>>({});
+  /** 已发起过补查的 url（幂等：同一条历史不重复查 TMDB） */
+  const queriedRef = useRef<Set<string>>(new Set());
+  const metaBusyRef = useRef(false);
+  /** 补图批次计数：一批查完 +1 → 触发下一批（历史条数可能 > 单批上限） */
+  const [wave, setWave] = useState(0);
   /** 最近一条被移除的记录：非空时显示"撤销"条。整条快照，撤销即无损还原。 */
   const [lastDeleted, setLastDeleted] = useState<WatchHistory | null>(null);
 
   const refresh = () => setItems(recentWatch(100));
+
+  /**
+   * ★ 2026-09-24（用户反馈「历史页经常没有封面」）：
+   *   此前历史页直接把 `it.pic` 当封面用 → 源封面缺失/防盗链失效时就是空白。
+   *   现与首页/搜索结果/详情页统一走 `lib/coverPick.ts`：**搜索补图为准**（TMDB→豆瓣→360），
+   *   源图仅在补图未出前占位；补图先 preloadImage 校验能真显示才覆盖（避免坏图来回切）。
+   */
+  useEffect(() => {
+    if (!items.length || metaBusyRef.current) return;
+    const groups = new Map<string, { name: string; urls: string[] }>();
+    for (const it of items) {
+      // ★ 与首页同口径：**一律补图**（源封面只作占位）；已补过/已查过的不再查
+      if (picOver[it.url] || queriedRef.current.has(it.url)) continue;
+      const name = baseNameOf(it.name);
+      if (!name) continue;
+      const k = name.toLowerCase();
+      const g = groups.get(k);
+      if (g) g.urls.push(it.url);
+      else groups.set(k, { name, urls: [it.url] });
+    }
+    const uniq = [...groups.values()].slice(0, MAX_UNIQUE_QUERY);
+    if (!uniq.length) return;
+    for (const g of uniq) for (const u of g.urls) queriedRef.current.add(u);
+    metaBusyRef.current = true;
+    void (async () => {
+      const next: Record<string, string> = {};
+      const CHUNK = 6; // 分波查询，避免并发瞬间超出 TMDB 限流
+      for (let i = 0; i < uniq.length; i += CHUNK) {
+        await Promise.all(
+          uniq.slice(i, i + CHUNK).map(async (g) => {
+            try {
+              const hit = await client.metaSearch(g.name);
+              if (hit && hit.poster && (await preloadImage(hit.poster))) for (const u of g.urls) next[u] = hit.poster;
+            } catch {
+              /* 缺 key/网络失败静默，保持源图占位 */
+            }
+          }),
+        );
+      }
+      metaBusyRef.current = false;
+      if (Object.keys(next).length) setPicOver((prev) => ({ ...prev, ...next }));
+      setWave((w) => w + 1); // 还有未补图的历史（>MAX_UNIQUE_QUERY）→ 再走一批
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, badPics, wave]);
+
+  /** 封面取值：统一规则（搜索图为准 → 源封面占位/兜底 → 中继重试） */
+  const picOf = (it: WatchHistory): string =>
+    pickCover({ srcPic: it.pic, srcBad: badPics[it.url], relay: picRelay[it.url], meta: picOver[it.url] });
+
+  /** 图片加载失败：按「中继图 / 补图 / 源图」三档处理（与首页 picErr 同逻辑） */
+  const picErr = (it: WatchHistory) => (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const el = e.target as HTMLImageElement;
+    const src = el.currentSrc || el.src || '';
+    if (/[?&]ref=/.test(src)) {
+      setPicRelay((prev) => {
+        if (prev[it.url] === undefined) return prev;
+        const n = { ...prev };
+        delete n[it.url];
+        return n;
+      });
+      return;
+    }
+    if (/\/img\?/.test(src)) {
+      setPicOver((prev) => {
+        if (prev[it.url] === undefined) return prev;
+        const n = { ...prev };
+        delete n[it.url];
+        return n;
+      });
+      return;
+    }
+    // 源封面坏 → 标记坏图（走补图/占位），并先经本地 /img 中继重试一次
+    setBadPics((p) => (p[it.url] ? p : { ...p, [it.url]: true }));
+    const relay = wrapImageUrlForRelay(src, navigator.userAgent);
+    if (relay) setPicRelay((p) => (p[it.url] ? p : { ...p, [it.url]: relay }));
+  };
 
   useEffect(() => {
     // ★ 历史由独立播放器窗口写入共享 localStorage，主窗口内存不自动同步；
@@ -63,7 +159,6 @@ export default function HistoryPage() {
     flag: latest.flag || '',
     episodes: [{ name: latest.remarks || '播放', url: latest.rawUrl || latest.url }],
     epIndex: 0,
-    vipFlags: undefined,
     title: base,
     subtitleTitle: base,
     lastUrl: '', // 不直接用旧直链，交给播放器窗口重新解析/转存
@@ -139,16 +234,21 @@ export default function HistoryPage() {
         ) : (
           <>
             <div className="grid">
-              {items.map((it) => (
+              {items.map((it) => {
+                // 封面：与其他页面同规则（搜索补图为准 → 源图占位/兜底）
+                const cover = picOf(it);
+                return (
                 <div className="card-media hist-media" key={it.url} onClick={() => play(it)}>
                   <div className="card">
                     <div style={{ position: 'relative' }}>
-                      {it.pic && !badPics[it.url] ? (
+                      {cover ? (
                         <img
-                          src={it.pic}
-                          // ★ 2026-09-24：坏图改用状态驱动占位（此前写 el.style.opacity 会残留成灰蒙层）
-                          onError={() => setBadPics((p) => (p[it.url] ? p : { ...p, [it.url]: true }))}
+                          src={cover}
+                          // ★ 2026-09-24：坏图改用状态驱动占位（此前写 el.style.opacity 会残留成灰蒙层）；
+                          //   同时按「中继/补图/源图」三档回退（见 picErr）
+                          onError={picErr(it)}
                           loading="lazy"
+                          decoding="async"
                         />
                       ) : (
                         <div
@@ -213,7 +313,8 @@ export default function HistoryPage() {
                     </div>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
             <div className="muted" style={{ fontSize: 11, marginTop: 14 }}>
               单击卡片 = 继续播放（自动续播上次进度）；右上角 ✕ = 移除该条（可撤销）；悬停卡片下方按钮 = 打开详情 / 移除。

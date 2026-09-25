@@ -238,6 +238,11 @@ export interface MetaHit {
   type: 'movie' | 'tv';
   /** ★ 2026-09-24：TMDB 条目 id（详情页「演职员/相关推荐」用它再请求一次详情；无则说明是豆瓣/360 命中） */
   tmdbId?: number;
+  /**
+   * ★ 2026-09-25：TMDB `backdrop_path`（**横版剧照**，w1280）。
+   *   详情页背景只允许用横版图 —— `images.backdrops` 取不到时用它兜底，**绝不退回竖版封面**（会被裁得很难看）。
+   */
+  backdrop?: string;
 }
 
 // ---------- 详情页增强：演职员 / 类型 / 相关推荐（TMDB，`meta:extra`） ----------
@@ -271,6 +276,8 @@ export interface DiscoverItem {
   year: number | '';
   /** 已包装为本地 /img 中继的封面 URL */
   poster: string;
+  /** ★ 2026-09-25：横版剧照（TMDB `backdrop_path`，w1280，已 /img 中继）—— Hero 背景只用横版图 */
+  backdrop?: string;
   tmdbId?: number;
   mediaType: 'movie' | 'tv';
 }
@@ -352,6 +359,13 @@ export interface UserConfig {
   global: UserGlobalConfig;
   sources: SourceBean[]; // 有序 = UI 顺序（当前 profile 的有效源）
   lives: LiveBean[];
+  /**
+   * ★ 2026-09-24：解析接口（订阅顶层 `parses`）。
+   *   此前只在导入时解析、**未持久化也未送进运行时**，导致 parse===1 的播放地址无处可解。
+   *   注意：**不含**合成的「超级解析」(type=4) —— 该条由 ParseService 的内置嗅探兜底承担，
+   *   存进来只会在每次 config 往返时被 parseParses 反复 unshift 出重复项。
+   */
+  parses: ParseBean[];
   ui: UserUiState;
   /** 多配置档案：每份保存一份可离线重建的订阅 JSON（新增于 v2） */
   profiles: UserProfile[];
@@ -431,6 +445,11 @@ export interface HttpRequest {
   redirect?: 0 | 1;
   charset?: string;
   buffer?: 0 | 1 | 2; // 0 文本 / 1 字节数组 / 2 base64
+  /**
+   * ★ 2026-09-25：`1` = 本请求走 **DoH 解析**（host 被 DNS 污染时用）。
+   *   仅用于「系统 DNS 结果明显不对」的兜底重试（订阅拉取、CMS 源请求），默认不开。
+   */
+  doh?: 0 | 1;
 }
 
 export interface HttpResponse {

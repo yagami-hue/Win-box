@@ -22,7 +22,12 @@ export default function SearchPanel() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const timerRef = useRef<number | null>(null);
 
-  // 热词：发现页榜单标题（电影/剧集，去重取前 16）——只在首次打开时拉一次
+  /**
+   * 热词：发现页榜单标题（电影/剧集，去重取前 16）。
+   * ★ 2026-09-25（用户报「搜索没有最近热搜的内容」）：此前只在首次打开时拉一次，
+   *   而 TMDB 跨境访问偶发超时会让那一次返回空 → 整个会话热搜永久为空。
+   *   现改为「拿到内容才记已拉过」：空结果下次打开面板会**自动重试**。
+   */
   useEffect(() => {
     if (!open || hotTried) return;
     setHotTried(true);
@@ -36,9 +41,10 @@ export default function SearchPanel() {
             if (t && !titles.includes(t)) titles.push(t);
           }
         }
-        setHot(titles.slice(0, 16));
+        if (titles.length) setHot(titles.slice(0, 16));
+        else setHotTried(false); // 空 → 允许下次打开面板重试
       })
-      .catch(() => undefined);
+      .catch(() => setHotTried(false));
   }, [open, hotTried]);
 
   // 打开时聚焦输入框；外部点击 / Esc 关闭

@@ -137,6 +137,18 @@ export function parseSiteConfig(jsonStr: string): ParseResult {
 }
 
 /**
+ * ★ 2026-09-24：判断响应文本「像不像订阅 JSON」。
+ * 用途：识别「按 UA 分流」的订阅站点 —— 浏览器 UA 得到网页落地页，TVBox 客户端（okhttp）UA
+ * 才返回订阅 JSON（例 `http://www.y456y.com`）。拉订阅拿到 HTML 时用它决定是否换 UA 重试。
+ * 只做形状判断（对象 + 订阅关键字段），不追求严格解析。
+ */
+export function looksLikeSubscribeJson(text: string): boolean {
+  const t = (text || '').trim();
+  if (!t.startsWith('{')) return false;
+  return /"(sites|lives|urls|spider|parses|wallpaper|danmaku)"\s*:/.test(t.slice(0, 4096));
+}
+
+/**
  * 带订阅基准地址的解析入口（对齐上游 `fixContentPath(apiUrl, result)` 在解析前改写）。
  * 从 URL 导入订阅时必须走这个入口，否则 `./` 相对路径的 jar/spider 无法解析。
  */

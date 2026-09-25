@@ -4,6 +4,7 @@
 // 网络：经 DnsResolver 的 DoH Agent（api.themoviedb.org 本机 DNS 被污染，DoH 解析后实测可达）。
 import { request as undiciRequest } from 'undici';
 import { createDohAgent } from '../net/DnsResolver';
+import { dispatchChain } from '../net/proxy';
 import { getTmdbCredentials } from './credentials';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import type { Logger } from '../../shared/types';
@@ -102,20 +103,25 @@ export function parseTmdbSearch(json: unknown, type: 'movie' | 'tv', imageBase: 
   for (const r of j.results as Record<string, unknown>[]) {
     if (!r || typeof r !== 'object') continue;
     const posterPath = typeof r.poster_path === 'string' && r.poster_path ? r.poster_path : '';
+    const backdropPath = typeof r.backdrop_path === 'string' && r.backdrop_path ? r.backdrop_path : '';
     const overview = typeof r.overview === 'string' ? r.overview : '';
     const title = String(r.title ?? r.name ?? '').trim();
     const date = String(r.release_date ?? r.first_air_date ?? '').trim();
     const year = /^(\d{4})/.exec(date)?.[1] ? Number(/^(\d{4})/.exec(date)![1]) : ('' as const);
     if (!title) continue;
     const id = Number(r.id);
+    // ★ backdrop_path 必为横版剧照：详情/发现页背景只允许横版图，用它兜底（绝不退回竖版封面）
+    const base = imageBase.replace(/\/+$/, '');
+    const root = base.replace(/\/(?:w\d+|h\d+|original)$/i, '');
     const hit: MetaHit = {
       title,
       year: year as number | '',
-      poster: posterPath ? `${imageBase.replace(/\/+$/, '')}${posterPath}` : '',
+      poster: posterPath ? `${base}${posterPath}` : '',
       overview,
       type,
       // ★ 2026-09-24：带出 TMDB id —— 详情页「演职员/相关推荐」用它再查一次详情
       ...(Number.isFinite(id) && id > 0 ? { tmdbId: id } : {}),
+      ...(backdropPath ? { backdrop: `${root}/w1280${backdropPath}` } : {}),
     };
     if (usable(hit)) out.push(hit);
   }
@@ -242,20 +248,31 @@ interface TmdbSearchResp {
 
 async function getJson(url: string, bearer: string, headersTimeoutMs: number): Promise<TmdbSearchResp> {
   try {
-    const r = await undiciRequest(url, {
-      method: 'GET',
-      headers: {
-        accept: 'application/json',
-        'User-Agent': 'Win-Box/0.72',
-        // v3 Key 场景不带 Authorization（鉴权已在 URL 的 api_key 参数上）
-        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
-      },
-      headersTimeout: headersTimeoutMs,
-      bodyTimeout: headersTimeoutMs,
-      dispatcher: agent,
-    });
-    const text = Buffer.from(await r.body.arrayBuffer()).toString('utf-8');
-    return { status: r.statusCode, text };
+    const headers = {
+      accept: 'application/json',
+      'User-Agent': 'Win-Box/0.72',
+      // v3 Key 场景不带 Authorization（鉴权已在 URL 的 api_key 参数上）
+      ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+    };
+    // ★ 2026-09-25：出站链 —— 用户设了网络代理则优先走代理（TMDB 在部分网络只有代理可达），
+    //   否则退回 DoH Agent（本机 DNS 对 api.themoviedb.org 被污染）。
+    let lastErr = '';
+    for (const dispatcher of dispatchChain(url, agent)) {
+      try {
+        const r = await undiciRequest(url, {
+          method: 'GET',
+          headers,
+          headersTimeout: headersTimeoutMs,
+          bodyTimeout: headersTimeoutMs,
+          dispatcher,
+        });
+        const text = Buffer.from(await r.body.arrayBuffer()).toString('utf-8');
+        return { status: r.statusCode, text };
+      } catch (e) {
+        lastErr = (e as Error).message || String(e);
+      }
+    }
+    return { status: 0, text: lastErr };
   } catch (e) {
     return { status: 0, text: (e as Error).message || String(e) };
   }
@@ -290,28 +307,35 @@ async function verifyPoster(url: string): Promise<boolean> {
   // ★ 2026-09-24：图床白名单改为「生效的图床主机」（含用户填的镜像地址）+ 官方 tmdb 主机
   if (!posterHostAllowed(url)) return false;
   try {
-    const r = await undiciRequest(url, {
-      method: 'GET',
-      headers: { accept: 'image/*', 'User-Agent': 'Win-Box/0.74', Range: 'bytes=0-255' },
-      headersTimeout: 8000,
-      bodyTimeout: 8000,
-      dispatcher: agent,
-    });
-    const ct = String(r.headers['content-type'] || '');
-    const okStatus = r.statusCode === 200 || r.statusCode === 206;
-    if (okStatus && /^image\//i.test(ct)) {
-      // 只消费首块即断流（存于 CDN 的图片可能不理会 Range 返回整图）
+    // ★ 同 getJson：有代理走代理（图床同样可能被墙），否则 DoH
+    for (const dispatcher of dispatchChain(url, agent)) {
       try {
-        const reader = (r.body as unknown as AsyncIterable<any>)[Symbol.asyncIterator]();
-        const first = await reader.next().catch(() => undefined);
-        if (first && !first.done) await reader.return?.();
-        return true;
-      } catch {
+        const r = await undiciRequest(url, {
+          method: 'GET',
+          headers: { accept: 'image/*', 'User-Agent': 'Win-Box/0.74', Range: 'bytes=0-255' },
+          headersTimeout: 8000,
+          bodyTimeout: 8000,
+          dispatcher,
+        });
+        const ct = String(r.headers['content-type'] || '');
+        const okStatus = r.statusCode === 200 || r.statusCode === 206;
+        if (okStatus && /^image\//i.test(ct)) {
+          // 只消费首块即断流（存于 CDN 的图片可能不理会 Range 返回整图）
+          try {
+            const reader = (r.body as unknown as AsyncIterable<any>)[Symbol.asyncIterator]();
+            const first = await reader.next().catch(() => undefined);
+            if (first && !first.done) await reader.return?.();
+            return true;
+          } catch {
+            await r.body.dump().catch(() => undefined);
+            return true;
+          }
+        }
         await r.body.dump().catch(() => undefined);
-        return true; // 首块读取出错但类型/状态正确 → 按可用处理（图床偶发抖动）
+      } catch {
+        /* 该 dispatcher 失败 → 试下一个（代理挂了好歹还能直连试一次） */
       }
     }
-    await r.body.dump().catch(() => undefined);
     return false;
   } catch {
     return false;
@@ -412,7 +436,12 @@ export async function tmdbSearchTitle(
       if (!titleMatches(round.q, cand.title) && !titleMatches(name, cand.title)) continue;
       // 封面经本地 /img 中继出图（渲染层直连 image.tmdb.org 可能被污染）；先校验原始图真实可读
       if (await verifyPoster(cand.poster)) {
-        hit = { ...cand, poster: `${IMG_PROXY}?u=${encodeURIComponent(cand.poster)}` };
+        hit = {
+          ...cand,
+          poster: `${IMG_PROXY}?u=${encodeURIComponent(cand.poster)}`,
+          // ★ 横版剧照同样走中继（详情页背景兜底用；缺了就不带该字段）
+          ...(cand.backdrop ? { backdrop: `${IMG_PROXY}?u=${encodeURIComponent(cand.backdrop)}` } : {}),
+        };
         break;
       }
     }
@@ -573,23 +602,32 @@ export async function tmdbExtras(
  */
 export function parseTmdbImages(json: unknown): { backdrops: string[]; posters: string[] } {
   const j = json as { backdrops?: unknown[]; posters?: unknown[] } | null;
-  const pick = (arr: unknown, minWidth: number, max: number): string[] => {
+  const pick = (arr: unknown, opts: { minWidth: number; max: number; landscape?: boolean }): string[] => {
     if (!Array.isArray(arr)) return [];
     const rows = (arr as Record<string, unknown>[])
       .map((r) => ({
         path: typeof r?.file_path === 'string' ? r.file_path : '',
         width: Number(r?.width) || 0,
+        height: Number(r?.height) || 0,
         vote: Number(r?.vote_average) || 0,
         /** 中文优先：有中文图时排前面（Hero 上的画面更贴合中文片名） */
         zh: r?.iso_639_1 === 'zh' ? 1 : 0,
       }))
-      .filter((r) => r.path && r.width >= minWidth);
+      // ★ 2026-09-25：backdrops 里混有**竖版**图（用户上传时标错类型）→ 只看宽度会把竖图选成
+      //   Hero/详情背景，铺满一个横向区域时被裁得只剩中间一条（用户报「竖版图被裁剪」）。
+      //   故横版用途（landscape）必须同时满足 宽/高 ≥ 1.3。
+      .filter(
+        (r) =>
+          r.path &&
+          r.width >= opts.minWidth &&
+          (!opts.landscape || (r.height > 0 && r.width / r.height >= 1.3)),
+      );
     rows.sort((a, b) => b.zh - a.zh || b.vote - a.vote || b.width - a.width);
-    return rows.slice(0, max).map((r) => r.path);
+    return rows.slice(0, opts.max).map((r) => r.path);
   };
   return {
-    backdrops: pick(j?.backdrops, 1280, MAX_HERO_BACKDROPS),
-    posters: pick(j?.posters, 0, MAX_HERO_POSTERS),
+    backdrops: pick(j?.backdrops, { minWidth: 1280, max: MAX_HERO_BACKDROPS, landscape: true }),
+    posters: pick(j?.posters, { minWidth: 0, max: MAX_HERO_POSTERS }),
   };
 }
 
@@ -649,6 +687,8 @@ const DISCOVER_SECTIONS: Array<{ id: string; title: string; path: string; mediaT
 const DISCOVER_TTL_MS = 6 * 3600 * 1000;
 let discoverCache: { t: number; data: DiscoverSection[] } | null = null;
 let discoverInflight: Promise<DiscoverSection[]> | null = null;
+/** ★ 2026-09-25：分区级「最后一次成功结果」——整表刷新失败时按分区顶替，避免发现页整页空 */
+const sectionCache = new Map<string, { t: number; data: DiscoverSection }>();
 
 /** TMDB 列表项 → 发现页条目（封面包装为本地 /img 中继，渲染层直连图床可能被 DNS 污染） */
 export function toDiscoverItems(json: unknown, mediaType: 'movie' | 'tv'): DiscoverItem[] {
@@ -658,6 +698,8 @@ export function toDiscoverItems(json: unknown, mediaType: 'movie' | 'tv'): Disco
     tmdbId: h.tmdbId,
     mediaType,
     poster: h.poster ? `${IMG_PROXY}?u=${encodeURIComponent(h.poster)}` : '',
+    // ★ 横版剧照（Hero 背景只用横版图，见 DiscoverPage）——同样走本地中继
+    ...(h.backdrop ? { backdrop: `${IMG_PROXY}?u=${encodeURIComponent(h.backdrop)}` } : {}),
   })).filter((it) => it.poster);
 }
 
@@ -665,6 +707,13 @@ export function toDiscoverItems(json: unknown, mediaType: 'movie' | 'tv'): Disco
  * 拉取发现页全部榜单（并行；单个分区失败只丢该分区）。
  * - 无内置凭据 → 返回空数组（渲染层提示「未内置凭据」而不是报错）；
  * - 结果内存缓存 6h；`refresh=true` 绕过缓存重拉；并发调用共享同一 in-flight promise。
+ *
+ * ★ 2026-09-25（用户报「发现页经常加载不出来 / 搜索没有热搜」）：
+ *   TMDB 对本机是跨境访问，偶发 `Body/Headers Timeout`（日志实录）→ 此前一次失败就整页空，
+ *   而发现页与搜索面板热搜共用本函数。现加两道保险：
+ *   ① **分区级重试**（同一分区最多 2 次）—— 跨境抖动一次不再直接丢分区；
+ *   ② **分区级最后一次成功结果兜底**（`sectionCache`）—— 仍失败的分区用上次的榜单顶上，
+ *      保证「只要有网过，页面就有内容」（比整页空/空热搜好得多）。
  */
 export async function tmdbDiscover(logger: Logger, refresh = false): Promise<DiscoverSection[]> {
   const cred = tmdbCreds();
@@ -674,19 +723,31 @@ export async function tmdbDiscover(logger: Logger, refresh = false): Promise<Dis
   const task = (async (): Promise<DiscoverSection[]> => {
     const parts = await Promise.all(
       DISCOVER_SECTIONS.map(async (s) => {
-        try {
-          const u = authFor(`${tmdbApiBase()}${s.path}?language=zh-CN&page=1`, cred);
-          const resp = await getJson(u.url, u.bearer, 12000);
-          if (resp.status !== 200) {
-            logger.w(`meta:发现页 ${s.id} 失败 status=${resp.status} ${resp.text.slice(0, 120)}`);
-            return null;
+        // ① 同一分区最多试 2 次（第 2 次给更长的超时，跨境慢链路更可能成功）
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const u = authFor(`${tmdbApiBase()}${s.path}?language=zh-CN&page=1`, cred);
+            const resp = await getJson(u.url, u.bearer, attempt === 0 ? 12000 : 20000);
+            if (resp.status !== 200) {
+              logger.w(`meta:发现页 ${s.id} 失败 status=${resp.status} ${resp.text.slice(0, 120)}`);
+              continue;
+            }
+            const items = toDiscoverItems(JSON.parse(resp.text), s.mediaType);
+            if (items.length) {
+              sectionCache.set(s.id, { t: Date.now(), data: { id: s.id, title: s.title, items } });
+              return { id: s.id, title: s.title, items };
+            }
+          } catch (e) {
+            logger.w(`meta:发现页 ${s.id} 异常(第${attempt + 1}次): ${(e as Error).message}`);
           }
-          const items = toDiscoverItems(JSON.parse(resp.text), s.mediaType);
-          return items.length ? { id: s.id, title: s.title, items } : null;
-        } catch (e) {
-          logger.w(`meta:发现页 ${s.id} 异常: ${(e as Error).message}`);
-          return null;
         }
+        // ② 两次都不成 → 用该分区上一次的成功结果兜底
+        const last = sectionCache.get(s.id);
+        if (last) {
+          logger.w(`meta:发现页 ${s.id} 本次失败，用上次结果兜底（${last.data.items.length} 条）`);
+          return last.data;
+        }
+        return null;
       }),
     );
     const out = parts.filter((x): x is DiscoverSection => x !== null);

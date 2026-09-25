@@ -13,6 +13,7 @@ import type { SubtitleSettings, SubtitleCandidate } from '../../shared/subtitle'
 import { parseDanmakuResponse } from '../../engine/danmaku/parseDanmakuXml';
 import { danmakuQueryCandidates } from '../../engine/danmaku/normalizeQuery';
 import { resolvePlayTarget } from '../lib/playTarget';
+import { loadPlayerPrefs, savePlayerPrefs, type PlayerPrefs } from '../lib/playerPrefs';
 import { driveProviderFromUrl, driveProviderLabel } from '../../shared/driveProvider';
 import {
   DEFAULT_DANMAKU_SETTINGS,
@@ -139,12 +140,20 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const panelOpenRef = useRef(false);
   const volDragRef = useRef(false);
 
+  // ---- ★ 2026-09-24：播放器设置记忆（音量 / 倍速 / 字幕时间偏移）----
+  //   挂载时一次性读取（localStorage，主窗口与独立播放器窗口同源共享），
+  //   变更时由下方 persist effect 落盘 → 下次打开播放器保持上次的设置。
+  const prefsRef = useRef<PlayerPrefs | null>(null);
+  if (!prefsRef.current) prefsRef.current = loadPlayerPrefs();
+  /** 老板键（暂停+静音）期间不改写记忆：临时把音量压到 0 不应污染「上次音量」 */
+  const bossActiveRef = useRef(false);
+
   const [paused, setPaused] = useState(true);
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(0);
   const [buffered, setBuffered] = useState(0);
-  const [vol, setVol] = useState(1);
-  const [rate, setRate] = useState(1);
+  const [vol, setVol] = useState(() => prefsRef.current!.vol);
+  const [rate, setRate] = useState(() => prefsRef.current!.rate);
   const [full, setFull] = useState(false);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);
@@ -237,7 +246,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   // ---- 外挂字幕 ----
   const [subEnabled, setSubEnabled] = useState(false);
   const [subCues, setSubCues] = useState<{ start: number; end: number; text: string }[]>([]);
-  const [subOffset, setSubOffset] = useState(0);
+  const [subOffset, setSubOffset] = useState(() => prefsRef.current!.subOffset);
   const [subFont, setSubFont] = useState(20);
   const [subBottom, setSubBottom] = useState(40);
   const [subPanel, setSubPanel] = useState(false);
@@ -446,6 +455,15 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     void client.subtitleSet({ fontSize: subFont, bottom: subBottom, enabled: subEnabled }).catch(() => undefined);
   }, [subFont, subBottom, subEnabled]);
 
+  // ★ 2026-09-24：播放器设置记忆落盘（音量 / 倍速 / 字幕时间偏移）。
+  //   prefsRef 同步指向最新值，供 url effect / onCanPlay 等闭包读取（避免闭包读到旧 state）。
+  //   老板键（暂停+静音）期间只更新 ref、不写盘 —— 临时静音不该覆盖用户的上次音量。
+  useEffect(() => {
+    prefsRef.current = { vol, rate, subOffset };
+    if (bossActiveRef.current) return;
+    savePlayerPrefs({ vol, rate, subOffset });
+  }, [vol, rate, subOffset]);
+
   const toggleSub = () => {
     setSubPanel(false);
     const next = !subEnabled;
@@ -589,6 +607,11 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     setNetSpeed(null);
     setRelaySpeed(null);
     setBuffering(false);
+    // ★ 播放器设置记忆：新源/切集时就先套用记忆的音量与倍速（onCanPlay 会再对齐一次）
+    if (prefsRef.current) {
+      v.volume = prefsRef.current.vol;
+      v.playbackRate = prefsRef.current.rate;
+    }
     v.src = '';
     hlsRef.current?.destroy();
     hlsRef.current = null;
@@ -635,7 +658,15 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       }
     }
   };
-  const onCanPlay = () => setLoading(false);
+  const onCanPlay = () => {
+    // ★ 播放器设置记忆：部分格式在加载新源后会把音量/倍速重置回默认，就绪时再对齐一次记忆值
+    //   （老板键暂时静音期间不动，避免把静音状态"恢复"成有声）
+    if (!bossActiveRef.current && prefsRef.current) {
+      if (v.volume !== prefsRef.current.vol) v.volume = prefsRef.current.vol;
+      if (v.playbackRate !== prefsRef.current.rate) v.playbackRate = prefsRef.current.rate;
+    }
+    setLoading(false);
+  };
   const onDuration = () => {
     setDur(Number.isFinite(v.duration) ? v.duration : 0);
     if (v.duration === Infinity) setIsLive(true);
@@ -857,6 +888,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     const offEnter = client.bossOnEnter(() => {
       const v = ref.current;
       if (!v) return;
+      bossActiveRef.current = true; // 临时静音期间不写记忆（见上方 persist effect）
       bossSnapRef.current = { wasPlaying: !v.paused, vol: v.volume };
       try {
         v.pause();
@@ -871,6 +903,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       const v = ref.current;
       const snap = bossSnapRef.current;
       bossSnapRef.current = null;
+      bossActiveRef.current = false;
       if (!v || !snap) return;
       v.volume = Math.max(0, Math.min(1, snap.vol));
       setVol(v.volume);

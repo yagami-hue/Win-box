@@ -116,6 +116,15 @@ app.whenReady().then(async () => {
   } catch {
     fileLogger.w('本地代理启动失败，直播归一化可能受影响');
   }
+  // ★ 网络代理设置（用户可在配置页填 http 代理；用于被 DNS 污染 / SNI 阻断的站点）。
+  //   初始化后所有出站（本进程请求 / 本地中继 / JVM 与 Python 蜘蛛 / 嗅探窗口）统一生效。
+  try {
+    const { initProxySettings } = await import('./net/proxy');
+    const { userDataDir } = await import('./util/paths');
+    initProxySettings(join(userDataDir(), 'proxy.json'));
+  } catch (e) {
+    fileLogger.w('代理设置初始化失败：' + (e as Error).message);
+  }
   registerIpc(host);
   // 老板键：注入窗口提供者（主窗口 + 播放器窗口）并按上次设置注册全局快捷键
   bossKey.start(() => {

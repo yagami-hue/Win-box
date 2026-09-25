@@ -92,4 +92,7 @@ export const IPC = {
   BOSS_SET: 'boss:set',
   // 夸克落盘文件清理（渲染层播放页/播放器页卸载时触发）
   QUARK_CLEANUP: 'quark:cleanup',
+  // ★ 网络代理设置（DNS 污染 / SNI 阻断站点用；配置页可填）
+  PROXY_GET: 'proxy:get',
+  PROXY_SET: 'proxy:set',
 } as const;

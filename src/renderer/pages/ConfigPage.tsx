@@ -11,7 +11,7 @@ import { applyTheme, currentTheme } from '../lib/theme';
 import { THEME_LABELS, type Theme } from '../lib/themeTokens';
 import { DEFAULT_META_SETTINGS, type MetaSettings, type MetaSettingsView, type MetaSource } from '../../shared/meta';
 
-type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'appearance' | 'shortcut';
+type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'appearance' | 'shortcut' | 'network';
 
 /** ★ 2026-09-24：元数据来源策略选项（封面与简介共用；「仅 TMDB」需用户先填自己的 API） */
 const META_SOURCE_OPTS: Array<{ v: MetaSource; label: string; hint: string }> = [
@@ -155,6 +155,35 @@ export default function ConfigPage() {
       }
     } catch (e) {
       setBossMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
+    }
+  }
+
+  // ---- ★ 网络代理（DNS 污染 / TLS SNI 阻断站点用）----
+  const [proxy, setProxy] = useState<{ enabled: boolean; url: string } | null>(null);
+  const [proxyUrlDraft, setProxyUrlDraft] = useState('');
+  const [proxyMsg, setProxyMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  useEffect(() => {
+    client
+      .proxyGet()
+      .then((s) => {
+        setProxy(s);
+        setProxyUrlDraft(s.url);
+      })
+      .catch(() => setProxy({ enabled: false, url: '' }));
+  }, []);
+  async function saveProxy() {
+    try {
+      const next = await client.proxySet({ enabled: proxy?.enabled ?? false, url: proxyUrlDraft.trim() });
+      setProxy(next);
+      setProxyUrlDraft(next.url);
+      const bad = proxyUrlDraft.trim() && !next.url;
+      setProxyMsg(
+        bad
+          ? { text: '代理地址无法解析（应形如 http://127.0.0.1:7890）', kind: 'err' }
+          : { text: next.enabled && next.url ? '✓ 已启用，立即生效（本机地址不走代理）' : '已保存（当前未启用）', kind: 'ok' },
+      );
+    } catch (e) {
+      setProxyMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
     }
   }
 
@@ -580,6 +609,7 @@ export default function ConfigPage() {
     { id: 'account', label: '账号与凭据' },
     { id: 'appearance', label: '外观' },
     { id: 'shortcut', label: '快捷键' },
+    { id: 'network', label: '网络' },
   ];
   const CFG_TAB_KEY = 'winbox-cfg-tab';
   // 记住上次打开的选项卡：从配置页跳走再返回时仍停在原 tab
@@ -1426,6 +1456,57 @@ export default function ConfigPage() {
         )}
       </div>
 
+      </>
+      )}
+
+      {/* ===== 七、网络（代理） ===== */}
+      {tab === 'network' && (
+      <>
+      <h4 style={{ margin: '18px 0 8px' }}>七、网络（代理）</h4>
+      <div className="card" style={{ padding: 12, marginBottom: 16 }}>
+        {proxy ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div className="row" style={{ alignItems: 'center', gap: 10 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={proxy.enabled}
+                  onChange={(e) => setProxy((p) => (p ? { ...p, enabled: e.target.checked } : p))}
+                />
+                <span style={{ fontWeight: 600 }}>启用网络代理</span>
+              </label>
+              <span className="muted" style={{ fontSize: 11 }}>
+                当前：{proxy.enabled && proxy.url ? proxy.url : '未启用（直连）'}
+              </span>
+            </div>
+            <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+              <span className="muted" style={{ fontSize: 11, flex: 'none' }}>代理地址：</span>
+              <input
+                style={{ width: 300, fontFamily: 'monospace' }}
+                placeholder="http://127.0.0.1:7890"
+                value={proxyUrlDraft}
+                onChange={(e) => setProxyUrlDraft(e.target.value)}
+              />
+              <span className="muted" style={{ fontSize: 11 }}>http 代理（Clash / V2Ray 等本机代理常见为 7890）</span>
+            </div>
+            <div className="row" style={{ alignItems: 'center', gap: 10 }}>
+              <button className="primary" onClick={() => void saveProxy()}>保存代理</button>
+              {proxyMsg && (
+                <span className={proxyMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0 }}>
+                  {proxyMsg.text}
+                </span>
+              )}
+            </div>
+            <div className="muted" style={{ fontSize: 11, lineHeight: 1.7 }}>
+              何时需要：某些订阅域名被<b>DNS 污染</b>（拿到的是运营商拦截页）或 <b>TLS SNI 阻断</b>（连不上）时，
+              直连一定失败（表现为「不是有效的 JSON」「源全部不可用」）。填上本机代理后，<b>订阅拉取、源请求、
+              封面出图、取流、jar/py 蜘蛛、网页嗅探</b>都会走它；<b>本机地址（127.0.0.1）永不代理</b>。
+            </div>
+          </div>
+        ) : (
+          <div className="empty">加载中…</div>
+        )}
+      </div>
       </>
       )}
 

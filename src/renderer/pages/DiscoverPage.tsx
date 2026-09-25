@@ -8,6 +8,7 @@ import { useNavigate } from 'react-router-dom';
 import { client } from '../api/client';
 import { useTheme } from '../lib/theme';
 import HScrollRow from '../components/HScrollRow';
+import HeroBackdrop from '../components/HeroBackdrop';
 import type { DiscoverItem, DiscoverSection, DiscoverGenre } from '../../shared/types';
 
 /** 影片卡（推荐区与分类区共用）：点击 → 全源搜索该片名；onHover 用于让 Hero 跟随鼠标（Netflix 皮肤） */
@@ -30,39 +31,6 @@ function ItemCard({ it, onOpen, onHover }: { it: DiscoverItem; onOpen: () => voi
         </div>
       </div>
     </div>
-  );
-}
-
-/**
- * ★ 2026-09-24（用户定稿）：Hero 背景 = **横版剧照轮播**（TMDB images 的 backdrops），
- *   切换时**交叉淡入淡出**（前一张淡出、后一张淡入同时进行）。
- *   实现：所有图层叠放，按 idx 切 opacity（CSS transition 负责动画）——
- *   比「维护 prev 指针」简单且不会出现中间空帧。
- *   只渲染「已出现过的 + 下一张」：既保证切换时有前后两张参与淡入淡出，又避免一次性下载全部剧照。
- */
-function HeroBackdrop({ urls, intervalMs = 6000 }: { urls: string[]; intervalMs?: number }) {
-  const [idx, setIdx] = useState(0);
-  const key = urls.join('|');
-  useEffect(() => {
-    setIdx(0); // 换片 / 换图集 → 从第一张重新开始
-  }, [key]);
-  useEffect(() => {
-    if (urls.length <= 1) return;
-    const t = setInterval(() => setIdx((i) => (i + 1) % urls.length), intervalMs);
-    return () => clearInterval(t);
-  }, [key, urls.length, intervalMs]);
-  const shown = Math.min(urls.length, idx + 2);
-  return (
-    <>
-      {urls.slice(0, shown).map((u, i) => (
-        <div
-          key={u}
-          className="nf-hero-bg"
-          style={{ backgroundImage: `url("${u}")`, opacity: i === idx ? 1 : 0 }}
-          aria-hidden={i === idx ? undefined : true}
-        />
-      ))}
-    </>
   );
 }
 
@@ -94,6 +62,10 @@ export default function DiscoverPage() {
    * 拉榜单（走主进程 6h 缓存）。
    * ★ 2026-09-24：原「刷新」按钮随「发现」那排一起删除（用户定稿：整排冗余）→ 不再有强制刷新入口，
    *   缓存过期由主进程 TTL 负责；需要立刻重拉时重启应用即可（避免留一个没人用的 refresh 参数）。
+   * ★ 2026-09-25（用户报「发现页经常加载不出来」）：TMDB 是跨境访问，偶发超时会让整页空。
+   *   主进程侧已加「分区重试 + 上次成功结果兜底」；渲染层再补两道：
+   *   ① 首次结果为空 → 1.2s 后**自动重试一次**（不自作多情地循环重试）；
+   *   ② 仍然为空 → 错误提示里给「重试」按钮（用户可手动再拉）。
    */
   const load = (): void => {
     setLoading(true);
@@ -107,6 +79,15 @@ export default function DiscoverPage() {
       .catch((e) => setErr((e as Error).message))
       .finally(() => setLoading(false));
   };
+  /** 已自动重试过（避免「空 → 重试 → 空」无限循环） */
+  const autoRetriedRef = useRef(false);
+  useEffect(() => {
+    if (loading || sections === null || sections.length > 0 || autoRetriedRef.current) return;
+    autoRetriedRef.current = true;
+    const t = setTimeout(() => load(), 1200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, sections]);
   useEffect(() => {
     load();
     client.cfgGet().then((cfg) => setHasSources(cfg.sources.length > 0)).catch(() => undefined);
@@ -159,14 +140,16 @@ export default function DiscoverPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nf, sections]);
 
-  // ---- Hero 背景剧照：随主推片切换而重取（主进程 24h 缓存；取不到就退回该片封面）----
+  // ---- Hero 背景剧照：随主推片切换而重取（主进程 24h 缓存）----
+  // ★ 2026-09-25：**背景只允许横版图**（用户报「竖版图被裁剪」）——优先 `images.backdrops`，
+  //   取不到才用榜单自带的 `backdrop_path`（同样是横版剧照）；**绝不再退回竖版封面**（poster）。
   const [heroBgs, setHeroBgs] = useState<string[]>([]);
   useEffect(() => {
     if (!nf || !hero) {
       setHeroBgs([]);
       return;
     }
-    const fallback = hero.poster ? [hero.poster] : [];
+    const fallback = hero.backdrop ? [hero.backdrop] : [];
     if (!hero.tmdbId) {
       setHeroBgs(fallback);
       return;
@@ -181,7 +164,7 @@ export default function DiscoverPage() {
       })
       .catch(() => { if (alive) setHeroBgs(fallback); });
     return () => { alive = false; };
-  }, [nf, hero?.tmdbId, hero?.mediaType, hero?.poster]);
+  }, [nf, hero?.tmdbId, hero?.mediaType, hero?.backdrop, hero?.poster]);
 
   return (
     <>
@@ -263,7 +246,18 @@ export default function DiscoverPage() {
         ) : loading && !sections ? (
           <div className="empty">加载中…</div>
         ) : err && (!sections || sections.length === 0) ? (
-          <div className="err">{err}</div>
+          <div className="err">
+            {err}
+            <button
+              style={{ marginLeft: 10 }}
+              onClick={() => {
+                autoRetriedRef.current = true; // 手动重试后不再触发自动重试
+                load();
+              }}
+            >
+              重试
+            </button>
+          </div>
         ) : (
           (sections || []).map((s) => (
             <div key={s.id} className={nf ? 'nf-row' : undefined} style={nf ? undefined : { marginBottom: 22 }}>

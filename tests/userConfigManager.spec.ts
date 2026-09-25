@@ -141,6 +141,34 @@ describe('UserConfigManager — replaceFromImport 全量替换', () => {
   });
 });
 
+describe('UserConfigManager — parses（解析接口）持久化', () => {
+  it('replaceFromImport 保存 parses（滤掉合成超级解析）；重载后仍在；档案切换可恢复', () => {
+    const dir = tmpDir();
+    const cfg = fullConfig([bean('p1')]);
+    cfg.parses = [
+      { name: '超级解析', url: 'http://127.0.0.1:9978/jiexi?url=', ext: '', type: 4 },
+      { name: 'jx1', url: 'https://jx.example/?url=', ext: '', type: 0 },
+      { name: 'jx2', url: 'https://jx2.example/api', ext: '', type: 1 },
+    ];
+    const m = newManager(dir);
+    m.replaceFromImport(cfg, 'https://sub.example/c.json');
+    // 合成的 type=4 不落库（避免往返时被 parseParses 反复 unshift 出重复项）
+    expect(m.snapshot().parses.map((p) => p.name)).toEqual(['jx1', 'jx2']);
+
+    const m2 = newManager(dir);
+    expect(m2.load()).toBe(true);
+    expect(m2.snapshot().parses.map((p) => p.name)).toEqual(['jx1', 'jx2']);
+
+    // 切走再切回：档案 JSON 里也带着 parses（可离线重建）
+    const m3 = newManager(dir);
+    m3.load();
+    const first = m3.profiles()[0].id;
+    m3.saveAsProfile('临时');
+    m3.activateProfile(first);
+    expect(m3.snapshot().parses.map((p) => p.name)).toEqual(['jx1', 'jx2']);
+  });
+});
+
 describe('UserConfigManager — 持久化往返与损坏恢复', () => {
   it('变更即写盘：新 manager 实例 load 后恢复同源列表与选中源', () => {
     const dir = tmpDir();

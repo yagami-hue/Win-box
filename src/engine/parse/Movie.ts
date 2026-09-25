@@ -2,6 +2,7 @@
 // 苹果 CMS 统一数据模型（Movie/Video/UrlBean/UrlInfo/AbsXml）+ JSON→Movie 解析。
 // 1:1 对齐 ref3/.../bean/AbsJson.java 的 toAbsXml()。
 import { safeJsonString, safeJsonInt } from '../util/json';
+import { normalizeVodId, normalizeVodPic } from '../vod/itemNormalize';
 import type { FilterGroup } from '../../shared/types';
 
 export interface UrlInfo {
@@ -72,11 +73,12 @@ export function vodToVideo(vod: Record<string, unknown>): Video {
     }
   }
   return {
-    id: s(vod['vod_id']),
+    // ★ 空 id → 片名兜底；封面拆上游 `@Referer=…` 尾巴（见 vod/itemNormalize.ts）
+    id: normalizeVodId(vod['vod_id'], vod['vod_name']),
     tid: toInt(vod['type_id'], 0),
     name: s(vod['vod_name']),
     type: s(vod['type_name']),
-    pic: s(vod['vod_pic']),
+    pic: normalizeVodPic(vod['vod_pic']),
     lang: s(vod['vod_lang']),
     area: s(vod['vod_area']),
     year: toInt(vod['vod_year'], 0),

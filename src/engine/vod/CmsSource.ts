@@ -21,6 +21,19 @@ function withQuery(api: string, params: Record<string, string>): string {
   return api + (u.search || '');
 }
 
+/**
+ * ★ 2026-09-25：响应是否「像 CMS 数据」（XML / JSON）。
+ * 用来识别 **DNS 污染**：系统 DNS 被解到劫持 IP 时，返回的是运营商反诈页/落地页（HTML），
+ * 换 DoH 重取即可恢复。`<!DOCTYPE html>` / `<html` 明确判为「不是数据」。
+ */
+export function looksLikeCmsBody(text: string): boolean {
+  const s = (text || '').replace(/^\uFEFF/, '').trimStart();
+  if (!s) return false;
+  const head = s.slice(0, 200).toLowerCase();
+  if (head.startsWith('<!doctype') || head.startsWith('<html')) return false;
+  return s.startsWith('<') || s.startsWith('{') || s.startsWith('[');
+}
+
 export interface CmsResult {
   sortClasses: SortClass[];
   items: VodItem[];
@@ -37,18 +50,34 @@ export class CmsSource {
   private async fetchText(url: string, timeoutMs?: number): Promise<string> {
     // 任务 A1：网络层失败（超时/连接异常/非 2xx）包成 NETWORK 中文错误向上抛，
     // 不再让原始 undici 报错直接冒出、也不静默返回空给 UI。
-    let res;
+    const get = async (doh: 0 | 1): Promise<string> => {
+      let res;
+      try {
+        res = await this.host.http.request({ url, method: 'get', timeoutMs, ...(doh ? { doh } : {}) });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new SourceProblemError('NETWORK', `网络请求失败（${url}）：${msg}`, e);
+      }
+      if (res.status && res.status >= 400) {
+        throw new SourceProblemError('NETWORK', `站点返回 HTTP ${res.status}（${url}）`);
+      }
+      const c = res.content;
+      return Array.isArray(c) ? Buffer.from(c).toString('utf-8') : c;
+    };
+    const text = await get(0);
+    if (looksLikeCmsBody(text)) return text;
+    // ★ 2026-09-25：响应不像 XML/JSON（多半是**域名被 DNS 污染**后拿到的运营商劫持页/落地页）
+    //   → 用 DoH 解析真实 IP 再取一次；DoH 也不成则交回第一次的结果（保持原有错误路径与文案）。
     try {
-      res = await this.host.http.request({ url, method: 'get', timeoutMs });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new SourceProblemError('NETWORK', `网络请求失败（${url}）：${msg}`, e);
+      const t2 = await get(1);
+      if (looksLikeCmsBody(t2)) {
+        this.host.logger.i(`cms: ${url} 系统 DNS 响应异常，已按 DoH 重取成功`);
+        return t2;
+      }
+    } catch {
+      /* DoH 同样失败：下面的 return 会把第一次的结果交出去 */
     }
-    if (res.status && res.status >= 400) {
-      throw new SourceProblemError('NETWORK', `站点返回 HTTP ${res.status}（${url}）`);
-    }
-    const c = res.content;
-    return Array.isArray(c) ? Buffer.from(c).toString('utf-8') : c;
+    return text;
   }
 
   private ac(type: number): string {

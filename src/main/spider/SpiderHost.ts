@@ -7,7 +7,7 @@ import { getAdapter } from '../net/qr';
 import { runDriveWebLogin } from '../net/webLogin';
 import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid } from '../net/quarkTransfer';
 import { fileLogger } from '../util/logger';
-import { parseSiteConfig, parseSiteConfigWithBase, type ParseResult } from '../../engine/config/ApiConfigParser';
+import { parseSiteConfig, parseSiteConfigWithBase, looksLikeSubscribeJson, type ParseResult } from '../../engine/config/ApiConfigParser';
 import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName, type MultiRepo } from '../../engine/config/multiRepo';
 import { SourceViewModel } from '../../engine/vod/SourceViewModel';
 import { parseToJsonArray, toLiveGroups } from '../../engine/live/TxtSubscribe';
@@ -76,6 +76,9 @@ import {
 import { doubanSearchTitle, doubanSuggest, isCjkName, DOUBAN_CACHE_PREFIX } from '../meta/doubanProvider';
 import { getTmdbCredentials } from '../meta/credentials';
 import { so360SearchCover, SO360_CACHE_PREFIX } from '../meta/so360Provider';
+import { ParseService } from '../parse/ParseService';
+import { sniffMediaUrl } from '../parse/PageSniffer';
+import { getProxySettings, jvmProxyArgs, childProxyEnv } from '../net/proxy';
 
 /** 豆瓣兜底最多尝试的名称变体数（原名 + 净化名；再多只会多打外部请求） */
 const DOUBAN_MAX_VARIANTS = 2;
@@ -147,6 +150,8 @@ export class SpiderHost {
   /** ★ 夸克已落盘待清理队列（关闭播放/窗口/退出时删除，进度仍保留在本地历史；持久化防重启丢失） */
   private pendingQuarkDeletes: Array<{ cookie: string; pdirFid: string; fid: string; dirFid?: string; at: number }> = [];
   private pendingQuarkStore: JsonStore;
+  /** ★ 2026-09-24：解析接口链（parses → 直连地址；含隐藏窗口嗅探兜底） */
+  private parseService: ParseService;
   /** 自动订阅刷新计时（<userData>/auto-refresh.json 记录上次成功时间） */
   private autoRefreshStore: JsonStore;
   private config: SiteConfig | null = null;
@@ -181,6 +186,7 @@ export class SpiderHost {
     this.http = new HttpClient();
     this.kv = store; // SpiderLocal 的 KV（jsRuntime_{a}_{b}）
     this.logger = fileLogger;
+    this.parseService = new ParseService(this.http, this.logger, sniffMediaUrl);
     // jsLibDir：resources/js-lib 绝对路径（模板.js/gbk.js/cat.js 等本地库），T03-B JS 沙箱用
     const host: EngineHost = {
       http: this.http,
@@ -197,6 +203,11 @@ export class SpiderHost {
         callTimeoutMs: 20000,
         // ★ 嵌入式 CPython 按需下载落盘（userData 可写；安装版不放 resources）
         pyRuntimeDir: join(userDataDir(), 'cache', 'python'),
+        // ★ 网络代理（用户设置）：JVM 参数 + Python/子进程环境变量；每次调用现取 → 改设置即时生效
+        proxyProvider: () => {
+          const s = getProxySettings();
+          return { jvmArgs: jvmProxyArgs(s), env: childProxyEnv(s) };
+        },
       },
       host,
     );
@@ -792,8 +803,7 @@ export class SpiderHost {
     const snapshot = opts.snapshot !== false;
     let text = source.json || '';
     if (source.url) {
-      const res = await this.http.request({ url: source.url, method: 'get', timeoutMs: 30000 });
-      text = Array.isArray(res.content) ? Buffer.from(res.content).toString('utf-8') : res.content;
+      text = await this.fetchConfigText(source.url);
     }
     // ★ 多仓（{urls:[{url,name},...]}）导入：影视仓/多仓盒子订阅格式，逐个子仓取首个可用
     const multi = parseMultiRepo(text);
@@ -822,6 +832,50 @@ export class SpiderHost {
   }
 
   /**
+   * ★ 2026-09-24：拉订阅文本（含「按 UA 分流」站点的兜底）。
+   *   不少站点对浏览器 UA 返回**网页落地页**、只对 TVBox 客户端（okhttp）UA 返回订阅 JSON
+   *   （例：http://www.y456y.com —— 浏览器 UA 得到 HTML，okhttp UA 才给 {sites:…}）。
+   *   此前只发默认（浏览器）UA → 拿到 HTML → 解析报「不是有效的 JSON」，与 fty 早期同类的报错。
+   *   策略：先默认 UA；拿到的**不像订阅 JSON** 时，用 okhttp UA 重试一次。
+   *
+   * ★ 2026-09-25 追加第 3 次尝试（**DoH**）：域名被 DNS 污染时系统 DNS 会解到劫持 IP，
+   *   响应是运营商反诈页之类（同样「不像订阅 JSON」，换 UA 也没用）→ 用 DoH 拿真实 IP 再试。
+   *   三次都拿不到才放弃（并保留第 1 次的结果，让上游报出原始错误文案）。
+   */
+  private async fetchConfigText(url: string): Promise<string> {
+    const attempt = async (opts: { ua?: string; doh?: 0 | 1 }): Promise<string> => {
+      const res = await this.http.request({
+        url,
+        method: 'get',
+        timeoutMs: 30000,
+        ...(opts.ua ? { headers: { 'User-Agent': opts.ua } } : {}),
+        ...(opts.doh ? { doh: opts.doh } : {}),
+      });
+      return Array.isArray(res.content) ? Buffer.from(res.content).toString('utf-8') : res.content;
+    };
+    let text = '';
+    try {
+      text = await attempt({});
+    } catch (e) {
+      this.logger.w(`订阅拉取失败（系统 DNS）：${(e as Error).message}`);
+    }
+    if (looksLikeSubscribeJson(text)) return text;
+    const okhttp = 'okhttp/3.12.0';
+    for (const label of ['okhttp UA', 'okhttp UA + DoH'] as const) {
+      try {
+        const t = await attempt(label.includes('DoH') ? { ua: okhttp, doh: 1 } : { ua: okhttp });
+        if (looksLikeSubscribeJson(t)) {
+          this.logger.i(`订阅按「${label}」重试成功：${url}`);
+          return t;
+        }
+      } catch (e) {
+        this.logger.w(`订阅「${label}」重试失败：${(e as Error).message}`);
+      }
+    }
+    return text;
+  }
+
+  /**
    * ★ 多仓导入：对每个子仓按序拉取解析，取第一个可成功解析的作为当前配置落地；
    *   clan:// 等本地协议仓与失败仓跳过并在提示中说明（影视仓的本地目录仓桌面版无载体）。
    */
@@ -836,8 +890,7 @@ export class SpiderHost {
         continue;
       }
       try {
-        const res = await this.http.request({ url: item.url, method: 'get', timeoutMs: 30000 });
-        const text = Array.isArray(res.content) ? Buffer.from(res.content).toString('utf-8') : res.content;
+        const text = await this.fetchConfigText(item.url);
         const result = parseSiteConfigWithBase(text, item.url);
         if (!result.config.sites.length && !result.config.lives.length) {
           skipped.push(`「${label}」内容为空/非订阅配置`);
@@ -1240,7 +1293,26 @@ export class SpiderHost {
     }
     return started;
   }
-  async play(key: string, flag: string, id: string, vipFlags: string[]): Promise<PlayResult> {
+  /**
+   * ★ 2026-09-24：需要走解析的播放源 flag 列表 = **订阅顶层 `flags`**（对齐上游 ApiConfig.getFlags()）。
+   *   此前由渲染层把「详情页的播放源名」当 vipFlags 传进来 —— 而 flag 本身就取自那份列表，
+   *   于是 `vipFlags.includes(flag)` **恒为真** → 所有 CMS 源都被判成 parse=1
+   *   （用户看到的「该播放地址需要网页解析/嗅探，桌面版暂不支持」即由此而来）。
+   */
+  get vipFlags(): string[] {
+    return this.config?.flags ?? [];
+  }
+
+  /**
+   * ★ 2026-09-25：网络代理设置变更后调用 —— 丢弃蜘蛛实例缓存。
+   *   常驻进程池的 key 含代理参数（JVM `-D` 与 Python env），下次调用会按新参数拉起新进程；
+   *   这里只需清掉引擎侧的实例缓存，避免继续复用「按旧代理参数」建好的实例。
+   */
+  resetSpidersForProxyChange(): void {
+    this.vm.spiderFactory.clear();
+  }
+
+  async play(key: string, flag: string, id: string): Promise<PlayResult> {
     const b = this.getSource(key);
     if (!b) throw new Error(`源不存在: ${key}`);
     // ★ 夸克分享型播放（episode 是 pan.quark.cn/s/ 链接或含 sId 的 JSON）且已绑定夸克 →
@@ -1283,7 +1355,7 @@ export class SpiderHost {
         }
       }
     }
-    return this.vm.play(b, flag, id, vipFlags).then((r) => {
+    return this.vm.play(b, flag, id, this.vipFlags).then((r) => {
       // 仅对单个 http(s) 且非多段（# 连接）的播放地址做中继包装
       const single = /^https?:\/\//i.test(r.url || '') && !(r.url || '').includes('#');
       if (!single || !r.url) return r;
@@ -1301,7 +1373,33 @@ export class SpiderHost {
         if (!tokens[prov]) r.needDriveCookieBind = prov;
       }
       return r;
-    });
+    }).then((r) => this.resolveNeededParse(r));
+  }
+
+  /**
+   * ★ 2026-09-24：`parse===1`（需网页解析/嗅探）的地址 → 走解析接口链拿可直连地址。
+   *   成功：parse 置 0，url 换成解析/嗅探结果（带 Referer/UA/Cookie 经 /play 注入）；
+   *   失败：保留 parse=1 并附 `message`，渲染层据它提示（替代原「桌面版暂不支持」的笼统说法）。
+   *   多段地址（# 分隔）只取第一段试解析（与 TVBox 播放器取首段一致）。
+   */
+  private async resolveNeededParse(r: PlayResult): Promise<PlayResult> {
+    if (r.parse !== 1 || !r.url) return r;
+    const target = r.url.split('#').filter(Boolean)[0] || r.url;
+    try {
+      const hit = await this.parseService.resolve(this.config?.parses || [], target);
+      if (hit?.url) {
+        this.logger.i(`parse: 「${r.flag}」解析成功（${hit.via}）${hit.url.slice(0, 100)}`);
+        return {
+          ...r,
+          parse: 0,
+          url: Object.keys(hit.headers).length ? wrapPlayUrlWithHeaders(hit.url, hit.headers) : hit.url,
+          message: undefined,
+        };
+      }
+    } catch (e) {
+      this.logger.w(`parse: 解析异常 ${(e as Error).message}`);
+    }
+    return { ...r, message: '该播放地址需要网页解析/嗅探，自动解析未取得直连地址（可在配置里补充解析接口或改选其它源）' };
   }
 
   /** 加载直播：lives[index] 的 url（已归一化为 9978 代理）→ 抓取 → TxtSubscribe 解析 */
@@ -1346,7 +1444,9 @@ export class SpiderHost {
     const base = snap.apiUrl || '';
     const cfg: SiteConfig = {
       sites: base ? snap.sources.map((s) => normalizeBeanPaths(s, base)) : snap.sources,
-      parses: [],
+      // ★ 2026-09-24 修复：此前恒为 []，订阅的解析接口（parses）根本没进运行时 →
+      //   parse===1 的播放地址只能报「暂不支持」。现由 UserConfig 透传（见 UserConfig.parses）。
+      parses: snap.parses || [],
       lives: snap.lives,
       flags: snap.global.flags,
       spider: base ? resolvePathValue(snap.global.spider, base) : snap.global.spider,

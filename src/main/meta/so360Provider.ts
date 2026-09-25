@@ -11,6 +11,7 @@
 //   只接受「结果标题与查询词有足够长的共同子串」的候选（中文 ≥4 字 / 拉丁 ≥6 字符），
 //   宁可不给封面（回落占位）也不给错图。
 import { request as undiciRequest, Agent } from 'undici';
+import { dispatchChain } from '../net/proxy';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
 import type { Logger, MetaHit } from '../../shared/types';
 
@@ -148,7 +149,8 @@ async function fetchSo360(kw: string): Promise<Array<{ title: string; img: strin
     headers: { accept: 'application/json', 'User-Agent': 'Mozilla/5.0 Win-Box/0.90', Referer: SO360_REFERER },
     headersTimeout: 10000,
     bodyTimeout: 10000,
-    dispatcher: agent,
+    // ★ 2026-09-25：有网络代理则优先走代理（统一出站口径，见 net/proxy.dispatchChain）
+    dispatcher: dispatchChain(url, agent)[0],
   });
   if (r.statusCode !== 200) {
     await r.body.dump().catch(() => undefined);

@@ -12,7 +12,6 @@ export interface PlayerInit {
   flag: string; // 线路
   episodes: { name: string; url: string }[];
   epIndex: number;
-  vipFlags?: string[];
   title: string; // 资源名（不含集）
   subtitleTitle?: string; // ★ 供字幕检索的剧名副名（详情页主标题，独立于集名）
   lastUrl: string; // 当前集解析出的真实地址

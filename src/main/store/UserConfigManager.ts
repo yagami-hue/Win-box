@@ -13,6 +13,7 @@ import { parseSiteConfig } from '../../engine/config/ApiConfigParser';
 import { parseLives } from '../../engine/config/LiveConfigParser';
 import type {
   Logger,
+  ParseBean,
   SiteConfig,
   SourceBean,
   SourceMoveDirection,
@@ -47,6 +48,7 @@ export function emptyUserConfig(): UserConfig {
     global: { spider: '', flags: [] },
     sources: [],
     lives: [],
+    parses: [],
     ui: { activeSourceKey: '', activeLiveIndex: 0 },
     profiles: [],
     activeProfileId: '',
@@ -58,6 +60,31 @@ function slug(s: string): string {
   return t || 'profile-' + Date.now().toString(36);
 }
 
+/**
+ * ★ 2026-09-24：取订阅里**真实**的解析接口列表（滤掉合成的「超级解析」type=4）。
+ *   理由：type=4 是本机内置解析（桌面版由 ParseService 的隐藏窗口嗅探承担），
+ *   若把它持久化，每次 config 往返（serializeImport → parseSiteConfig）都会被 parseParses
+ *   再 unshift 一遍 → 列表里越积越多重复项。
+ */
+export function realParses(parses: ParseBean[] | undefined): ParseBean[] {
+  return (parses || [])
+    .filter((p) => p && p.name && p.url && p.type !== 4)
+    .map((p) => ({ name: p.name, url: p.url, ext: p.ext || '', type: p.type }));
+}
+
+/** 持久化数据里的 parses 校验（逐条丢弃缺 name/url 的坏项；不注入超级解析） */
+function sanitizeParses(raw: unknown[]): ParseBean[] {
+  const out: ParseBean[] = [];
+  for (const e of raw) {
+    const o = (e ?? {}) as Record<string, unknown>;
+    const name = typeof o.name === 'string' ? o.name.trim() : '';
+    const url = typeof o.url === 'string' ? o.url.trim() : '';
+    if (!name || !url) continue;
+    out.push({ name, url, ext: typeof o.ext === 'string' ? o.ext : '', type: Number(o.type) || 0 });
+  }
+  return out;
+}
+
 /** 把解析后的订阅归一化为可离线重建的 JSON（parseSiteConfig 可再次解析） */
 export function serializeImport(parsed: SiteConfig): string {
   return JSON.stringify({
@@ -66,6 +93,7 @@ export function serializeImport(parsed: SiteConfig): string {
     flags: Array.isArray(parsed.flags) ? parsed.flags : [],
     sites: parsed.sites.map((s) => ({ ...s })),
     lives: parsed.lives.map((l) => ({ ...l })),
+    parses: realParses(parsed.parses),
   });
 }
 
@@ -142,6 +170,7 @@ export class UserConfigManager {
       global: { spider: parsed.spider || '', flags: Array.isArray(parsed.flags) ? [...parsed.flags] : [] },
       sources: parsed.sites.map((s) => ({ ...s })),
       lives: parsed.lives.map((l) => ({ ...l, header: l.header ? { ...l.header } : undefined })),
+      parses: realParses(parsed.parses),
       profiles: this.snap.profiles.map((p) =>
         p.id === this.snap.activeProfileId
           ? { ...p, apiUrl: apiUrl || p.apiUrl, json: serializeImport(parsed), sourceCount: parsed.sites.length, importedAt: new Date().toISOString() }
@@ -178,6 +207,7 @@ export class UserConfigManager {
           lives: this.snap.lives,
           spider: this.snap.global.spider,
           flags: this.snap.global.flags,
+          parses: this.snap.parses,
         };
     const p: UserProfile = {
       id: slug(name) + '-' + Date.now().toString(36).slice(-4),
@@ -198,6 +228,7 @@ export class UserConfigManager {
             global: { spider: parsed.spider || '', flags: Array.isArray(parsed.flags) ? [...parsed.flags] : [] },
             sources: parsed.sites.map((s) => ({ ...s })),
             lives: parsed.lives.map((l) => ({ ...l })),
+            parses: realParses(parsed.parses),
           }
         : {}),
     };
@@ -213,6 +244,7 @@ export class UserConfigManager {
       lives: this.snap.lives,
       spider: this.snap.global.spider,
       flags: this.snap.global.flags,
+      parses: this.snap.parses,
     };
     const p: UserProfile = {
       id: slug(name) + '-' + Date.now().toString(36).slice(-4),
@@ -244,6 +276,7 @@ export class UserConfigManager {
       global: { spider: parsed.spider || '', flags: Array.isArray(parsed.flags) ? [...parsed.flags] : [] },
       sources: parsed.sites.map((s) => ({ ...s })),
       lives: parsed.lives.map((l) => ({ ...l })),
+      parses: realParses(parsed.parses),
     };
     if (!next.sources.some((s) => s.key === next.ui.activeSourceKey)) next.ui.activeSourceKey = '';
     next.ui.activeLiveIndex = clampIndex(next.ui.activeLiveIndex, next.lives.length);
@@ -453,6 +486,7 @@ export class UserConfigManager {
       },
       sources,
       lives,
+      parses: sanitizeParses(Array.isArray((raw as { parses?: unknown })?.parses) ? ((raw as { parses: unknown[] }).parses) : []),
       ui: {
         activeSourceKey: typeof ui.activeSourceKey === 'string' ? ui.activeSourceKey : '',
         activeLiveIndex: clampIndex(typeof ui.activeLiveIndex === 'number' ? ui.activeLiveIndex : 0, lives.length),

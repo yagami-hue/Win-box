@@ -53,6 +53,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    *   60 张足够铺满一屏多，其余按需追加（配合图片懒加载，只有真的滚到才发请求）。
    */
   const [aggCap, setAggCap] = useState(60);
+  /** ★ 2026-09-25：全源搜索结果的「按源筛选」当前选中的源 key（'' = 全部） */
+  const [aggSrc, setAggSrc] = useState('');
   const keyRef = useRef('');
   /** ★ 运行时准备中的自动重搜计时器（见 doSearch：pendingSources > 0 时 25s 后自动重搜一次） */
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -549,6 +551,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       const acc: AggSearchInput[] = [];
       setAggProgress(null);
       setAggCap(60); // 新搜索：结果网格重新分页
+      setAggSrc(''); // 新搜索：按源筛选复位到「全部」（否则会筛住新结果）
       // ★ 进度节流（200ms 合并刷新）：33 个源逐条 setState 会让整屏结果重排几十次，
       //   「边搜边出」反而变成「界面卡着不动」——累计 + 定时合并，首屏仍是首个源完成即出。
       let progressed: { done: number; total: number; pending: number } | null = null;
@@ -643,6 +646,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     setWd('');
     setAggMode(false);
     setAgg(null);
+    setAggSrc('');
     uiMem.home.search = null;
     schedulePersist();
     const k = keyRef.current;
@@ -656,6 +660,25 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   };
 
   const failed = agg?.perSource.filter((p) => p.status === 'error') ?? [];
+  /**
+   * ★ 2026-09-25（用户要求）：全源搜索结果**顶部按源筛选** —— 只展示某个源的结果。
+   *   筛选条只在「全源搜索 + 命中 ≥2 个源」时出现（单源搜索时它没有意义）。
+   */
+  const aggSrcChips = (() => {
+    if (!agg || aggScope !== 'all') return [];
+    const n = new Map<string, number>();
+    for (const it of agg.items) n.set(it.sourceKey, (n.get(it.sourceKey) || 0) + 1);
+    return [...n.entries()]
+      .map(([k, cnt]) => ({ key: k, n: cnt, name: agg.perSource.find((p) => p.key === k)?.name || k }))
+      .sort((a, b) => b.n - a.n);
+  })();
+  /** 按源筛选后的结果（网格 / 计数 / 「显示更多」都用它） */
+  const aggView = aggSrc ? (agg?.items || []).filter((it) => it.sourceKey === aggSrc) : agg?.items || [];
+  /** 切换筛选 = 换一屏结果 → 分页计数复位 */
+  const pickAggSrc = (k: string): void => {
+    setAggSrc(k);
+    setAggCap(60);
+  };
   /** 当前源：站级样式（style=海报/列表）与预设分类（categories）随源切换生效 */
   const curSite = sites.find((s) => s.key === key) ?? (key ? undefined : sites[0]);
   const listStyle = !!curSite?.style && /list/i.test(curSite.style);
@@ -752,13 +775,37 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 )}
               </div>
 
-              {agg.items.length > 0 ? (
+              {/* ★ 按源筛选条（全源搜索命中 ≥2 源时出现）：点一下只看该源的结果 */}
+              {aggSrcChips.length > 1 && (
+                <div className="row" style={{ marginBottom: 10, flexWrap: 'wrap', rowGap: 6 }}>
+                  <span className="muted" style={{ fontSize: 12 }}>按源筛选：</span>
+                  <span
+                    className={`tag ${aggSrc === '' ? 'active' : ''}`}
+                    title={`全部源 · ${agg.items.length} 条`}
+                    onClick={() => pickAggSrc('')}
+                  >
+                    全部 {agg.items.length}
+                  </span>
+                  {aggSrcChips.map((c) => (
+                    <span
+                      key={c.key}
+                      className={`tag ${aggSrc === c.key ? 'active' : ''}`}
+                      title={`${c.name} · ${c.n} 条`}
+                      onClick={() => pickAggSrc(c.key)}
+                    >
+                      {c.name} {c.n}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {aggView.length > 0 ? (
                 <>
                   {/* 结果网格：★ 默认只渲染前 aggCap 张卡（33 源全源搜索常出上千条，
                       整屏 DOM 一多，每次进度刷新都要重排几百个 <img> → 界面「卡着不动」）；
                       「显示更多」按需追加，保证边搜边出的每次刷新都是毫秒级。 */}
                   <div className="grid">
-                    {agg.items.slice(0, aggCap).map((it) => (
+                    {aggView.slice(0, aggCap).map((it) => (
                       <AggCard
                         key={`${it.sourceKey}-${it.id}`}
                         it={it}
@@ -768,15 +815,19 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                       />
                     ))}
                   </div>
-                  {agg.items.length > aggCap && (
+                  {aggView.length > aggCap && (
                     <div style={{ textAlign: 'center', marginTop: 12 }}>
-                      <button onClick={() => setAggCap((n) => n + 240)}>显示更多（还有 {agg.items.length - aggCap} 条）</button>
+                      <button onClick={() => setAggCap((n) => n + 240)}>显示更多（还有 {aggView.length - aggCap} 条）</button>
                     </div>
                   )}
                 </>
               ) : (
                 <div className="empty">
-                  {aggScope === 'all' ? `全部源均无「${wd}」的匹配结果。` : `当前源无「${wd}」的匹配结果。`}
+                  {aggSrc
+                    ? `该源没有「${wd}」的匹配结果。`
+                    : aggScope === 'all'
+                      ? `全部源均无「${wd}」的匹配结果。`
+                      : `当前源无「${wd}」的匹配结果。`}
                   {agg.failedSources > 0 && (
                     <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
                       其中 {agg.failedSources} 个源查询出错，可能掩盖了结果，请参照下方异常列表重试或更换关键词。

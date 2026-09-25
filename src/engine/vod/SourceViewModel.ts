@@ -10,6 +10,7 @@ import { parseFilters, type SortClass } from '../parse/Movie';
 import { SpiderFactory, sourceTimeoutMs, type SpiderFactoryOptions } from '../spider/SpiderFactory';
 import type { Spider } from '../spider/Spider';
 import { parseEpisodes } from './VodNormalizer';
+import { normalizeVodId, normalizeVodPic, splitUrlHeaders } from './itemNormalize';
 import { fixDetailFields } from './detailFix';
 import { SourceProblemError, SOURCE_PROBLEM_TEXT } from '../spider/errors';
 import { sourceAvailability, type SourceAvailability } from './sourceAvailability';
@@ -170,23 +171,29 @@ export class SourceViewModel {
     const list = Array.isArray(o['list']) ? (o['list'] as Record<string, unknown>[]) : [];
     // ★ 字段名多键兜底（对齐 normalizeSpiderDetail）：部分 py 源/蜘蛛返回 `name`/`pic` 而非
     //   vod_name/vod_pic —— 缺失会让列表 name 空 → 首页 TMDB 封面补全不触发 → 长期无封面。
-    const items: VodItem[] = list.map((v) => ({
-      id: String(v['vod_id'] ?? v['id'] ?? ''),
-      name: String(v['vod_name'] ?? v['name'] ?? ''),
-      pic: String(
+    const items: VodItem[] = list.map((v) => {
+      const rawPic = String(
         v['vod_pic'] ??
           v['pic'] ??
           v['vod_pic_url'] ??
           v['video_pic'] ??
           (Array.isArray(v['vod_pic_thumb']) ? v['vod_pic_thumb'][0] : '') ??
           '',
-      ),
-      remarks: String(v['vod_remarks'] ?? v['remarks'] ?? ''),
-      year: String(v['vod_year'] ?? v['year'] ?? ''),
-      area: String(v['vod_area'] ?? v['area'] ?? ''),
-      type: String(v['type_name'] ?? v['type'] ?? ''),
-      sourceKey: key,
-    }));
+      );
+      const name = String(v['vod_name'] ?? v['name'] ?? '');
+      return {
+        // ★ 空 id → 片名兜底（片单类蜘蛛没有 vod_id；空串会让「按 id 记的坏图/补图/key」全塌到同一键）
+        id: normalizeVodId(v['vod_id'] ?? v['id'], name),
+        name,
+        // ★ 拆上游 `@Referer=…` 尾巴（否则图床 404 → 全列表封面坏 → 补图串到所有卡片）
+        pic: normalizeVodPic(rawPic),
+        remarks: String(v['vod_remarks'] ?? v['remarks'] ?? ''),
+        year: String(v['vod_year'] ?? v['year'] ?? ''),
+        area: String(v['vod_area'] ?? v['area'] ?? ''),
+        type: String(v['type_name'] ?? v['type'] ?? ''),
+        sourceKey: key,
+      };
+    });
     return {
       classes: classes.filter((c) => c.name && c.id), // 空 name 或空 id 均丢弃（空 id 无法发起分类请求）
       items,
@@ -416,15 +423,18 @@ export class SourceViewModel {
         }
       }
       const detail: VodDetail = {
-        id: String(v['vod_id'] ?? v['id'] ?? ''),
+        // ★ 空 id → 片名兜底、封面拆 `@Referer=` 尾巴（同列表页归一，见 parseSpiderJson）
+        id: normalizeVodId(v['vod_id'] ?? v['id'], v['vod_name'] ?? v['name']),
         name: String(v['vod_name'] ?? v['name'] ?? ''),
-        pic: String(
-          v['vod_pic'] ??
-            v['pic'] ??
-            v['vod_pic_url'] ??
-            v['video_pic'] ??
-            (Array.isArray(v['vod_pic_thumb']) ? v['vod_pic_thumb'][0] : '') ??
-            '',
+        pic: normalizeVodPic(
+          String(
+            v['vod_pic'] ??
+              v['pic'] ??
+              v['vod_pic_url'] ??
+              v['video_pic'] ??
+              (Array.isArray(v['vod_pic_thumb']) ? v['vod_pic_thumb'][0] : '') ??
+              '',
+          ),
         ), // ★ fty 等蜘蛛 detail 偶发把封面放在别名键，做兜底；列表页走同一归一（见 parseSpiderJson）
         type: String(v['type_name'] ?? ''),
         year: String(v['vod_year'] ?? ''),
@@ -473,11 +483,14 @@ export class SourceViewModel {
         ? (rec['url'] as unknown[])
         : null;
     if (arr) {
+      const resolvedArr = arr.map((u) => this.resolvePlayUrl(String(u ?? ''), undefined));
+      const arrHdr = resolvedArr.find((r) => r.header)?.header;
       return {
         parse: 0,
-        url: arr.map((u) => this.resolvePlayUrl(String(u ?? ''), undefined).url).join('#'),
+        url: resolvedArr.map((r) => r.url).join('#'),
         playUrl,
         flag,
+        ...(arrHdr ? { header: arrHdr } : {}),
       };
     }
     const o = (rec ?? {}) as Record<string, unknown>;
@@ -487,12 +500,14 @@ export class SourceViewModel {
         ? undefined
         : Number(o['parse']) || 0;
     const resolved = this.resolvePlayUrl(String(o['url'] ?? ''), declared);
+    // ★ 蜘蛛显式 header 优先，其次才是地址尾巴 `@Referer=…` 拆出来的头
+    const hdr = { ...(resolved.header || {}), ...(this.normalizePlayHeader(o['header'] ?? o['headers']) || {}) };
     return {
       parse: resolved.parse,
       url: resolved.url,
       playUrl,
       flag,
-      header: this.normalizePlayHeader(o['header'] ?? o['headers']),
+      ...(Object.keys(hdr).length ? { header: hdr } : {}),
       message: [String(o['msg'] ?? ''), resolved.hint].filter(Boolean).join('；') || undefined,
       jx:
         o['jx'] === undefined || o['jx'] === null || o['jx'] === ''
@@ -502,27 +517,38 @@ export class SourceViewModel {
   }
 
   /**
-   * 单个播放 url 的归一：video:// / proxy:// 前缀语义。
+   * 单个播放 url 的归一：`@Referer=…` 约定尾巴 + video:// / proxy:// 前缀语义。
    * declaredParse 为蜘蛛显式 parse 声明（undefined = 未声明，由前缀推断）。
    */
   private resolvePlayUrl(
     raw: string,
     declaredParse: number | undefined,
-  ): { url: string; parse: number; hint?: string } {
-    if (raw.startsWith('video://')) {
+  ): { url: string; parse: number; hint?: string; header?: Record<string, string> } {
+    // ★ 上游约定：`url@Referer=…@User-Agent=…` → 拆出真实地址 + 取流所需请求头
+    //   （头由 SpiderHost 经 /play 中继注入；不拆则整串当地址 → 取流必失败）
+    const split = splitUrlHeaders(raw);
+    const url = split.url;
+    const header = Object.keys(split.headers).length
+      ? {
+          ...(split.headers.referer ? { Referer: split.headers.referer } : {}),
+          ...(split.headers['user-agent'] ? { 'User-Agent': split.headers['user-agent'] } : {}),
+          ...(split.headers.cookie ? { Cookie: split.headers.cookie } : {}),
+        }
+      : undefined;
+    if (url.startsWith('video://')) {
       // 蜘蛛显式 parse 声明优先，仅未声明时才由前缀推断 parse=1
-      return { url: raw.slice('video://'.length), parse: declaredParse ?? 1 };
+      return { url: url.slice('video://'.length), parse: declaredParse ?? 1, header };
     }
-    if (raw.startsWith('proxy://')) {
-      const rest = raw.slice('proxy://'.length);
+    if (url.startsWith('proxy://')) {
+      const rest = url.slice('proxy://'.length);
       if (rest.startsWith('do=live')) {
         // 本地直播/代理资源 → 本地代理 HTTP 路由（与安卓同端口同路由 do=live）
-        return { url: `${LOCAL_PROXY_BASE}/proxy?${rest}`, parse: declaredParse ?? 0 };
+        return { url: `${LOCAL_PROXY_BASE}/proxy?${rest}`, parse: declaredParse ?? 0, header };
       }
       // 其它 do= 路由桌面版本地代理不识别 → 原样保留 + parse=0 + message 提示
-      return { url: raw, parse: 0, hint: '该源需要蜘蛛本地代理路由（桌面版未实现）' };
+      return { url, parse: 0, hint: '该源需要蜘蛛本地代理路由（桌面版未实现）', header };
     }
-    return { url: raw, parse: declaredParse ?? 0 };
+    return { url, parse: declaredParse ?? 0, header };
   }
 
   /** header/headers 备用键 → 值统一 String 化；对象与 JSON 字符串两形态都收，其余丢弃 */

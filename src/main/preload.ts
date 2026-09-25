@@ -61,7 +61,7 @@ const api = {
       ipcRenderer.on(IPC.VOD_SEARCH_ALL_PROGRESS, l);
       return () => { ipcRenderer.removeListener(IPC.VOD_SEARCH_ALL_PROGRESS, l); };
     },
-    play: (a: { key: string; flag: string; id: string; vipFlags: string[] }) => invoke(IPC.VOD_PLAY, a),
+    play: (a: { key: string; flag: string; id: string }) => invoke(IPC.VOD_PLAY, a),
   },
   live: {
     load: (index: number) => invoke(IPC.LIVE_LOAD, index),
@@ -121,6 +121,9 @@ const api = {
       ipcRenderer.on('net:speed', l);
       return () => ipcRenderer.removeListener('net:speed', l);
     },
+    // ★ 网络代理设置（DNS 污染 / SNI 阻断站点用）
+    proxyGet: () => invoke(IPC.PROXY_GET),
+    proxySet: (patch: { enabled?: boolean; url?: string }) => invoke(IPC.PROXY_SET, patch),
   },
   player: {
     open: (init: unknown) => invoke(IPC.PLAYER_OPEN, init),

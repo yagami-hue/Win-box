@@ -16,10 +16,19 @@ import type { Logger } from '../../shared/types';
 import { LOCAL_PROXY_BASE, LOCAL_PROXY_PORT } from '../../shared/constants';
 import { userDataDir, cacheDir } from '../util/paths';
 import { createDohAgent } from '../net/DnsResolver';
+import { dispatchChain } from '../net/proxy';
 
 const agent = new Agent({ connect: { timeout: 30000 } });
 /** 出图中继专用（TMDB 图床经 DoH 可达；渲染层直连可能被 DNS 污染 → 图裂） */
 const imgAgent = createDohAgent();
+
+/**
+ * ★ 2026-09-25：出站 dispatcher 链 —— 用户设的**网络代理**（非本机目标）优先，其次 DoH，最后直连。
+ * `/img`（封面）与 `/play`（取流）的源站请求都走这里，保证被 DNS 污染 / TLS SNI 阻断的站点在代理下可用。
+ */
+function outboundDispatchers(targetUrl: string): Array<Agent | import('undici').ProxyAgent> {
+  return dispatchChain(targetUrl, imgAgent, agent);
+}
 
 // ★ 并发回源聚合参数：夸克单连接被限速，多连接并发可叠加带宽。
 //   每片 512KB、一次 8 个并发回源、纯利用 Range。太小(<1MB)的请求不值得并发。
@@ -106,7 +115,7 @@ private imgProxy(u: URL, res: ServerResponse): void {
   push('');
   void (async () => {
     for (const r of refs) {
-      for (const dispatcher of [imgAgent, agent]) {
+      for (const dispatcher of outboundDispatchers(target)) {
         try {
           const headers: Record<string, string> = { accept: 'image/*', 'User-Agent': 'Mozilla/5.0 Win-Box/0.86' };
           if (r) headers.Referer = r;
@@ -518,13 +527,15 @@ private imgProxy(u: URL, res: ServerResponse): void {
   ): Promise<{ status: number; headers: Record<string, unknown>; body: import('undici').Dispatcher.ResponseData['body']; finalUrl: string }> {
     let cur = url;
     for (let i = 0; i <= 10; i++) {
+      // ★ 取流也走代理链（被 DNS 污染 / SNI 阻断的源站在代理下才可播）
+      const dispatchers = outboundDispatchers(cur);
       const r = await undiciRequest(cur, {
         method: 'GET',
         headers: { 'User-Agent': 'Mozilla/5.0 TVBoxWin/0.1', ...headers },
         headersTimeout: 30000,
         // 媒体流放行（不设 bodyTimeout/用大值），避免慢下载中途被 undici 截断成"半条流"
         bodyTimeout: 0,
-        dispatcher: agent,
+        dispatcher: dispatchers[0],
       });
       const loc = r.headers['location'];
       if (r.statusCode >= 300 && r.statusCode < 400 && loc && i < 10) {
@@ -549,7 +560,8 @@ private imgProxy(u: URL, res: ServerResponse): void {
         headers: { 'User-Agent': 'Mozilla/5.0 TVBoxWin/0.1', ...headers },
         headersTimeout: 30000,
         bodyTimeout: 30000,
-        dispatcher: agent,
+        // ★ 同 openStream：走代理链（字幕/封面等小文件抓取同理）
+        dispatcher: outboundDispatchers(cur)[0],
       });
       const loc = r.headers['location'];
       if (r.statusCode >= 300 && r.statusCode < 400 && loc && i < 10) {

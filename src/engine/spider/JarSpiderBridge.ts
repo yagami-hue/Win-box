@@ -33,6 +33,13 @@ export interface JarBridgeOptions {
    * 联网即可用、离线降级为 PY_UNSUPPORTED。缺省未配置则 .py 源降级。
    */
   pyRuntimeDir?: string;
+  /**
+   * ★ 2026-09-25：**网络代理**注入点（由宿主提供，引擎保持平台无关）。
+   *   返回 JVM 参数（`-Dhttp.proxyHost=…` 等）与子进程环境变量（`HTTP_PROXY` 等）；
+   *   蜘蛛自己的 HTTP 请求走代理，才能访问被 DNS 污染 / TLS SNI 阻断的站点。
+   *   每次调用现取（用户改了设置即时生效，无需重启）。
+   */
+  proxyProvider?: () => { jvmArgs: string[]; env: Record<string, string> };
 }
 
 /** 类缺失兜底重试时最多追加的缓存 jar 数（防一次拼进几十只 jar 把类加载顺序搅乱） */
@@ -45,6 +52,8 @@ export class JarSpiderBridge {
   private readonly callTimeoutMs: number;
   private readonly shellShimClasses?: string;
   private readonly pyRuntimeDir?: string;
+  /** ★ 网络代理注入点（宿主提供；空 = 不走代理） */
+  private readonly proxyProvider?: () => { jvmArgs: string[]; env: Record<string, string> };
   /** jar URL → 转换后 jar 本地路径（进程内缓存） */
   private converted = new Map<string, string>();
   private convertLocks = new Map<string, Promise<string>>();
@@ -76,6 +85,7 @@ export class JarSpiderBridge {
     this.callTimeoutMs = opts.callTimeoutMs ?? 20000;
     this.shellShimClasses = opts.shellShimClasses;
     this.pyRuntimeDir = opts.pyRuntimeDir;
+    this.proxyProvider = opts.proxyProvider;
     mkdirSync(this.cacheDir, { recursive: true });
     // ★ 老版本留下的转换产物可能缺 assets（v1 格式）→ 必须作废重转，否则本轮修复不生效
     this.ensureCacheVersion();
@@ -585,7 +595,7 @@ export class JarSpiderBridge {
       const key = servePoolKey(this.javaExe(), serveArgv);
       const tmo = timeoutMs ?? this.callTimeoutMs;
       try {
-        const r = await this.poolSubmit(this.javaExe(), key, serveArgv, className, method, args, undefined, tmo);
+        const r = await this.poolSubmit(this.javaExe(), key, serveArgv, className, method, args, this.proxyProvider?.().env ?? {}, tmo);
         if (r.ok) return r.data;
         // ★ 2026-09-23：**执行超时不回退一次性** —— 超时说明蜘蛛/源站卡住，
         //   立刻再跑一遍一次性只会再等一个满超时（实测死源从 15s 变 30s，全源搜索因此翻倍慢）。
@@ -627,9 +637,10 @@ export class JarSpiderBridge {
     //   语义同 JVM：仅传输层失败回退一次性，空结果是合法结果。
     if (this.pool) {
       const serveArgv = [runner, '-serve', pyPath, clsName];
-      const key = servePoolKey(pyExe, serveArgv, { PYTHONIOENCODING: 'utf-8' });
+      const pyEnv = { PYTHONIOENCODING: 'utf-8', ...(this.proxyProvider?.().env ?? {}) };
+      const key = servePoolKey(pyExe, serveArgv, pyEnv);
       try {
-        const r = await this.poolSubmit(pyExe, key, serveArgv, clsName, method, args, { PYTHONIOENCODING: 'utf-8' }, timeoutMs ?? 100000);
+        const r = await this.poolSubmit(pyExe, key, serveArgv, clsName, method, args, pyEnv, timeoutMs ?? 100000);
         if (r.ok) return r.data;
       } catch {
         /* 池异常 → 回退一次性 */
@@ -897,6 +908,8 @@ export class JarSpiderBridge {
       '-Dfile.encoding=UTF-8',
       '-Dsun.stdout.encoding=UTF-8',
       '-Dsun.stderr.encoding=UTF-8',
+      // ★ 网络代理（用户设置；空则不追加，argv 与历史完全一致）
+      ...(this.proxyProvider?.().jvmArgs ?? []),
       '-cp', cp,
     ];
   }
@@ -911,10 +924,12 @@ export class JarSpiderBridge {
     env?: Record<string, string>,
   ): Promise<string> {
     return new Promise<string>((resolve) => {
+      // ★ 网络代理环境变量（Python 蜘蛛/子进程的 requests 等会读它；JVM 侧另由 -D 参数负责）
+      const proxyEnv = this.proxyProvider?.().env ?? {};
       const child = spawn(exe, argv, {
         windowsHide: true,
         timeout: timeoutMs ?? this.callTimeoutMs,
-        ...(env ? { env: { ...process.env, ...env } } : {}),
+        env: { ...process.env, ...proxyEnv, ...(env || {}) },
       });
       let out = '';
       let err = '';

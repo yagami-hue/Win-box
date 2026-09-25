@@ -14,7 +14,6 @@ export interface PlayerInitData {
   flag: string;
   episodes: { name: string; url: string }[];
   epIndex: number;
-  vipFlags?: string[];
   title: string;
   subtitleTitle?: string;
   lastUrl: string;
@@ -33,6 +32,8 @@ export default function PlayerPage() {
   const [driveBind, setDriveBind] = useState<string | null>(null);
   // 小窗口模式（主进程改窗口尺寸后广播同步）
   const [mini, setMini] = useState(false);
+  /** ★ 2026-09-24：parse=1 且自动解析失败时的原因提示（上屏，替代原来的静默黑屏） */
+  const [parseMsg, setParseMsg] = useState('');
   const loadingRef = useRef(false);
 
   // 解析并播放指定集
@@ -48,13 +49,16 @@ export default function PlayerPage() {
     setEpIndex(idx);
     setCurName(display);
     try {
-      const r = await client.play({ key: d.key, flag: d.flag, id: target.url, vipFlags: d.vipFlags || [] });
+      const r = await client.play({ key: d.key, flag: d.flag, id: target.url });
       setDriveBind(r.needDriveCookieBind || null);
       if (r.parse === 1) {
-        // 需要网页解析的地址无法在独立窗口内嗅探，回退到原始地址（可能黑屏但保底可播）
+        // 主进程已尽力做「解析接口 → 隐藏窗口嗅探」，仍拿不到直连地址：
+        // 上屏原因（r.message），同时保底播放原始地址（个别站点直链其实能直连）
+        setParseMsg(r.message || '该播放地址需要网页解析，未能自动解析出直连地址');
         setActiveUrl(target.url);
         return;
       }
+      setParseMsg('');
       setActiveUrl(r.url || target.url);
     } catch {
       setActiveUrl(target.url);
@@ -202,24 +206,31 @@ export default function PlayerPage() {
           onMiniToggle={() => void client.playerSetMini(!mini)}
         />
       )}
-      <div style={{ flex: 1, display: 'flex' }}>
-        {activeUrl && !loadingRef.current ? (
-          <VideoPlayer
-            url={activeUrl}
-            resourceName={curName}
-            danmakuTitle={((init?.subtitleTitle || init?.title) || '').trim()}
-            driveBindProvider={driveBind}
-            // ★ 历史续播：进度以历史记录为准（新直链与 playTime 旧键不匹配，须显式传入）
-            startTime={init?.startTime || 0}
-            canPrev={canPrev}
-            canNext={canNext}
-            onPrev={() => goEp(epIndex - 1)}
-            onNext={() => goEp(epIndex + 1)}
-            mini={mini}
-          />
-        ) : (
-          <div className="empty">等待播放…</div>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        {parseMsg && (
+          <div className="err" style={{ margin: '8px 12px 0', fontSize: 12 }} title={parseMsg}>
+            {parseMsg}
+          </div>
         )}
+        <div style={{ flex: 1, display: 'flex' }}>
+          {activeUrl && !loadingRef.current ? (
+            <VideoPlayer
+              url={activeUrl}
+              resourceName={curName}
+              danmakuTitle={((init?.subtitleTitle || init?.title) || '').trim()}
+              driveBindProvider={driveBind}
+              // ★ 历史续播：进度以历史记录为准（新直链与 playTime 旧键不匹配，须显式传入）
+              startTime={init?.startTime || 0}
+              canPrev={canPrev}
+              canNext={canNext}
+              onPrev={() => goEp(epIndex - 1)}
+              onNext={() => goEp(epIndex + 1)}
+              mini={mini}
+            />
+          ) : (
+            <div className="empty">等待播放…</div>
+          )}
+        </div>
       </div>
     </>
   );

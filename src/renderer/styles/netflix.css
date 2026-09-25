@@ -201,14 +201,16 @@
    保证一排封面视觉尺寸完全一致（用户反馈「部分封面特别大」）。 */
 :root[data-theme='netflix'] .rec-row > .card-media:hover { transform: translateY(-2px); }
 
-/* ---- 详情页：封面当全宽背景 + 渐变，标题巨大化 ---- */
+/* ---- 详情页：**横版剧照轮播**当全宽背景（与首页 Hero 同一套图与交互）+ 渐变，标题巨大化 ---- */
 :root[data-theme='netflix'] .content.nf-detail-wrap { position: relative; }
 .nf-detail-backdrop {
   position: absolute; left: -26px; right: -26px; top: 0; height: 430px; pointer-events: none;
-  background-size: cover; background-position: center 20%;
+  overflow: hidden; background: #000;
   mask-image: linear-gradient(to bottom, rgba(0, 0, 0, .95) 0%, rgba(0, 0, 0, .45) 55%, transparent 100%);
   -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, .95) 0%, rgba(0, 0, 0, .45) 55%, transparent 100%);
 }
+/* 剧照层由 HeroBackdrop 渲染（.nf-hero-bg：绝对定位铺满 + opacity 交叉淡入淡出，见 components/HeroBackdrop.tsx） */
+.nf-detail-backdrop .nf-hero-bg { background-position: center 22%; }
 .nf-detail-backdrop::after { content: ''; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(20, 20, 20, .95) 0%, rgba(20, 20, 20, .6) 55%, rgba(20, 20, 20, .3) 100%); }
 :root[data-theme='netflix'] .content.nf-detail-wrap > * { position: relative; z-index: 1; }
 :root[data-theme='netflix'] .nf-detail-wrap h2 { font-size: 34px; font-weight: 800; letter-spacing: -.01em; }

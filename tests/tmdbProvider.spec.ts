@@ -41,6 +41,49 @@ describe('parseTmdbImages', () => {
     expect(parseTmdbImages({})).toEqual({ backdrops: [], posters: [] });
     expect(parseTmdbImages({ backdrops: 'x', posters: null })).toEqual({ backdrops: [], posters: [] });
   });
+
+  // ★ 2026-09-25（用户报「竖版图被裁剪」）：backdrops 里混有竖版图（上传时标错类型）
+  //   → 横版用途必须按 宽/高 过滤，否则铺满横向区域时被裁得只剩中间一条。
+  it('竖版图（宽/高 < 1.3）被过滤掉，只留横版', () => {
+    const r = parseTmdbImages({
+      backdrops: [
+        { file_path: '/portrait.jpg', width: 1920, height: 3000, vote_average: 9 }, // 竖版：即便更宽更高也更该丢
+        { file_path: '/wide.jpg', width: 1920, height: 1080, vote_average: 1 },
+      ],
+    });
+    expect(r.backdrops).toEqual(['/wide.jpg']);
+  });
+
+  it('缺 height 的条目按「不可判横版」处理 → 不用于背景', () => {
+    const r = parseTmdbImages({ backdrops: [{ file_path: '/x.jpg', width: 1920, vote_average: 9 }] });
+    expect(r.backdrops).toEqual([]);
+  });
+});
+
+// ★ 2026-09-25：`backdrop_path` 是**保证横版**的剧照 —— 详情页背景取不到 backdrops 时用它兜底
+describe('parseTmdbSearch / toDiscoverItems — 带出横版剧照', () => {
+  it('results[].backdrop_path → MetaHit.backdrop（w1280，基址去尺寸后缀）', () => {
+    const hits = parseTmdbSearch(
+      { results: [{ id: 550, title: '搏击俱乐部', poster_path: '/p.jpg', backdrop_path: '/b.jpg', overview: 'x' }] },
+      'movie',
+    );
+    expect(hits[0].poster).toBe('https://image.tmdb.org/t/p/w342/p.jpg');
+    expect(hits[0].backdrop).toBe('https://image.tmdb.org/t/p/w1280/b.jpg');
+  });
+
+  it('无 backdrop_path → 不带该字段（不产生空串兜底）', () => {
+    const hits = parseTmdbSearch({ results: [{ id: 1, title: 'A', poster_path: '/p.jpg', overview: 'x' }] }, 'movie');
+    expect(hits[0].backdrop).toBeUndefined();
+  });
+
+  it('toDiscoverItems：backdrop 走本地 /img 中继', () => {
+    const items = toDiscoverItems(
+      { results: [{ id: 1, title: 'A', poster_path: '/p.jpg', backdrop_path: '/b.jpg', overview: 'x' }] },
+      'movie',
+    );
+    expect(items[0].backdrop).toContain('/img?u=');
+    expect(decodeURIComponent(items[0].backdrop || '')).toContain('https://image.tmdb.org/t/p/w1280/b.jpg');
+  });
 });
 
 // ★ 2026-09-24：TMDb 命中「实质同名」校验（防误匹配 → 补出来的封面/演职员全是错的）
