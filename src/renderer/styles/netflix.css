@@ -150,7 +150,11 @@
 
 /* ---- 发现页：Hero（横版剧照轮播 + 文字处高斯模糊层）+ 内容行 ---- */
 .nf-hero {
-  position: relative; margin: -6px -26px 22px; min-height: 380px;
+  position: relative; margin: -6px -26px 22px;
+  /* ★ 2026-09-25（用户报「横版剧照还是被裁，《蜘蛛侠》只剩半张脸」）：Hero 高度不再固定 380px，
+     改为**随窗口尺寸放大** —— 46vw 让高度接近 16:9 剧照所需高度（旧值仅够显示剧照的约一半，
+     竖向上被裁掉一半，居中偏上的人物只剩半张脸）；74vh 封顶保证首屏仍能看到下方内容行。 */
+  height: min(46vw, 74vh); min-height: 360px;
   display: flex; align-items: flex-end; overflow: hidden;
   background: #000;
 }
