@@ -179,10 +179,10 @@ export default function DiscoverPage() {
             还没有导入任何源 —— <button style={{ flex: '0 0 auto' }} onClick={() => nav('/config')}>去导入源</button>
           </div>
         )}
-        {/* ---- Netflix Hero：横版剧照轮播（交叉淡入淡出）+ 文字处高斯模糊层 ---- */}
+        {/* ---- Netflix Hero：**满屏**横版剧照轮播（保持比例完整显示 + 比例外模糊填充）---- */}
         {nf && hero && !gSel && (
           <div className="nf-hero">
-            <HeroBackdrop urls={heroBgs} />
+            <HeroBackdrop urls={heroBgs} fit="contain" />
             <div className="nf-hero-body" key={`${hero.title}-${hero.year || ''}`}>
               <div className="nf-hero-kicker">WIN-BOX 精选</div>
               <h1 className="nf-hero-title">{hero.title}</h1>

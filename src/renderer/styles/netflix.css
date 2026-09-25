@@ -36,6 +36,9 @@
   --nf-green: #46d369;
   --nf-teal: #54b9c5;
   --nf-card-w: 176px;
+  /* ★ 2026-09-25：顶部导航实测总高（padding 10+14 + 内容 40）—— Hero 满屏按它扣除；
+     改导航内边距/字号时需同步本值（发现页 Hero 会立刻在下方露白）。 */
+  --nf-nav-h: 64px;
 }
 
 /* ---- 全局：纯黑舞台 + Netflix Sans 回退栈（UI 不抢内容） ---- */
@@ -149,12 +152,12 @@
 :root[data-theme='netflix'] ::-webkit-scrollbar-track { background: transparent; }
 
 /* ---- 发现页：Hero（横版剧照轮播 + 文字处高斯模糊层）+ 内容行 ---- */
+/* ★ 2026-09-25（用户定稿）：Hero **满屏** —— 高度 = 视口 − 顶部导航（--nf-nav-h），下方不再留空，
+   内容行用滚轮往下滑；剧照保持比例**完整显示**（contain），比例之外的区域用同一张图放大模糊填充
+   （见 HeroBackdrop 的 fit="contain"：`.nf-hero-fill` 模糊铺底 + `.nf-hero-fg` 清晰居中）。 */
 .nf-hero {
-  position: relative; margin: -6px -26px 22px;
-  /* ★ 2026-09-25（用户报「横版剧照还是被裁，《蜘蛛侠》只剩半张脸」）：Hero 高度不再固定 380px，
-     改为**随窗口尺寸放大** —— 46vw 让高度接近 16:9 剧照所需高度（旧值仅够显示剧照的约一半，
-     竖向上被裁掉一半，居中偏上的人物只剩半张脸）；74vh 封顶保证首屏仍能看到下方内容行。 */
-  height: min(46vw, 74vh); min-height: 360px;
+  position: relative; margin: -4px -26px 22px;
+  height: calc(100vh - var(--nf-nav-h)); min-height: 420px;
   display: flex; align-items: flex-end; overflow: hidden;
   background: #000;
 }
@@ -162,6 +165,15 @@
   position: absolute; inset: 0; background-size: cover; background-position: center 28%;
   filter: saturate(1.05);
   /* ★ 2026-09-24：剧照切换 = 交叉淡入淡出（前一张淡出、后一张淡入同时进行，无中间空帧） */
+  transition: opacity .9s ease;
+  will-change: opacity;
+}
+/* 模糊铺底层（仅 Hero 满屏模式）：同一张图 cover 放大 + 模糊，填满 contain 留出的比例外区域 */
+.nf-hero-fill { filter: blur(32px) saturate(1.15) brightness(.8); transform: scale(1.2); }
+/* 清晰层（仅 Hero 满屏模式）：保持比例完整显示，绝不裁切 */
+.nf-hero-fg {
+  position: absolute; inset: 0;
+  background-size: contain; background-position: center; background-repeat: no-repeat;
   transition: opacity .9s ease;
   will-change: opacity;
 }
