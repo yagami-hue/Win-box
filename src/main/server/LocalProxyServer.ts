@@ -17,6 +17,7 @@ import { LOCAL_PROXY_BASE, LOCAL_PROXY_PORT } from '../../shared/constants';
 import { userDataDir, cacheDir } from '../util/paths';
 import { createDohAgent } from '../net/DnsResolver';
 import { dispatchChain } from '../net/proxy';
+import { mergeSetCookies, setCookieList, cookiePairOf } from '../net/cookieMerge';
 
 const agent = new Agent({ connect: { timeout: 30000 } });
 /** 出图中继专用（TMDB 图床经 DoH 可达；渲染层直连可能被 DNS 污染 → 图裂） */
@@ -46,17 +47,57 @@ export class LocalProxyServer {
   private server?: ReturnType<typeof createServer>;
   /** 实时网速回调（KB/s）：主进程注入后即可把真实转发字节推给渲染层显示 */
   onSpeed?: (kbs: number) => void;
+  /**
+   * ★ 2026-09-26：蜘蛛 JVM 内宿主代理被访问的回调（主进程注入 → 把该 JVM「钉住」）。
+   *   壳/蜘蛛的 `<entry>?do=proxy&key=…` 播放地址指向本机 9978 的 `/proxy/<jvmPort>`，
+   *   key 只有那个 JVM 能解，所以这里要做一次本机转发；转发的同时通知池别回收它，否则播放中段断流。
+   */
+  onSpiderProxy?: (port: number) => void;
+  /**
+   * ★ 2026-09-26：网盘播放会话 Cookie jar（provider → 上游下发的 `k=v` 键值行）。
+   *   上游直链/清单响应会刷新 `__puus` 等会话 cookie，必须与账号 cookie 一起用；
+   *   否则分片请求仍带旧值 → 中途 401/403 断流（用户报「UC 没会员播放要两个 cookie」）。
+   *   仅内存态（一次播放会话内有效），上限 20 条防无限增长。
+   */
+  private playCookieJar = new Map<string, string[]>();
 
   constructor(private logger: Logger, private driveTokens?: () => Record<string, string>) {}
+
+  /** 把 jar 里记下的 Set-Cookie 键值合并进本次请求的 Cookie（无记录则原样返回） */
+  private applyPlayCookieJar(provider: string, base: string): string {
+    const pairs = this.playCookieJar.get(provider);
+    return pairs && pairs.length ? mergeSetCookies(base, pairs) : base;
+  }
+
+  /** 记录上游响应里的 Set-Cookie（同名覆盖，保留最近 20 条） */
+  private rememberPlaySetCookies(provider: string, headers: Record<string, unknown>): void {
+    const lines = setCookieList(headers['set-cookie']);
+    if (!lines.length) return;
+    const keep = (this.playCookieJar.get(provider) || []).slice();
+    for (const line of lines) {
+      const kv = cookiePairOf(line);
+      if (kv) keep.push(`${kv[0]}=${kv[1]}`);
+    }
+    this.playCookieJar.set(provider, keep.slice(-20));
+  }
 
   start(): Promise<void> {
     return new Promise((resolve) => {
       this.server = createServer((req, res) => this.handle(req, res));
+      // ★ 2026-09-26 真 bug 修复：端口被占用时**必须让 Promise 落定**——旧实现只在 error 里记日志，
+      //   `await proxy.start()`（main/index.ts）会永久挂起 → registerIpc / createWindow 全都不执行
+      //   → 应用"静默不启动"（无窗口、无报错弹窗，进程却在）。这里降级为「本地中继不可用」继续启动。
+      let settled = false;
+      const done = () => { if (!settled) { settled = true; resolve(); } };
+      this.server.on('error', (e) => {
+        this.logger.e(`proxy 监听失败（${LOCAL_PROXY_PORT} 端口占用？本地中继不可用：直播归一化 / /play / /img 会失效）`, e);
+        try { this.server?.close(); } catch { /* ignore */ }
+        done();
+      });
       this.server.listen(LOCAL_PROXY_PORT, '127.0.0.1', () => {
         this.logger.i(`proxy: 监听 127.0.0.1:${LOCAL_PROXY_PORT}`);
-        resolve();
+        done();
       });
-      this.server.on('error', (e) => this.logger.e('proxy 监听失败（可能端口占用）', e));
     });
   }
 
@@ -64,9 +105,57 @@ export class LocalProxyServer {
     this.server?.close();
   }
 
+  /**
+   * ★ 2026-09-26：`/proxy/<jvmPort>?do=proxy&key=…` → 蜘蛛 JVM 内的宿主代理。
+   *   key→真实 url/headers 的静态表在**那个 JVM** 里，只有它能解；本机转发 + 顺带钉住该进程。
+   *   本机目标一律直连（绝不走用户代理/DoH）。
+   */
+  private async spiderJvmProxy(u: URL, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const port = Number(u.pathname.slice('/proxy/'.length));
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('bad jvm proxy port');
+      return;
+    }
+    try {
+      this.onSpiderProxy?.(port);
+    } catch {
+      /* 钉住失败不影响转发 */
+    }
+    const target = `http://127.0.0.1:${port}/proxy${u.search}`;
+    try {
+      const up = await undiciRequest(target, {
+        method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+        dispatcher: agent,
+        headersTimeout: 30000,
+        bodyTimeout: 0, // 媒体流可能很长：不做 body 超时
+      });
+      const outHeaders: Record<string, string> = {};
+      for (const k of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+        const v = up.headers[k];
+        if (typeof v === 'string') outHeaders[k.replace(/(^|-)([a-z])/g, (_m, a, b) => a + b.toUpperCase())] = v;
+      }
+      outHeaders['Access-Control-Allow-Origin'] = '*';
+      res.writeHead(up.statusCode, outHeaders);
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+      for await (const chunk of up.body) res.write(chunk as Buffer);
+      res.end();
+    } catch (e) {
+      this.logger.w(`proxy: 蜘蛛 JVM 本地代理不可达（127.0.0.1:${port}）：${(e as Error).message}`);
+      res.writeHead(502, { 'Content-Type': 'text/plain' });
+      res.end('spider jvm proxy unreachable');
+    }
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const u = new URL(req.url || '', `http://127.0.0.1:${LOCAL_PROXY_PORT}`);
+      if (u.pathname.startsWith('/proxy/')) {
+        return this.spiderJvmProxy(u, req, res);
+      }
       if (u.pathname === '/proxy' && u.searchParams.get('do') === 'live') {
         return this.liveProxy(u, res);
       }
@@ -228,6 +317,10 @@ private imgProxy(u: URL, res: ServerResponse): void {
         return;
       }
     }
+    // ★ 2026-09-26：网盘会话 Cookie 合并 —— 上游（取流/清单）下发的 Set-Cookie 里有**刷新后的
+    //   `__puus`**，必须与账号 cookie（`__pus` 等）一起用于后续分片；否则中途 401/403 断流
+    //   （用户报「UC 没会员播放似乎要两个 cookie」）。本会话内按 provider 记忆合并结果。
+    if (ck) cookie = this.applyPlayCookieJar(ck, cookie);
     if (cookie) headers['Cookie'] = cookie;
     // ★ 转发客户端（<video>/HLS）发来的 Range 字节范围请求，让上游返回 206 分段；
     //   否则拿整段大文件 + 无 Content-Length 的 200，Chromium 播放器无法定位/拉流 → 永远"缓冲中"。
@@ -235,6 +328,8 @@ private imgProxy(u: URL, res: ServerResponse): void {
     if (range) headers['Range'] = Array.isArray(range) ? range[0] : String(range);
 
     const resp = await this.openStream(target, headers);
+    // 上游 Set-Cookie（刷新后的 __puus 等）→ 记入本会话 cookie jar，供后续分片/清单请求使用
+    if (ck) this.rememberPlaySetCookies(ck, resp.headers);
     const ct = (resp.headers['content-type'] as string | undefined) || 'application/octet-stream';
     // ★ 2026-09-23 修复 py 源「视频无法播放」：清单判定不能只看 Content-Type，
     //   且**相对地址必须以「302 之后的最终地址」为基准**重写。

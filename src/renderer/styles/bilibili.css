@@ -120,11 +120,12 @@
   background: rgba(0, 174, 236, .18); border: 2px solid rgba(255, 255, 255, .9); color: #fff;
   transition: transform .2s ease-in-out, background .2s ease-in-out;
 }
-:root[data-theme='bilibili'] .vp-big:hover { transform: scale(1.06); background: var(--b-blue); border-color: transparent; }
+/* ★ hover 必须保留 translate(-50%,-50%)（同 netflix 主题：缺了会跳走半个身位） */
+:root[data-theme='bilibili'] .vp-big:hover { transform: translate(-50%, -50%) scale(1.06); background: var(--b-blue); border-color: transparent; }
 :root[data-theme='bilibili'] .vp-progress { height: 5px; background: rgba(255, 255, 255, .25); border-radius: 3px; }
 :root[data-theme='bilibili'] .vp-buffer { background: rgba(255, 255, 255, .4); }
 :root[data-theme='bilibili'] .vp-played { background: var(--b-blue); }
-:root[data-theme='bilibili'] .vp-thumb { width: 13px; height: 13px; margin-top: -4px; background: #fff; box-shadow: 0 0 0 3px rgba(0, 174, 236, .45); }
+:root[data-theme='bilibili'] .vp-thumb { width: 9px; height: 9px; background: #fff; box-shadow: 0 0 0 2px rgba(0, 174, 236, .45); }
 :root[data-theme='bilibili'] .vp-ctl { color: #fff; }
 :root[data-theme='bilibili'] .vp-ctl:hover { color: var(--b-blue); }
 :root[data-theme='bilibili'] .vp-next { background: rgba(0, 0, 0, .85); border-radius: 8px; }

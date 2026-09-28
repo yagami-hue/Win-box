@@ -122,7 +122,11 @@ export default function SearchPanel() {
               value={q}
               onChange={(e) => setQ(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') go(sug[0]?.title || q);
+                // ★ 2026-09-26（用户反馈「搜奥特曼却按迪迦奥特曼搜」）：回车**永远搜输入的词** ——
+                //   此前是 `go(sug[0]?.title || q)`，联想列表首条会**悄悄替掉**用户输入
+                //   （输「奥特曼」→ TMDB 首条是「迪迦奥特曼」→ 实际搜的是迪迦）。
+                //   想用联想词请直接点该条。
+                if (e.key === 'Enter') go(q);
               }}
             />
           </div>

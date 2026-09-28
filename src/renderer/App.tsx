@@ -11,6 +11,7 @@ import DetailPage from './pages/DetailPage';
 import PlayerPage from './pages/PlayerPage';
 import LivePage from './pages/LivePage';
 import HistoryPage from './pages/HistoryPage';
+import AboutPage from './pages/AboutPage';
 import { loadUiMemory, saveUiMemory } from './lib/uiMemory';
 import { useTheme } from './lib/theme';
 import { TOP_NAV_THEMES } from './lib/themeTokens';
@@ -24,6 +25,8 @@ const NAV = [
   { to: '/history', label: '历史', ico: '🕘' },
   { to: '/live', label: '直播', ico: '📡' },
   { to: '/config', label: '配置', ico: '⚙' },
+  // ★ 2026-09-28（用户要求）：最后新增「说明」页（详细免责声明 + GitHub / 爱发电入口）
+  { to: '/about', label: '说明', ico: 'ℹ' },
 ];
 
 /**
@@ -106,16 +109,13 @@ export default function App() {
     };
   }, []);
 
-  // ★ 播放网盘资源未绑定 cookie → 播放器/内嵌播放窗口发起「去配置页绑定」：
-  //   主窗口收到后打开「配置 → 账号与凭据」tab（tab 记忆 localStorage，ConfigPage 初始化时读取）。
+  // ★ 播放网盘资源未绑定 cookie → 播放器/内嵌播放窗口发起「去绑定」：
+  //   主窗口收到后跳到「点播页」（网盘绑定入口统一在源主页的「网盘绑定」按钮；配置页不再放网盘配置）。
   //   播放器窗口不注册（主进程只把该事件发给主窗口）。
   useEffect(() => {
     if (loc.pathname === '/player') return;
-    return client.onNavCfgAccount(() => {
-      try {
-        localStorage.setItem('winbox-cfg-tab', 'account');
-      } catch { /* ignore */ }
-      nav('/config');
+    return client.onNavDriveBind(() => {
+      nav('/home');
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loc.pathname]);
@@ -308,6 +308,7 @@ export default function App() {
             <Route path="/detail/:key/:id" element={<DetailPage onPlay={onDetailPlay} />} />
             <Route path="/live" element={<LivePage />} />
             <Route path="/config" element={<ConfigPage />} />
+            <Route path="/about" element={<AboutPage />} />
           </Route>
         </Routes>
       </main>

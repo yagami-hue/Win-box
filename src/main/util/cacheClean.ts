@@ -9,9 +9,15 @@
 import { existsSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** userData 下可安全清理的子目录（删除后 Chromium/应用自动重建） */
-const SAFE_USERDATA_SUBDIRS = [
-  'Cache',            // Chromium HTTP 磁盘缓存（海报图等）
+/**
+ * userData 下可安全清理的子目录（删除后 Chromium/应用自动重建）。
+ *
+ * ★★ 这些名字是 **Chromium/Electron 自己拥有**的目录 —— 应用私有缓存目录绝不能用这些名字
+ *   （Windows 大小写不敏感，`cache` 会与 `Cache` 变成同一个物理目录；2026-09-27 事故详见
+ *   `paths.APP_CACHE_DIR_NAME`，回归护栏见 `tests/appCacheDir.spec.ts`）。
+ */
+export const SAFE_USERDATA_SUBDIRS = [
+  'Cache',            // Chromium HTTP 磁盘缓存（海报图等）★ 注意：与本应用私有缓存无关
   'Code Cache',       // V8/Chromium 代码缓存
   'GPUCache',
   'DawnGraphiteCache',

@@ -1,7 +1,24 @@
 // src/engine/vod/aggSearch.ts
 // ★ 聚合搜索汇总：来源标注 + 状态统计。纯 TS、零 Node 依赖（renderer 可复用/可单测）。
 // 不去重：各源原始命中全部保留并标注来源源名/源 key（用户要求不合并，明确每条的出处）。
-import type { AggVodItem, SearchAllReport, SearchPerSource, VodItem } from '../../shared/types';
+import type { AggVodItem, SearchAllReport, SearchPerSource, SourceBean, VodItem } from '../../shared/types';
+
+/**
+ * ★ 2026-09-25：**该源是否参与聚合搜索** —— 对齐上游语义：`searchable` **非 0 即参与**。
+ *
+ *   此前实现要求 `searchable === 1`，把生态里大量写 `searchable: 2` 的源整体排除在外：
+ *     - 上游自带资产 `resources/js-lib/模板.js` 里 drpy 源统一写 `searchable: 2`，
+ *       注释就是「是否启用全局搜索」；
+ *     - 真实线上配置（R18.json 11 处、19.json / X.json 的 drpy 源、9918 类）也普遍写 2。
+ *   现象：这些配置里「大部分源搜不出来 / 整份配置搜不到东西」，而单源搜索却是好的。
+ *   配置页文案（「0=不搜，全源搜索会跳过」）本身就是非 0 口径 —— 实现与之对齐。
+ *
+ *   类型口径不变：只有 0/1（苹果 CMS）与 3（蜘蛛）参与；2/4/-1 等无分发实现的类型仍排除。
+ */
+export function isSearchableSource(s: Pick<SourceBean, 'type' | 'searchable'>): boolean {
+  if (Number(s.searchable) === 0) return false;
+  return s.type === 0 || s.type === 1 || s.type === 3;
+}
 
 export interface AggSearchInput {
   key: string;

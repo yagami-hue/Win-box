@@ -16,20 +16,53 @@
 //   它连"读 assets"都没走到。补齐资源后，报错才推进到真正的架构问题
 //   （`UnsatisfiedLinkError: Can't load this .dll (machine code=0x34) on a AMD 64-bit platform`）。
 //
-// 本测试不触网、不跑真 JVM：http 用桩，dex2jar 用 execFileSync 桩模拟。
+// 本测试不触网、不跑真 JVM：http 用桩，dex2jar 用 spawn 桩模拟。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { JarSpiderBridge, copyJarResources } from '../src/engine/spider/JarSpiderBridge';
+import { JarSpiderBridge, copyJarResources, d2jHeapMb, isOomOutput, isUsableConvertedJar } from '../src/engine/spider/JarSpiderBridge';
 import { buildZip, listZipEntries, readZipEntries, crc32 } from '../src/engine/util/syncZip';
+import { md5Hex } from '../src/engine/util/md5';
+
+const spawnMock = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', () => ({ spawn: spawnMock }));
+
+/** 假子进程：只需 stdout/stderr EventEmitter + error/close 事件 */
+function fakeChild(): EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void } {
+  const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void };
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => undefined;
+  return child;
+}
+
+/** 取最近一次 spawn 的 argv（简化断言） */
+function lastArgv(): string[] {
+  return spawnMock.mock.calls[spawnMock.mock.calls.length - 1][1] as string[];
+}
 
 /**
- * 模拟 dex2jar 的 execFileSync：写出一个**只含 .class、丢掉 assets** 的 target jar
- * —— 正是真实 dex2jar 的行为，也是本次事故的根因。
+ * 模拟 dex2jar 的 spawn：在下一个 tick 写出 target（`-o` 的下一项）后 close(0)。
+ * `fill` 决定产物内容 —— 默认写出**只含 .class、丢掉 assets** 的 jar，正是真实 dex2jar 的行为。
  */
-const execMock = vi.hoisted(() => vi.fn());
-vi.mock('node:child_process', () => ({ spawn: vi.fn(), execFileSync: execMock }));
+function mockDex2jar(fill: (target: string) => void = (t) => writeFileSync(t, buildZip([{ name: 'A.class', bytes: Buffer.from('c') }]))): void {
+  spawnMock.mockImplementation(() => {
+    const child = fakeChild();
+    const argv = lastArgv();
+    const target = argv[argv.indexOf('-o') + 1];
+    setImmediate(() => {
+      try {
+        fill(target);
+      } catch {
+        /* ignore */
+      }
+      child.emit('close', 0);
+    });
+    return child;
+  });
+}
 
 function makeJvmDir(): string {
   const dir = join(tmpdir(), `tvm-res-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
@@ -192,11 +225,8 @@ describe('copyJarResources — 保住加固壳的 assets', () => {
 describe('JarSpiderBridge — 转换产物格式版本迁移', () => {
   const dirs: string[] = [];
   beforeEach(() => {
-    execMock.mockReset();
-    execMock.mockImplementation((_exe: string, argv: string[]) => {
-      writeFileSync(argv[argv.indexOf('-o') + 1], buildZip([{ name: 'A.class', bytes: Buffer.from('c') }]));
-      return Buffer.from('');
-    });
+    spawnMock.mockReset();
+    mockDex2jar();
   });
   afterEach(() => {
     for (const d of dirs) {
@@ -260,13 +290,11 @@ describe('JarSpiderBridge — 转换产物格式版本迁移', () => {
 describe('JarSpiderBridge.doConvert — 端到端保住 assets', () => {
   const dirs: string[] = [];
   beforeEach(() => {
-    execMock.mockReset();
+    spawnMock.mockReset();
     // 模拟真实 dex2jar：**丢掉** raw 里的一切非 dex 资源
-    execMock.mockImplementation((_exe: string, argv: string[]) => {
-      const target = argv[argv.indexOf('-o') + 1];
-      writeFileSync(target, buildZip([{ name: 'com/github/catvod/spider/Init.class', bytes: Buffer.from('c') }]));
-      return Buffer.from('');
-    });
+    mockDex2jar((target) =>
+      writeFileSync(target, buildZip([{ name: 'com/github/catvod/spider/Init.class', bytes: Buffer.from('c') }])),
+    );
   });
   afterEach(() => {
     for (const d of dirs) {
@@ -289,5 +317,231 @@ describe('JarSpiderBridge.doConvert — 端到端保住 assets', () => {
     expect(names).toContain('assets/wexguard_v7.so');
     expect(names).toContain('assets/wexshinidie.guard');
     expect(logs.some((l) => l.includes('已补齐转换产物中的非 dex 资源'))).toBe(true);
+  });
+});
+
+/**
+ * ★ 2026-09-25 事故回归：大 dex（摸鱼 / Fish 系 11.3MB jar）在写死的 `-Xmx256m` 下必 OOM
+ *   → 该 jar 的全部源「无法加载 / 无法搜索」；且失败不入缓存 → 100+ 源的配置每个源都把
+ *   昂贵转换重跑一遍（实测一次 30s~4 分钟）。
+ */
+describe('dex2jar 堆自适应 + 失败抑制（大 jar 回归）', () => {
+  const dirs: string[] = [];
+  const GiB = 1024 * 1024 * 1024;
+
+  afterEach(() => {
+    for (const d of dirs) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    dirs.length = 0;
+  });
+
+  it('d2jHeapMb：小 dex 保持 256m；11MB 级 dex 显著放大；按机器总内存封顶', () => {
+    // 400KB 级（fty 壳 jar）→ 仍是历史口径 256m，不改小 jar 行为
+    expect(d2jHeapMb(400 * 1024, 8 * GiB)).toBe(256);
+    // 11.3MB（Fish 系大 jar）→ 远大于 256m（实测 1024m 可完成，这里给足余量）
+    expect(d2jHeapMb(11.3 * 1024 * 1024, 8 * GiB)).toBeGreaterThanOrEqual(1024);
+    // 小内存机器（4GB）不被大堆拖垮
+    expect(d2jHeapMb(11.3 * 1024 * 1024, 4 * GiB)).toBe(1024);
+    expect(d2jHeapMb(11.3 * 1024 * 1024, 2 * GiB)).toBe(512);
+    // OOM 后按 2× 重试，仍受总内存封顶
+    expect(d2jHeapMb(11.3 * 1024 * 1024, 8 * GiB, 2)).toBeGreaterThan(d2jHeapMb(11.3 * 1024 * 1024, 8 * GiB));
+    expect(d2jHeapMb(11.3 * 1024 * 1024, 2 * GiB, 2)).toBe(512);
+  });
+
+  it('isOomOutput 只认堆不足证据（普通失败不当成 OOM）', () => {
+    expect(isOomOutput('Exception in thread "main" java.lang.OutOfMemoryError: Java heap space')).toBe(true);
+    expect(isOomOutput('There is insufficient memory for the Java Runtime Environment')).toBe(true);
+    expect(isOomOutput('Exception in thread "main" java.lang.IllegalArgumentException')).toBe(false);
+    expect(isOomOutput('')).toBe(false);
+  });
+
+  it('★ 大 dex → 转换命令行给足堆（不再是写死的 256m）', async () => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    spawnMock.mockReset();
+    mockDex2jar();
+    // 伪造 11MB 的 classes.dex（deflate 后 raw 很小，验证读取的是「解压体积」而非 raw 体积）
+    const raw = buildZip([{ name: 'classes.dex', bytes: Buffer.alloc(11 * 1024 * 1024, 3) }]);
+    const bridge = new JarSpiderBridge(
+      { jvmDir, cacheDir: join(jvmDir, 'converted'), totalMemBytes: 8 * GiB },
+      makeHost([], raw.toString('base64')),
+    );
+    await bridge.ensureConverted('https://example.com/big.jar');
+    const heapArg = lastArgv().find((a) => a.startsWith('-Xmx'))!;
+    expect(Number(heapArg.replace(/[^0-9]/g, ''))).toBeGreaterThan(256);
+    // SerialGC 仍必须在（G1 的 mmap 崩溃是另一条历史事故）
+    expect(lastArgv()).toContain('-XX:+UseSerialGC');
+  });
+
+  it('★ OOM → 自动按更大堆重试一次；重试成功即产出可用产物', async () => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    spawnMock.mockReset();
+    const heaps: number[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = fakeChild();
+      const argv = lastArgv();
+      heaps.push(Number(String(argv.find((a) => a.startsWith('-Xmx'))).replace(/[^0-9]/g, '')));
+      const target = argv[argv.indexOf('-o') + 1];
+      setImmediate(() => {
+        if (heaps.length === 1) {
+          child.stderr.emit('data', Buffer.from('Exception in thread "main" java.lang.OutOfMemoryError: Java heap space'));
+          child.emit('close', 1);
+        } else {
+          writeFileSync(target, buildZip([{ name: 'A.class', bytes: Buffer.from('c') }]));
+          child.emit('close', 0);
+        }
+      });
+      return child;
+    });
+    const raw = buildZip([{ name: 'classes.dex', bytes: Buffer.alloc(4 * 1024 * 1024, 3) }]);
+    const logs: string[] = [];
+    const bridge = new JarSpiderBridge(
+      { jvmDir, cacheDir: join(jvmDir, 'converted'), totalMemBytes: 8 * GiB },
+      makeHost(logs, raw.toString('base64')),
+    );
+    const out = await bridge.ensureConverted('https://example.com/big2.jar');
+    expect(existsSync(out)).toBe(true);
+    expect(heaps.length).toBe(2);
+    expect(heaps[1]).toBeGreaterThan(heaps[0]);
+    expect(logs.some((l) => l.includes('堆不足'))).toBe(true);
+  });
+
+  it('★ 转换失败后窗口内不再重跑（100+ 源的大配置不会反复卡住）', async () => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => {
+      const child = fakeChild();
+      setImmediate(() => {
+        child.stderr.emit('data', Buffer.from('Exception in thread "main" java.lang.OutOfMemoryError: Java heap space'));
+        child.emit('close', 1);
+      });
+      return child;
+    });
+    const raw = buildZip([{ name: 'classes.dex', bytes: Buffer.alloc(4 * 1024 * 1024, 3) }]);
+    const bridge = new JarSpiderBridge(
+      { jvmDir, cacheDir: join(jvmDir, 'converted'), totalMemBytes: 8 * GiB },
+      makeHost([], raw.toString('base64')),
+    );
+    await expect(bridge.ensureConverted('https://example.com/bad.jar')).rejects.toThrow(/内存不足/);
+    const callsAfterFirst = spawnMock.mock.calls.length; // 首次 = 1 次尝试 + 1 次放大重试 = 2
+    expect(callsAfterFirst).toBe(2);
+    // 第二个源来要同一只 jar → 直接复用失败原因，不再起子进程
+    await expect(bridge.ensureConverted('https://example.com/bad.jar')).rejects.toThrow(/内存不足/);
+    expect(spawnMock.mock.calls.length).toBe(callsAfterFirst);
+  });
+});
+
+/**
+ * ★ 2026-09-26 事故回归（用户报「摸鱼/R18 的配置一个主页都加载不出来、搜索也无法使用」）：
+ *   那只 11.3MB dex 的 jar **实测 dex2jar 要 198 秒**才产出 4.8MB class；而 dex2jar 带 `--force`
+ *   时**一启动就建输出流** —— 中途被杀（超时/关窗口/OOM）会在磁盘上留下 **22 字节的空 zip**。
+ *   旧逻辑判定「文件存在且 size>0」就当成「已转换」→ 整份配置的源全报类找不到，
+ *   且**清理缓存前永不恢复**（用户看到的就是"整份配置一个源都打不开"）。
+ */
+describe('转换产物有效性（空 zip 残骸不得当缓存）', () => {
+  const dirs: string[] = [];
+  const GiB = 1024 * 1024 * 1024;
+  /** 真实 dex2jar 被中断时留下的残骸：22 字节 EOCD-only 空 zip */
+  const emptyZip = (): Buffer => {
+    const b = Buffer.alloc(22);
+    b.writeUInt32LE(0x06054b50, 0);
+    return b;
+  };
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+    mockDex2jar();
+  });
+  afterEach(() => {
+    for (const d of dirs) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    dirs.length = 0;
+  });
+
+  it('isUsableConvertedJar：含 .class 才算有效；空 zip / 无 class / 非 zip / 不存在 都算无效', () => {
+    const dir = join(tmpdir(), `tvm-usable-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(dir, { recursive: true });
+    dirs.push(dir);
+    const good = join(dir, 'good.jar');
+    const empty = join(dir, 'empty.jar');
+    const noclass = join(dir, 'noclass.jar');
+    const notzip = join(dir, 'notzip.jar');
+    writeFileSync(good, buildZip([{ name: 'com/github/catvod/spider/Init.class', bytes: Buffer.from('c') }]));
+    writeFileSync(empty, emptyZip());
+    writeFileSync(noclass, buildZip([{ name: 'assets/wexguard_v7.so', bytes: Buffer.from('so') }]));
+    writeFileSync(notzip, Buffer.alloc(4096, 7));
+
+    expect(isUsableConvertedJar(good)).toBe(true);
+    expect(isUsableConvertedJar(empty)).toBe(false);
+    expect(isUsableConvertedJar(noclass)).toBe(false);
+    expect(isUsableConvertedJar(notzip)).toBe(false);
+    expect(isUsableConvertedJar(join(dir, 'missing.jar'))).toBe(false);
+  });
+
+  it('★ 磁盘上是空 zip 残骸 → 必须重新转换（不能直接当缓存返回）', async () => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    const cacheDir = join(jvmDir, 'converted');
+    mkdirSync(cacheDir, { recursive: true });
+    const url = 'https://example.com/moyu.jar';
+    const raw = buildZip([{ name: 'classes.dex', bytes: Buffer.alloc(64 * 1024, 3) }]);
+    // 关键：按真实命名规则预置「上一次被杀留下的 22 字节残骸」
+    writeFileSync(join(cacheDir, `${md5Hex(url)}.jar`), emptyZip());
+    writeFileSync(join(cacheDir, `.converted-version`), '2');
+
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir }, makeHost([], raw.toString('base64')));
+    // 残骸不算「已转换」→ peekConverted 应为空（否则闸门会把源标 ready，一调就类找不到）
+    expect(bridge.peekConverted(url)).toBe('');
+
+    const out = await bridge.ensureConverted(url);
+    expect(spawnMock.mock.calls.length).toBe(1); // 真的重跑了转换
+    expect(isUsableConvertedJar(out)).toBe(true); // 产物已是有效的 .class jar，不再是小残骸
+    expect(readFileSync(out).length).toBeGreaterThan(22);
+    expect(bridge.peekConverted(url)).toBe(out); // 有效产物才被认可
+  });
+
+  it('★ 转换失败留下的残骸必须删掉（否则下次被当缓存 → 整份配置的源全废）', async () => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    spawnMock.mockReset();
+    // 模拟「dex2jar 一启动就建了输出流，随后被杀」：先写空 zip，再以非 0 退出
+    spawnMock.mockImplementation(() => {
+      const child = fakeChild();
+      const argv = lastArgv();
+      const target = argv[argv.indexOf('-o') + 1];
+      setImmediate(() => {
+        writeFileSync(target, emptyZip());
+        child.emit('close', 1);
+      });
+      return child;
+    });
+    const raw = buildZip([{ name: 'classes.dex', bytes: Buffer.alloc(64 * 1024, 3) }]);
+    const bridge = new JarSpiderBridge(
+      { jvmDir, cacheDir: join(jvmDir, 'converted'), totalMemBytes: 8 * GiB },
+      makeHost([], raw.toString('base64')),
+    );
+    const url = 'https://example.com/killed.jar';
+    await expect(bridge.ensureConverted(url)).rejects.toThrow();
+    expect(existsSync(join(jvmDir, 'converted', `${md5Hex(url)}.jar`))).toBe(false); // 残骸已清
+  });
+
+  it('resolvePaths 不把空 zip 残骸交给 JVM（清掉内存条目）', async () => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    const cacheDir = join(jvmDir, 'converted');
+    const logs: string[] = [];
+    const url = 'https://example.com/x.jar';
+    const raw = buildZip([{ name: 'classes.dex', bytes: Buffer.alloc(64 * 1024, 3) }]);
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir }, makeHost(logs, raw.toString('base64')));
+    const out = await bridge.ensureConverted(url);
+    expect(bridge.resolvePaths([url])).toEqual([out]);
+    // 模拟「磁盘上的产物被外部写坏/换成了残骸」→ 绝不能继续喂给 JVM
+    writeFileSync(out, emptyZip());
+    expect(bridge.resolvePaths([url])).toEqual([]);
+    expect(logs.some((l) => l.includes('转换产物已失效'))).toBe(true);
   });
 });

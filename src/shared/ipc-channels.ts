@@ -10,7 +10,7 @@ export const IPC = {
   SUBTITLE_SET: 'subtitle:set',
   SUBTITLE_SEARCH: 'subtitle:search',
   SUBTITLE_FETCH: 'subtitle:fetch',
-  // 弹幕（弹弹play）
+  // 弹幕（外部接口）
   DANMAKU_GET: 'danmaku:get',
   DANMAKU_SET: 'danmaku:set',
   DANMAKU_SEARCH: 'danmaku:search',
@@ -48,7 +48,8 @@ export const IPC = {
   CFG_SET_ACTIVE_SOURCE: 'cfg:setActiveSource',
   CFG_SET_ACTIVE_LIVE: 'cfg:setActiveLive',
   CFG_IMPORT_URL: 'cfg:importUrl',
-  CFG_IMPORT_JSON: 'cfg:importJson',
+  // ★ 2026-09-27（用户要求）：本地 .json 订阅文件导入（文件选择器；档案名默认取原始文件名）
+  CFG_IMPORT_JSON_LOCAL: 'cfg:importJsonLocal',
   CFG_IMPORT_PY_LOCAL: 'cfg:importPyLocal',
   CFG_PROFILE_SAVE: 'cfg:profileSave',
   CFG_PROFILE_ACTIVATE: 'cfg:profileActivate',
@@ -56,6 +57,11 @@ export const IPC = {
   CFG_PROFILE_UPDATE_NAME: 'cfg:profileUpdateName',
   CFG_PROFILES: 'cfg:profiles',
   CACHE_CLEAR: 'cache:clear',
+  /**
+   * ★ 2026-09-27：已学到的「该源需要网盘绑定」源 key 列表（源主页据此显示绑定入口）。
+   * 学习发生在主进程 play()（蜘蛛真实产出网盘直链）→ 不依赖蜘蛛类名清单，任何订阅都能覆盖。
+   */
+  DRIVE_BIND_KEYS: 'drive:bindKeys',
   VOD_HOME: 'vod:home',
   VOD_CATEGORY: 'vod:category',
   VOD_DETAIL: 'vod:detail',
@@ -66,10 +72,10 @@ export const IPC = {
   VOD_AUDIT: 'vod:audit',
   CFG_MERGE_EXPORT: 'cfg:mergeExport',
   CFG_EXPORT_SAVE: 'cfg:exportSave',
-  // 播放网盘资源未绑定 cookie → 请求主窗口跳到「配置 → 账号与凭据」tab
-  CFG_GOTO_ACCOUNT: 'cfg:gotoAccount',
-  // 主进程 → 主窗口事件：跳到配置页账号 tab（播放器窗口发起时经此跨窗口跳转）
-  NAV_CFG_ACCOUNT: 'nav:cfgAccount',
+  // ★ 播放网盘资源未绑定 cookie → 从任意窗口请求主窗口跳到「点播页」（源内有「网盘绑定」入口）
+  UI_GOTO_DRIVE_BIND: 'ui:gotoDriveBind',
+  // 主进程 → 主窗口事件：跳到点播页（播放器窗口发起时经此跨窗口跳转）
+  NAV_DRIVE_BIND: 'nav:driveBind',
   WIN_MINIMIZE: 'win:minimize',
   WIN_MAXIMIZE: 'win:maximize',
   WIN_CLOSE: 'win:close',

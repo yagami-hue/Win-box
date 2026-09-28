@@ -1,5 +1,5 @@
 // tests/danmakuParse.spec.ts
-// 弹幕解析纯函数单测：XML（B 站旧格式）与 JSON（弹弹play comment 接口实测返回格式）。
+// 弹幕解析纯函数单测：XML（B 站旧格式）与 JSON（聚合接口实测返回格式）。
 import { describe, expect, it } from 'vitest';
 import { parseDanmakuXml, parseDanmakuJson, parseDanmakuResponse, unescapeXml } from '../src/engine/danmaku/parseDanmakuXml';
 
@@ -91,7 +91,7 @@ describe('parseDanmakuXml', () => {
   });
 });
 
-describe('parseDanmakuJson（B 站新版 JSON 弹幕，弹弹play comment 实测格式）', () => {
+describe('parseDanmakuJson（B 站新版 JSON 弹幕，聚合接口实测格式）', () => {
   it('解析对象包裹的 comments 列表（p=时间,模式,颜色）+ 类型/颜色映射', () => {
     const json = JSON.stringify({
       count: 3,

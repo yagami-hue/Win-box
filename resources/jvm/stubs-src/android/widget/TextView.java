@@ -21,6 +21,8 @@ public class TextView extends View {
     public void setMaxLines(int maxLines) { }
     public void setTextSize(float size) { }
     public void setTextColor(int color) { }
+    public void setTypeface(android.graphics.Typeface tf) { }
+    public void setTypeface(android.graphics.Typeface tf, int style) { }
     public void setGravity(int gravity) { }
     public void setPadding(int l, int t, int r, int b) { }
     public void setLayoutParams(ViewGroup.LayoutParams params) { }

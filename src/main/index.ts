@@ -22,6 +22,8 @@ proxy.onSpeed = (kbs) => {
     if (!w.isDestroyed()) w.webContents.send('net:speed', kbs);
   }
 };
+// ★ 2026-09-26：壳/蜘蛛的宿主代理（`/proxy/<jvmPort>?do=proxy&key=…`）被访问 → 钉住那个 JVM
+proxy.onSpiderProxy = (port) => host.pinSpiderProxy(port);
 
 function isDev(): boolean {
   return !app.isPackaged && process.env.NODE_ENV !== 'production';

@@ -151,3 +151,66 @@ export function layoutDanmaku(items: DanmakuItem[], opts: LayoutOpts): DanmakuLa
 
   return { scroll, top, bottom };
 }
+
+// ---------------- 逐帧绘制辅助（★ 2026-09-26 真 bug 修复：滚动弹幕只画一帧） ----------------
+
+/** 一帧要绘制的滚动弹幕（相对画布坐标） */
+export interface ScrollDraw {
+  x: number;
+  y: number;
+  text: string;
+  color: string;
+}
+
+/**
+ * 滚动弹幕的**绘制起点**：只跳过「已到时间且已完全出左界」的条目。
+ * ★ 旧实现每帧无脑自增扫描指针（画过即丢）→ 每条滚动弹幕只被绘制**一帧**，而且那一帧它的
+ *   x ≈ 画布宽（刚入界、基本在画布外）→ 屏幕上看不到弹幕；一 seek/快进指针归零重扫才"满屏"。
+ *   现在起点只在条目真正出界后前移，且帧间 O(1) 摊销（条目按时间升序 ⇒ x 单调递减）。
+ */
+export function scrollDrawStart(
+  placed: PlacedDanmaku[],
+  t: number,
+  width: number,
+  fontSize: number,
+  from = 0,
+): number {
+  let i = Math.max(0, from);
+  while (i < placed.length) {
+    const p = placed[i];
+    if (p.item.time > t) break; // 未到时间（其后只会更晚）→ 起点不动
+    if (width - (t - p.item.time) * p.velocity + measureWidth(p.item.text, fontSize) >= 0) break; // 仍在屏内
+    i++;
+  }
+  return i;
+}
+
+/** 起点之后、`t` 时刻仍在屏内的滚动弹幕（时间升序；x = 宽 −(t−time)×速度） */
+export function scrollDrawList(placed: PlacedDanmaku[], t: number, width: number, start = 0): ScrollDraw[] {
+  const out: ScrollDraw[] = [];
+  for (let i = Math.max(0, start); i < placed.length; i++) {
+    const p = placed[i];
+    if (p.item.time > t) break;
+    out.push({ x: width - (t - p.item.time) * p.velocity, y: p.y, text: p.item.text, color: p.item.color });
+  }
+  return out;
+}
+
+/**
+ * 弹幕绘制区（相对画布）：`contain` 时按视频**真实显示区**做上下留边 —— 避免弹幕落在宽银幕黑边上
+ * （用户报「位置明显不对」）；其它比例模式（fill / cover / none / 强制 16:9·4:3）内容铺满盒子 → 用整块画布。
+ */
+export function danmakuArea(opts: {
+  fit: string;
+  canvasW: number;
+  canvasH: number;
+  videoW: number;
+  videoH: number;
+}): { top: number; height: number } {
+  const { fit, canvasW, canvasH, videoW, videoH } = opts;
+  const full = { top: 0, height: Math.max(1, Math.round(canvasH || 0)) };
+  if (fit !== 'contain' || !(videoW > 0) || !(videoH > 0) || !(canvasW > 0) || !(canvasH > 0)) return full;
+  const scale = Math.min(canvasW / videoW, canvasH / videoH);
+  const dispH = Math.max(1, Math.round(videoH * scale));
+  return { top: Math.max(0, Math.round((canvasH - dispH) / 2)), height: dispH };
+}

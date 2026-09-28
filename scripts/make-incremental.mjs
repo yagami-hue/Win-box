@@ -57,10 +57,12 @@ function walk(dir, base) {
       if (e.isDirectory()) rec(abs);
       else if (e.isFile()) {
         const size = statSync(abs).size;
-        // ★ 大文件：长度不同必然差异；长度相同则 .exe/.dll 强制 hash 兜底（版本资源变化时字节等长），
-        //   其余 >4MB 文件仍按长度判（避免对大资源做重复 IO）。
+        // ★ 大文件：长度不同必然差异；长度相同则 .exe/.dll/.asar 强制 hash 兜底
+        //   —— 它们的内容变化常常「字节等长」：exe/dll 的版本资源、asar 里的 package.json
+        //   version（`1.0.0`→`1.1.0` 同长度）都会让长度对比漏判（实测 1.0.0→1.1.0 曾出现
+        //   「差异文件 0 个」的假增量包）。其余 >4MB 文件仍按长度判（避免对大资源做重复 IO）。
         const ext = extname(e.name).toLowerCase();
-        const needHash = size <= 4 * 1024 * 1024 || ext === '.exe' || ext === '.dll';
+        const needHash = size <= 4 * 1024 * 1024 || ext === '.exe' || ext === '.dll' || ext === '.asar';
         const hash = needHash ? sha1(abs) : '';
         out.set(relative(base, abs).split(sep).join('/'), { abs, size, hash });
       }

@@ -47,11 +47,28 @@ public class Build {
     public static final String[] SUPPORTED_32_BIT_ABIS = new String[]{"armeabi-v7a", "armeabi"};
     public static final String[] SUPPORTED_64_BIT_ABIS = new String[0];
 
+    // ---------------- 设备指纹字段（★ 2026-09-26 补：App88 系源 <clinit> 读 BOOTLOADER → NoSuchFieldError） ----------------
+    public static final String BOOTLOADER = "unknown";
+    public static final String RADIO = "unknown";
+    public static final String USER = "android-build";
+    public static final String TIME = "0";
+
+    /** API 26 起弃用但蜘蛛仍会用（与 SERIAL 同口径） */
+    public static String getSerial() {
+        return SERIAL;
+    }
+
+    public static String getRadioVersion() {
+        return RADIO;
+    }
+
     public static class VERSION {
         public static final int SDK_INT = 34;
         public static final String RELEASE = "14";
         public static final String CODENAME = "REL";
         public static final String INCREMENTAL = "1";
+        public static final String SDK = "34";
+        public static final int PREVIEW_SDK_INT = 0;
     }
 
     public static class VERSION_CODES {

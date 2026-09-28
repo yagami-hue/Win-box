@@ -305,6 +305,29 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .vplayer { position: relative; flex: 1; background: #000; min-height: 0; overflow: hidden;
   font-family: inherit; border-radius: 10px; }
 .vplayer video { width: 100%; height: 100%; object-fit: contain; outline: none; }
+
+/* ★ 2026-09-26（用户报「部分比例的视频会让播放器底部 UI 消失」）——
+   ① 高度链：flex item 默认 `min-height: auto` 会按内容（视频固有比例）撑高，
+      竖屏/超宽视频会把 .vplayer 顶到视口之外，绝对定位在底部的 .vp-controls 随之下沉不可见。
+      播放器窗口链 = .main → .pwin-body → .pwin-stage → .vplayer，**每一层都必须允许收缩**。
+   ② 画面区域：.vp-stage 绝对定位撑满并裁切溢出 → 画面本身不可能把控制条挤出可视区。 */
+.pwin-body { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.pwin-stage { flex: 1; min-height: 0; min-width: 0; display: flex; }
+.vp-stage { position: absolute; inset: 0; overflow: hidden; display: flex; align-items: center; justify-content: center;
+  container-type: size; }
+.vp-ratio { width: 100%; height: 100%; min-height: 0; overflow: hidden; }
+.vp-stage video { width: 100%; height: 100%; object-fit: contain; }
+.vp-stage.fit-fill video { object-fit: fill; }
+.vp-stage.fit-cover video { object-fit: cover; }
+.vp-stage.fit-none video { object-fit: none; }
+/* 强制 16:9 / 4:3：**拉伸**到该比例显示区（对齐安卓 TVBox 的「画面比例」，用于去黑边/修正变形）。
+   盒子尺寸用容器查询单位显式算「能放下的最大定比矩形」：width = min(容器宽, 容器高 × 比例) ——
+   只靠 `aspect-ratio` + `max-*` 在 clamp 时**不会**把约束传到另一轴（实测 1040×602 舞台下
+   16:9 会停在 1.728、4:3 也会停在 1.728），故必须显式 min()。 */
+.vp-stage.fit-r169 .vp-ratio { width: min(100cqw, calc(100cqh * 16 / 9)); height: auto; aspect-ratio: 16 / 9; }
+.vp-stage.fit-r43 .vp-ratio { width: min(100cqw, calc(100cqh * 4 / 3)); height: auto; aspect-ratio: 4 / 3; }
+.vp-stage.fit-r169 video,
+.vp-stage.fit-r43 video { object-fit: fill; }
 .vp-loading { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px;
   align-items: center; justify-content: center; color: var(--text-dim); font-size: 13px; background: rgba(0,0,0,.3); }
 .vp-spin { width: 30px; height: 30px; border-radius: 50%; border: 3px solid rgba(255,255,255,.18);
@@ -335,8 +358,15 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .vp-buffer { position: absolute; left: 0; height: 4px; border-radius: 2px; background: rgba(255,255,255,.32); }
 .vp-played { position: absolute; left: 0; height: 4px; border-radius: 2px;
   background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
-.vp-thumb { position: absolute; top: 50%; transform: translateY(-50%); width: 12px; height: 12px; border-radius: 50%;
-  background: #fff; box-shadow: 0 0 6px rgba(0,0,0,.5); }
+/* ★ 2026-09-26（用户要求）：进度点缩小（12px → 9px）；★ 2026-09-28 再缩（9px → 7px）
+   并用 translate(-50%) 居中定位 —— 主题皮肤可各自覆盖尺寸，无需再在 JSX 里写半宽偏移 */
+.vp-thumb { position: absolute; top: 50%; left: 0; transform: translate(-50%, -50%); width: 7px; height: 7px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 5px rgba(0,0,0,.5); }
+/* ★ 2026-09-28（用户要求）：进度条悬停 —— 定位细线 + 指向时间气泡 */
+.vp-hline { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,.75); pointer-events: none; }
+.vp-htip { position: absolute; bottom: calc(100% + 6px); transform: translateX(-50%); pointer-events: none;
+  padding: 1px 6px; border-radius: 4px; font-size: 11px; color: #fff; white-space: nowrap;
+  background: rgba(0,0,0,.82); box-shadow: 0 2px 8px rgba(0,0,0,.4); font-variant-numeric: tabular-nums; }
 .vp-bar { display: flex; align-items: center; gap: 10px; color: #fff; }
 /* 小窗口模式：控制条只保留 上/下集 + 播放暂停，居中 */
 .vplayer.vp-mini .vp-bar { justify-content: center; }
@@ -381,6 +411,17 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
   background: #fff; box-shadow: 0 0 6px rgba(0, 0, 0, .5); transition: bottom .1s linear;
 }
 .vplayer:fullscreen { border-radius: 0; }
+/* ★ 2026-09-28（用户要求）：说明页（详细免责声明 + 开源/赞助入口） */
+.about { max-width: 880px; line-height: 1.85; font-size: 13px; padding-bottom: 40px; }
+.about-sec { margin-bottom: 18px; }
+.about-sec h3 { font-size: 14px; margin: 0 0 6px; }
+.about-sec p { margin: 0 0 8px; }
+.about-links { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0 10px; }
+.about-link { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); color: var(--text); font-size: 13px; }
+.about-link:hover { border-color: var(--accent); color: var(--accent); }
+.about-link.about-sponsor:hover { border-color: #ff7a9a; color: #ff7a9a; }
+
 /* ---- 外挂字幕渲染（原生 TextTrack + VTTCue，用 CSS 变量控制字号/位置） ---- */
 .vplayer video::cue { font-size: var(--sub-font, 20px); font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
   color: #fff; background: rgba(0,0,0,.55); text-shadow: 0 1px 2px #000; line-height: 1.4; }
@@ -400,6 +441,18 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .vsp-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .vsp-btn.primary { background: linear-gradient(135deg,#4f86ff,#6a5cff); color: #fff; border-color: transparent; padding: 3px 12px; }
 .vsp-btn:disabled { opacity: .45; cursor: not-allowed; }
+/* ★ 2026-09-26：画面比例面板（比字幕/弹幕面板窄，选项两列排布）
+   ★ 2026-09-28（用户要求）：改「悬停开 / 鼠标离开即收」（与音量条一致）——
+   host 常驻并承担 8px 间隙的悬停桥接（直接给 .vp-subpanel 加 ::after 会被它的 overflow:auto 裁掉） */
+.vp-fithost { position: absolute; bottom: 100%; right: 0; padding-bottom: 8px; z-index: 20;
+  opacity: 0; pointer-events: none; transform: translateY(4px); transition: opacity .16s ease, transform .16s ease; }
+.vp-fithost.open { opacity: 1; pointer-events: auto; transform: translateY(0); }
+.vp-subpanel.vp-fitpanel { position: static; width: 268px; }
+/* ★ 2026-09-28（用户要求）：弹幕面板加宽（原本 340px，长剧名读不全）；候选名最多两行 */
+.vp-subpanel.vp-dmpanel { width: 438px; max-height: 380px; }
+.vp-dmpanel .vsp-item-name { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.vsp-fits { display: flex; flex-wrap: wrap; gap: 6px; }
+.vsp-fits .vsp-btn { flex: 0 0 calc(50% - 3px); text-align: center; box-sizing: border-box; }
 .vsp-hint { font-size: 11px; color: #ffb454; margin-top: 4px; }
 .vsp-err { font-size: 11px; color: var(--danger, #ff6b6b); margin-top: 4px; }
 .vsp-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; border-top: 1px solid var(--border-soft); padding-top: 6px; }
@@ -408,10 +461,26 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .vsp-item:hover { border-color: var(--accent); }
 .vsp-item-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vsp-item .muted { font-size: 11px; }
+/* ★ 2026-09-26：弹幕源面板（接口开关清单 + 自定义接口输入） */
+.vsp-dmsrc { margin: 2px 0 6px; }
+.vsp-dmsrc-list { display: flex; flex-wrap: wrap; gap: 2px 10px; max-height: 132px; overflow: auto;
+  border: 1px solid var(--border-soft); border-radius: 6px; padding: 6px 8px; }
+.vsp-dmsrc-item { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer;
+  max-width: 100%; }
+.vsp-dmsrc-item input { margin: 0; }
+.vsp-dmsrc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+.vsp-dmsrc-text { width: 100%; box-sizing: border-box; margin-top: 6px; font-size: 11px; resize: vertical;
+  background: var(--bg-elev); color: inherit; border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; }
+.vsp-dmsrc-tag { display: inline-block; margin-right: 6px; padding: 0 5px; border-radius: 4px; font-size: 10px;
+  color: var(--accent); background: var(--accent-soft); vertical-align: 1px; }
 .player-wrap { display: contents; }
 .layout-2 { display: flex; gap: 14px; height: 100%; min-height: 0; }
 .layout-2 .left { width: 216px; overflow: auto; border-right: 1px solid var(--border-soft); padding-right: 6px; flex-shrink: 0; }
 .layout-2 .right { flex: 1; overflow: auto; min-width: 0; }
+/* ★ 2026-09-27（用户报「直播界面播放器消失」）：播放器的 `.vplayer` 高度只来自 flex 父级（flex:1），
+   直播页此前把它直接放进 block 容器 `.right` → flex 失效 + 子元素全为绝对定位 → 高度折成 0。
+   这里给出「定比 + 视口上限」的 flex 宿主，`.vplayer` 的 flex:1 重新生效（宽度显式取 min 以同时满足两约束）。 */
+.live-player { width: min(100%, calc(62vh * 16 / 9)); aspect-ratio: 16 / 9; display: flex; }
 .ep-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; }
 .ep { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 7px; cursor: pointer;
   font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: all .12s; }

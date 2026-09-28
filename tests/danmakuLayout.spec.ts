@@ -1,7 +1,16 @@
 // tests/danmakuLayout.spec.ts
 // 弹幕轨道布局纯函数单测：不重叠不变量、区域三档、密度抽样、时间偏移、超量抽稀、三分区。
 import { describe, expect, it } from 'vitest';
-import { layoutDanmaku, measureWidth, regionRows, zoneRows, REGION_RATIO } from '../src/engine/danmaku/layout';
+import {
+  danmakuArea,
+  layoutDanmaku,
+  measureWidth,
+  regionRows,
+  scrollDrawList,
+  scrollDrawStart,
+  zoneRows,
+  REGION_RATIO,
+} from '../src/engine/danmaku/layout';
 import type { DanmakuItem, DanmakuRegion } from '../src/shared/danmaku';
 
 const scroll = (time: number, text = '这是一条很长的弹幕内容'): DanmakuItem => ({
@@ -167,5 +176,69 @@ describe('measureWidth', () => {
     expect(measureWidth('中', f)).toBe(f);
     expect(measureWidth('a', f)).toBe(f * 0.6);
     expect(measureWidth('ab中', f)).toBe(f * 0.6 * 2 + f);
+  });
+});
+
+// ---- ★ 2026-09-26 真 bug 回归：滚动弹幕"逐帧重绘"（旧实现每条只画一帧 → 平时看不到弹幕） ----
+describe('scrollDrawStart / scrollDrawList（逐帧在屏集合）', () => {
+  const opts = { ...base, width: 800, region: 'full' as DanmakuRegion };
+  const one = (text: string, time = 0) => layoutDanmaku([scroll(time, text)], opts).scroll;
+
+  it('一条滚动弹幕在其存活期内**每一帧都出现在绘制列表**（旧实现只画入界那一帧）', () => {
+    const placed = one('测试弹幕');
+    const speed = opts.speed;
+    let start = 0;
+    const frames = [0.1, 1, 2, 3, 4, 5];
+    for (const t of frames) {
+      start = scrollDrawStart(placed, t, opts.width, opts.fontSize, start);
+      const list = scrollDrawList(placed, t, opts.width, start);
+      expect(list).toHaveLength(1); // 全程可见（存活 ≈ (文本宽+屏宽)/速度 ≈ 8.5s）
+      const x = opts.width - (t - 0) * speed;
+      expect(list[0].x).toBeCloseTo(x, 5);
+    }
+  });
+
+  it('彻底出左界后起点前移、不再重复绘制', () => {
+    const placed = one('短');
+    const dur = (measureWidth('短', opts.fontSize) + opts.width) / opts.speed;
+    expect(scrollDrawStart(placed, dur + 0.01, opts.width, opts.fontSize, 0)).toBe(1);
+    expect(scrollDrawList(placed, dur + 0.01, opts.width, 1)).toEqual([]);
+  });
+
+  it('未到时间的弹幕不出现在列表；到点后出现', () => {
+    const placed = one('晚点出现', 5);
+    expect(scrollDrawList(placed, 4.9, opts.width, 0)).toEqual([]);
+    expect(scrollDrawList(placed, 5, opts.width, 0)).toHaveLength(1);
+  });
+
+  it('seek 回退（起点归零重扫）后仍在屏的条目照常绘制', () => {
+    const placed = one('回退也要看得见');
+    const atLate = scrollDrawStart(placed, 9, opts.width, opts.fontSize, 0); // 存活期（≈8.8s）已过 → 起点前移
+    expect(atLate).toBeGreaterThanOrEqual(1);
+    const back = scrollDrawStart(placed, 1, opts.width, opts.fontSize, 0); // 回调时间 → 从 0 重扫
+    expect(back).toBe(0);
+    expect(scrollDrawList(placed, 1, opts.width, back)).toHaveLength(1);
+  });
+});
+
+describe('danmakuArea（绘制区：contain 避让宽银幕黑边）', () => {
+  it('contain + 2.35:1 片源 → 上下留黑边，只在画面内画弹幕', () => {
+    // 1040×602 容器，视频 1920×817（2.35:1）→ 显示高 ≈ 442.5 → 取整 443，上下黑边各 ≈ 80
+    const a = danmakuArea({ fit: 'contain', canvasW: 1040, canvasH: 602, videoW: 1920, videoH: 817 });
+    expect(a.height).toBe(443);
+    expect(a.top).toBe(80);
+  });
+
+  it('contain + 16:9 → 留边极小', () => {
+    const a = danmakuArea({ fit: 'contain', canvasW: 1040, canvasH: 602, videoW: 1920, videoH: 1080 });
+    expect(a.height).toBe(585);
+    expect(a.top).toBe(9);
+  });
+
+  it('非 contain（fill/cover/none/强制比例）→ 用整块画布；无元数据时同样整块', () => {
+    for (const fit of ['fill', 'cover', 'none', 'r169', 'r43']) {
+      expect(danmakuArea({ fit, canvasW: 1040, canvasH: 602, videoW: 1920, videoH: 817 })).toEqual({ top: 0, height: 602 });
+    }
+    expect(danmakuArea({ fit: 'contain', canvasW: 1040, canvasH: 602, videoW: 0, videoH: 0 })).toEqual({ top: 0, height: 602 });
   });
 });

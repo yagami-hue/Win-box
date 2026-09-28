@@ -14,6 +14,8 @@ import {
   saveUiMemory,
   recordWatch,
   latestOf,
+  watchedEpisodeOf,
+  latestEpisodeOf,
   type WatchHistory,
 } from '../src/renderer/lib/uiMemory';
 
@@ -185,5 +187,35 @@ describe('latestOf — 续播前取指定 url 最新记录（★2026-09-20 修�
     expect(got?.time).toBe(0);
     expect(got?.updatedAt).toBe(0);
     expect(got?.url).toBe('u1');
+  });
+});
+
+// ★ 2026-09-26：历史页「有更新」检测（源内现在集数 > 已看到的那一集）
+describe('watchedEpisodeOf / latestEpisodeOf — 更新检测', () => {
+  it('已看集号：备注优先（第N集 / EP / SxxExx / 第N话）；电影等解析不到 → 0', () => {
+    expect(watchedEpisodeOf({ remarks: '第12集', name: '狂飙 - 第12集' })).toBe(12);
+    expect(watchedEpisodeOf({ remarks: '第12集 · 2.3GB', name: '剧 - 第12集' })).toBe(12);
+    expect(watchedEpisodeOf({ remarks: '', name: '剧 - EP07' })).toBe(7);
+    expect(watchedEpisodeOf({ remarks: '', name: 'Show.S01E03' })).toBe(3);
+    expect(watchedEpisodeOf({ remarks: '', name: '剧 - 第05话' })).toBe(5);
+    expect(watchedEpisodeOf({ remarks: 'HD', name: '某电影' })).toBe(0);
+    expect(watchedEpisodeOf({ remarks: '', name: '' })).toBe(0);
+  });
+
+  it('源最新集数：取各线路集数最大值，并与「更新至N集」取下者同取大', () => {
+    const eps = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `第${i + 1}集`, url: `u${i}` }));
+    expect(latestEpisodeOf({ episodes: { a: eps(12), b: eps(5) } })).toBe(12);
+    expect(latestEpisodeOf({ episodes: { a: eps(3) }, remarks: '更新至20集' })).toBe(20);
+    expect(latestEpisodeOf({ episodes: {}, remarks: '更新至8集' })).toBe(8);
+    expect(latestEpisodeOf({})).toBe(0);
+  });
+
+  it('「有更新」判定口径：现在集数 > 已看集号', () => {
+    const eps = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `第${i + 1}集`, url: `u${i}` }));
+    const watched = watchedEpisodeOf({ remarks: '第5集', name: '剧 - 第5集' });
+    expect(latestEpisodeOf({ episodes: { a: eps(10) } }) > watched).toBe(true);
+    expect(latestEpisodeOf({ episodes: { a: eps(5) } }) > watched).toBe(false);
+    // 电影（已看集号 0）不参与判定 → 直接跳过
+    expect(watchedEpisodeOf({ remarks: 'HD', name: '某电影' })).toBe(0);
   });
 });

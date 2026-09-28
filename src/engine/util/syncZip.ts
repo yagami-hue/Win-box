@@ -42,6 +42,19 @@ export function listZipEntries(buf: Buffer): string[] {
 }
 
 /**
+ * 列出 zip 内条目名与**解压后**大小（只读中央目录声明值，不解压数据）。
+ * 用途：按 `classes*.dex` 的体积给 dex2jar 估算堆上限（大 dex 在小堆下必 OOM，见 JarSpiderBridge）。
+ * 文件不是合法 zip 时返回空数组（调用方据此回落经验值）。
+ */
+export function zipEntrySizes(buf: Buffer): Array<{ name: string; size: number }> {
+  try {
+    return readCentralDirectory(buf).map((e) => ({ name: e.name, size: e.uncompressedSize }));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * 读取 zip 内全部条目（解压后的字节）。
  * 遇到无法解析的条目（如 zip64/加密）直接跳过，不抛错 —— 调用方要的是"尽量多搬一点资源"。
  */

@@ -5,7 +5,7 @@
 // 但默认只进 logger，用户只看到笼统的「蜘蛛返回空结果」。extractSpiderReason 把
 // stderr 里的最后一条 SpiderLog 压成人可读短句，供 SourceViewModel 细化文案。
 import { describe, it, expect } from 'vitest';
-import { extractSpiderReason, translateSpiderLog } from '../src/engine/spider/JarSpiderBridge';
+import { extractSpiderReason, translateSpiderLog, isSpiderClassMissing } from '../src/engine/spider/JarSpiderBridge';
 
 const LOADED = '[android.Log.D] SpiderLog: 自定义爬虫代码加载成功！';
 const LOADED_TW = '[android.Log.D] SpiderLog: 自定義爬蟲代碼載入成功！';
@@ -149,5 +149,23 @@ describe('translateSpiderLog', () => {
     const r = translateSpiderLog(raw);
     expect(r.length).toBe(120);
     expect(r.startsWith('some unknown spider failure')).toBe(true);
+  });
+});
+
+describe('isSpiderClassMissing（类缺失兜底重试的触发判定）', () => {
+  // ★ 2026-09-28：池信封 ok=false 的错误串会先过 translateSpiderLog 再落 lastSpiderReason，
+  //   因此翻译后的中文形态必须仍能被判定识别，否则「缓存 jar 并集兜底」在池路径失效。
+  it('翻译后的中文原因仍能触发重试（池路径：先 translate 再判定）', () => {
+    const translated = translateSpiderLog('java.lang.ClassNotFoundException: com.github.catvod.spider.Symx');
+    expect(isSpiderClassMissing(translated)).toBe(true);
+  });
+
+  it('原始英文形态也能触发（一次性路径直接用原始 runnerErr 判定）', () => {
+    expect(isSpiderClassMissing('java.lang.ClassNotFoundException: com.github.catvod.spider.Symx')).toBe(true);
+  });
+
+  it('空原因 / 普通源站原因不触发', () => {
+    expect(isSpiderClassMissing('')).toBe(false);
+    expect(isSpiderClassMissing('Connect timed out')).toBe(false);
   });
 });

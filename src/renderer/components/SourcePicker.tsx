@@ -50,13 +50,18 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
   useEffect(() => {
     loadOwn();
     // 切源（其他入口）/窗口重新聚焦 → 重新对齐当前源（多窗口/多入口一致性）
+    // ★ 2026-09-26：源列表本身变了（配置页导入/删源/切档案后广播 winbox:sources-changed）也要重取，
+    //   否则本组件常驻 App（挂载一次）会一直显示旧的「未导入源」。
     const onFocus = (): void => loadOwn();
     const onChanged = (): void => loadOwn();
+    const onSources = (): void => loadOwn();
     window.addEventListener('focus', onFocus);
     window.addEventListener('winbox:source-changed', onChanged);
+    window.addEventListener('winbox:sources-changed', onSources);
     return () => {
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('winbox:source-changed', onChanged);
+      window.removeEventListener('winbox:sources-changed', onSources);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selfLoad]);

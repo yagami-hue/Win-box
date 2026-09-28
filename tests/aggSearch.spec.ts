@@ -1,6 +1,6 @@
 // tests/aggSearch.spec.ts — 聚合搜索汇总：不去重 / 来源标注 / 错误隔离 / 统计
 import { describe, it, expect } from 'vitest';
-import { mergeSearchResults, type AggSearchInput } from '../src/engine/vod/aggSearch';
+import { mergeSearchResults, isSearchableSource, type AggSearchInput } from '../src/engine/vod/aggSearch';
 import type { VodItem } from '../src/shared/types';
 
 function v(id: string, name: string, src: string): VodItem {
@@ -81,5 +81,37 @@ describe('mergeSearchResults — 汇总不去重', () => {
     expect(r2.items).toEqual([]);
     expect(r2.perSource).toEqual([]);
     expect(r2.hitSources).toBe(0);
+  });
+});
+
+/**
+ * ★ 2026-09-25 事故回归：生态里大量配置写 `searchable: 2`（上游 `模板.js` 注释就是
+ *   「是否启用全局搜索」；R18.json 11 处、19.json / X.json 的 drpy 源、9918 类……），
+ *   此前实现要求 `=== 1` → 这些源被整体排除在全源搜索之外 → 「整份配置搜不出东西」。
+ */
+describe('isSearchableSource — searchable 非 0 即参与', () => {
+  it('searchable: 1 与 2 都参与（2 是生态常见写法，不得排除）', () => {
+    expect(isSearchableSource({ type: 0, searchable: 1 })).toBe(true);
+    expect(isSearchableSource({ type: 0, searchable: 2 })).toBe(true);
+    expect(isSearchableSource({ type: 1, searchable: 2 })).toBe(true);
+    expect(isSearchableSource({ type: 3, searchable: 2 })).toBe(true);
+  });
+
+  it('searchable: 0 不参与', () => {
+    expect(isSearchableSource({ type: 0, searchable: 0 })).toBe(false);
+    expect(isSearchableSource({ type: 3, searchable: 0 })).toBe(false);
+  });
+
+  it('类型口径不变：0/1/3 参与，2/4/-1 等无分发实现的类型仍排除', () => {
+    expect(isSearchableSource({ type: 3, searchable: 1 })).toBe(true);
+    expect(isSearchableSource({ type: 2, searchable: 1 })).toBe(false);
+    expect(isSearchableSource({ type: 4, searchable: 1 })).toBe(false);
+    expect(isSearchableSource({ type: -1, searchable: 1 })).toBe(false);
+  });
+
+  it('searchable 缺失（默认 1）与字符串数字都按非 0 判定', () => {
+    expect(isSearchableSource({ type: 1, searchable: undefined as unknown as number })).toBe(true);
+    expect(isSearchableSource({ type: 1, searchable: '2' as unknown as number })).toBe(true);
+    expect(isSearchableSource({ type: 1, searchable: '0' as unknown as number })).toBe(false);
   });
 });

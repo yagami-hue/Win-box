@@ -60,6 +60,22 @@ function slug(s: string): string {
   return t || 'profile-' + Date.now().toString(36);
 }
 
+/** 档案名是否仍为**自动生成**（含迁移/导入产生）——可被「旧订阅 xx」自动改名覆盖；用户改过名的保留 */
+function isAutoProfileName(p: UserProfile): boolean {
+  const n = (p.name || '').trim();
+  if (!n) return true;
+  if (/^(旧订阅|新订阅)\s/.test(n)) return true;
+  if (n === '默认' || n === 'default' || n === '未命名配置') return true;
+  const tail = (p.apiUrl || '').split('/').pop()?.split('?')[0] ?? '';
+  return !!tail && n === tail;
+}
+
+/** 「旧订阅 / 新订阅」后缀用的本地时间戳（`MM-DD HH:mm`） */
+export function subscriptionStamp(d = new Date()): string {
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 /**
  * ★ 2026-09-24：取订阅里**真实**的解析接口列表（滤掉合成的「超级解析」type=4）。
  *   理由：type=4 是本机内置解析（桌面版由 ParseService 的隐藏窗口嗅探承担），
@@ -103,10 +119,18 @@ function clampIndex(i: number, len: number): number {
   return Math.min(Math.floor(i), len - 1);
 }
 
+/**
+ * 变更类别（★ 2026-09-27）：
+ * - `'content'`：源 / 解析 / 直播 / 全局（运行期配置真的变了）→ 宿主需要重放配置、丢弃蜘蛛实例、重新预热；
+ * - `'ui'`：**只换了「选中的源 / 直播线路」**（`ui.*`）→ 运行期配置一字未变，
+ *   宿主**不得**做任何重活（否则「切一次源」= 重放整份配置 + 清空实例缓存 + 清空搜索缓存 + 预热别的源）。
+ */
+export type ConfigChangeKind = 'content' | 'ui';
+
 export class UserConfigManager {
   private snap: UserConfig = emptyUserConfig();
   private loaded = false;
-  private onChange: ((snap: UserConfig) => void) | null = null;
+  private onChange: ((snap: UserConfig, kind: ConfigChangeKind) => void) | null = null;
 
   constructor(
     private store: JsonStore,
@@ -114,7 +138,7 @@ export class UserConfigManager {
   ) {}
 
   /** 注册变更回调（SpiderHost 用它同步 sourceMap / 全局 jar / lives / active 键） */
-  setOnChange(cb: (snap: UserConfig) => void): void {
+  setOnChange(cb: (snap: UserConfig, kind: ConfigChangeKind) => void): void {
     this.onChange = cb;
   }
 
@@ -181,7 +205,8 @@ export class UserConfigManager {
     if (!next.activeProfileId && (next.sources.length > 0 || next.lives.length > 0) && next.profiles.length === 0) {
       const first: UserProfile = {
         id: slug(apiUrl) || 'default',
-        name: apiUrl ? apiUrl.split('/').pop()!.split('?')[0] || apiUrl : '默认',
+        // ★ 2026-09-26：首次导入也按「新订阅 xx」命名（后续再导入会把当前档案改名为「旧订阅 xx」）
+        name: `新订阅 ${subscriptionStamp()}`,
         apiUrl: apiUrl || '',
         json: serializeImport(parsed),
         sourceCount: parsed.sites.length,
@@ -237,27 +262,6 @@ export class UserConfigManager {
     return { ...p };
   }
 
-  /** 追加档案（不切换当前、不改源列表）：用于导入新订阅前快照旧订阅，保留可切回。 */
-  appendProfileSnapshot(name: string): UserProfile {
-    const parsed = {
-      sites: this.snap.sources,
-      lives: this.snap.lives,
-      spider: this.snap.global.spider,
-      flags: this.snap.global.flags,
-      parses: this.snap.parses,
-    };
-    const p: UserProfile = {
-      id: slug(name) + '-' + Date.now().toString(36).slice(-4),
-      name: name.trim() || '未命名配置',
-      apiUrl: this.snap.apiUrl || '',
-      json: serializeImport(parsed as SiteConfig),
-      sourceCount: parsed.sites.length,
-      importedAt: new Date().toISOString(),
-    };
-    this.apply({ ...this.snap, profiles: [...this.snap.profiles, p] });
-    return { ...p };
-  }
-
   /** 切换档案：解析其 json 全量恢复 sources/lives/global。json 为空/解析失败抛中文错。 */
   activateProfile(id: string): void {
     const p = this.snap.profiles.find((x) => x.id === id);
@@ -303,6 +307,17 @@ export class UserConfigManager {
       ...this.snap,
       profiles: this.snap.profiles.map((p) => (p.id === id ? { ...p, name: t } : p)),
     });
+  }
+
+  /**
+   * ★ 2026-09-26（用户口径）：导入新订阅时，把当前生效档案改名为「旧订阅 xx」。
+   * 仅当它还是**自动命名**（默认名 / URL 尾段 / 「旧订阅·新订阅 xx」）时才改；
+   * 用户手动命名（存为新配置 / 重命名过）的档案保留原名，不覆盖用户的命名。
+   */
+  renameActiveProfileAsOld(name: string): void {
+    const p = this.snap.profiles.find((x) => x.id === this.snap.activeProfileId);
+    if (!p || !isAutoProfileName(p)) return;
+    this.updateProfileName(p.id, name);
   }
 
   /** 档案元信息（不含 json 体，避免 IPC 载荷过大） */
@@ -397,22 +412,24 @@ export class UserConfigManager {
     if (!key) return;
     if (!this.snap.sources.some((s) => s.key === key)) return;
     if (this.snap.ui.activeSourceKey === key) return;
-    this.apply({ ...this.snap, ui: { ...this.snap.ui, activeSourceKey: key } });
+    // ★ 'ui'：只动了 ui.activeSourceKey → 运行期配置未变（见 ConfigChangeKind）
+    this.apply({ ...this.snap, ui: { ...this.snap.ui, activeSourceKey: key } }, 'ui');
   }
 
   /** 选中直播线路（越界 clamp 到 [0, lives.length-1]） */
   setActiveLiveIndex(i: number): void {
     const clamped = clampIndex(i, this.snap.lives.length);
     if (clamped === this.snap.ui.activeLiveIndex) return;
-    this.apply({ ...this.snap, ui: { ...this.snap.ui, activeLiveIndex: clamped } });
+    // ★ 'ui'：同上
+    this.apply({ ...this.snap, ui: { ...this.snap.ui, activeLiveIndex: clamped } }, 'ui');
   }
 
   // ---------------------------------------------------------------
-  private apply(next: UserConfig): void {
+  private apply(next: UserConfig, kind: ConfigChangeKind = 'content'): void {
     this.snap = next;
     this.loaded = true;
     this.persist();
-    this.onChange?.(this.snapshot());
+    this.onChange?.(this.snapshot(), kind);
   }
 
   private persist(): void {

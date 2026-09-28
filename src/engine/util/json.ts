@@ -51,6 +51,75 @@ export function stripJsonComments(input: string): string {
   return out;
 }
 
+/**
+ * 去掉对象/数组里的**尾随逗号**（`[1,2,]` / `{"a":1,}`）——字符串感知。
+ *
+ * ★ 2026-09-28（通解）：安卓 org.json 的 JSONTokener **宽容尾随逗号**（读到 `]`/`}`
+ *   前若只有逗号即当作结束），而 JS 的 JSON.parse 一律拒绝 ⇒ 同一份订阅安卓能导入、
+ *   桌面报「配置不是合法 JSON 对象」。实测订阅 `https://700sjro44343.vicp.fun/eggp/0211/tv.json`：
+ *   剥注释后仍挂在 `\"\",\n      ],` 两处尾随逗号上，去掉即解析成功。
+ */
+export function stripTrailingCommas(input: string): string {
+  let out = '';
+  let inString = false;
+  let escape = false;
+  let pendingComma = -1; // 已写入 out 的「可能是尾随逗号」的下标（其后只有空白才算）
+  for (let i = 0; i < input.length; i++) {
+    const c = input[i];
+    if (inString) {
+      out += c;
+      if (escape) escape = false;
+      else if (c === '\\') escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      pendingComma = -1;
+      out += c;
+      continue;
+    }
+    if (c === ',') {
+      pendingComma = out.length;
+      out += c;
+      continue;
+    }
+    if (c === ']' || c === '}') {
+      if (pendingComma >= 0) out = out.slice(0, pendingComma) + out.slice(pendingComma + 1);
+      pendingComma = -1;
+      out += c;
+      continue;
+    }
+    // 逗号与结束符之间只允许空白；其它字符一出现即说明该逗号是正常分隔符
+    if (c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r') pendingComma = -1;
+    out += c;
+  }
+  return out;
+}
+
+/**
+ * 解析订阅/配置 JSON 的**统一宽容入口**（对齐安卓 org.json 的容忍度）：
+ * ① 剥 `//` 与块注释（字符串感知，见 stripJsonComments）；
+ * ② 严格 `JSON.parse`（既有行为，绝大多数配置走这条）；
+ * ③ 失败 → 去尾随逗号再 parse；**仍失败则抛第一次的错误**（保持既有报错文案与位置，不掩盖真实语法错误）。
+ */
+export function parseJsonLenient(text: string): unknown {
+  const cleaned = stripJsonComments(text);
+  try {
+    return JSON.parse(cleaned);
+  } catch (first) {
+    const repaired = stripTrailingCommas(cleaned);
+    if (repaired !== cleaned) {
+      try {
+        return JSON.parse(repaired);
+      } catch {
+        throw first;
+      }
+    }
+    throw first;
+  }
+}
+
 /** 等价 DefaultConfig.safeJsonString(obj, key, default) */
 export function safeJsonString(
   obj: unknown,

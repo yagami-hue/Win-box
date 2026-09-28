@@ -9,8 +9,9 @@ import SourcePicker from '../components/SourcePicker';
 import { useTheme } from '../lib/theme';
 import { TOP_NAV_THEMES } from '../lib/themeTokens';
 import { getSessionSort, setSessionSort } from '../lib/sessionSort';
-import { wrapImageUrlForRelay } from '../../shared/driveProvider';
+import { wrapImageUrlForRelay, needsDriveBind } from '../../shared/driveProvider';
 import { pickCover, preloadImage } from '../lib/coverPick';
+import DriveBindModal from '../components/DriveBindModal';
 
 type SortClassView = { id: string; name: string; flag?: string; filters?: FilterGroup[] };
 
@@ -56,12 +57,46 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   /** ★ 2026-09-25：全源搜索结果的「按源筛选」当前选中的源 key（'' = 全部） */
   const [aggSrc, setAggSrc] = useState('');
   const keyRef = useRef('');
-  /** ★ 运行时准备中的自动重搜计时器（见 doSearch：pendingSources > 0 时 25s 后自动重搜一次） */
+  /** ★ 2026-09-26：`/search?agg=` 外部入口的本轮关键词（非空即需要跑一次全源搜索） */
+  const aggParam = (searchParams.get('agg') || '').trim();
+  /** ★ 运行时准备中的自动重搜计时器（见 doSearch：pendingSources > 0 时自动重搜） */
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** ★ 2026-09-26：自动重搜计数（大 jar 首次转换要数分钟，单次重搜等不到；上限防死循环） */
+  const aggRetryCount = useRef(0);
+  /**
+   * ★ 2026-09-26：进源时 jar 还在「首次下载+转换」→ 自动重试计数与计时器。
+   *   用户报「摸鱼的配置一个主页都加载不出来」：那只 11MB dex 的 jar 首次转换实测 **198 秒**，
+   *   而进源只等 8s 就报「正在准备运行时」→ 用户看到的就是"打不开"，只能反复手点。
+   *   这里改为**自动重试**（20s 一次，上限 12 次 ≈ 5 分钟；转换完成即自动出内容）。
+   */
+  const prepRetryCount = useRef(0);
+  const prepRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  /** ★ 2026-09-26：源内「网盘绑定」弹层开关 + 已绑定凭据（用于横幅上的状态摘要） */
+  const [bindOpen, setBindOpen] = useState(false);
+  const [driveTokens, setDriveTokens] = useState<Record<string, string>>({});
+  /** ★ 2026-09-27：主进程学到的「需要网盘绑定」源 key（见 needsDriveBind 的第二判据） */
+  const [learnedDriveKeys, setLearnedDriveKeys] = useState<string[]>([]);
   const filtersRef = useRef<Record<string, string>>({});
   /** 挂载恢复：数据就绪后回滚一次滚动位置（loadCategory 异步，须等 items 渲染） */
   const memRestoreRef = useRef(false);
+  /**
+   * ★ 2026-09-27（用户报「从搜索结果返回很慢、一直加载中」）：
+   *   进搜索前的**浏览态快照**（当前源的首页/分类列表 + 分类骨架 + 页码/筛选/定位）。
+   *   退出搜索（返回浏览）时**直接恢复它**，不再 `loadHome` —— 后者会重走
+   *   `homeContent → homeVideoContent → 分类兜底` 整条链（含 .so 的 jar 单次预算 5 分钟），
+   *   而这份列表用户进搜索前明明已经看过了，没有任何理由再取一次。
+   */
+  const browseSnapRef = useRef<{
+    key: string;
+    items: VodItem[];
+    classes: SortClassView[];
+    pageInfo: { page: number; pagecount: number; total: number };
+    pg: number;
+    tid: string;
+    filters: Record<string, string>;
+    fallback: boolean;
+  } | null>(null);
   // ---- 封面策略（★ 2026-09-24 第二轮定稿：**一律以搜索补图为准**，见 lib/coverPick.ts）----
   //   用户反馈「源封面优先」仍有源图根本不显示的情况（防盗链/坏图，中继也救不回）→ 改为：
   //   **未补过的一律查**（TMDB→豆瓣→360，主进程侧 7 天缓存），命中即覆盖源图；源图退化为占位兜底。
@@ -319,6 +354,16 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   async function loadHome(k: string) {
     setAggMode(false);
     setAgg(null);
+    /**
+     * ★ 2026-09-26（用户反馈「不在搜索页进的资源，返回列表偶尔回到上一次的搜索页」）：
+     *   进「浏览态」= 上次搜索的界面记忆已经无关了 —— 必须一起清掉。
+     *   此前只在 `exitSearch()` 里清，于是**换源**（顶栏/侧栏 SourcePicker 不受 aggMode 限制）
+     *   或播放器窗口写盘把旧值复活时，`uiMem.home.search` 会留着 →
+     *   之后任意一次「详情 → 返回」都会被它拉回上一次的搜索结果页。
+     */
+    uiMem.home.search = null;
+    // ★ 2026-09-27：这是「重新浏览某个源」→ 之前的浏览态快照作废（见 browseSnapRef）
+    browseSnapRef.current = null;
     keyRef.current = k;
     setLoading(true);
     setErr('');
@@ -331,15 +376,32 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       setPageInfo({ page: r.page, pagecount: r.pagecount, total: r.total });
       setPg(1);
       setFallback(!!r.homeFallback);
+      prepRetryCount.current = 0; // 成功即复位（下次再遇到准备中的源仍可自动等）
     } catch (e) {
-      setErr((e as Error).message);
+      const msg = (e as Error).message;
+      setErr(msg);
       setItems([]);
       setClasses([]);
       setFallback(false);
+      // ★ jar 首次转换中 → 自动重试（见 prepRetryCount 注释）：不让用户对着"打不开"干瞪眼
+      if (/首次使用该源|正在后台/.test(msg) && prepRetryCount.current < 12) {
+        prepRetryCount.current += 1;
+        if (prepRetryTimer.current) clearTimeout(prepRetryTimer.current);
+        prepRetryTimer.current = setTimeout(() => {
+          prepRetryTimer.current = null;
+          if (keyRef.current === k) void loadHome(k);
+        }, 20_000);
+      }
     } finally {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    return () => {
+      if (prepRetryTimer.current) clearTimeout(prepRetryTimer.current);
+    };
+  }, []);
 
   // 首载：优先用持久化的 ui.activeSourceKey（存在且可用则用），否则回退第一个可用源
   useEffect(() => {
@@ -366,8 +428,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           return firstUsable ? firstUsable.key : (s[0]?.key ?? '');
         };
         // ★ 外部入口：/search?agg=<关键词> —— 详情页「演员 / 相关推荐」与发现页卡片点击后跳来，
-        //   自动跑一次全源搜索。先清 URL 参数（返回/重进不重复触发），再置关键词与「全源」范围后执行。
-        const aggParam = (searchParams.get('agg') || '').trim();
+        //   自动跑一次全源搜索。**具体执行在下面的 aggParam effect**（这样「已在搜索页再次搜索」
+        //   也能触发：同路由只变 query 不会重挂载，旧实现写在首载 effect 里 → 第二次搜索毫无反应）。
         if (aggParam) {
           setSearchParams({}, { replace: true });
           setWd(aggParam);
@@ -379,9 +441,6 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
             setKey(pick);
             keyRef.current = pick;
           }
-          // ★ 显式传「全源」：setState 尚未生效，闭包里读 searchAllSources 会是 false（曾误走单源分支报
-          //   「当前未选中任何源，无法搜索」）
-          requestAnimationFrame(() => { void doSearch(false, aggParam, true); });
           return;
         }
         // ★ 搜索 → 详情 → 返回：恢复上次搜索结果界面（不重新浏览首页）
@@ -437,6 +496,23 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * ★ 2026-09-26（用户反馈「在搜索页再搜一次，偶尔搜不出来/没反应」）：
+   *   `/search?agg=<关键词>` 是同一路由只换 query —— PageShell 以 pathname 为 key → **不重挂载**，
+   *   而此前执行搜索的代码写在「首载 effect（deps=[]）」里 → 第二次搜索根本没人接。
+   *   现把入口执行独立成 effect（依赖关键词）：首载与「已在搜索页再搜一次」都走这里。
+   */
+  useEffect(() => {
+    if (!aggParam) return;
+    // 先清 URL 参数（返回/重进不重复触发），再显式按「全源」范围搜（setState 是异步的，
+    // 闭包里读 searchAllSources 会是旧值 —— 曾误走单源分支报「当前未选中任何源，无法搜索」）。
+    setSearchParams({}, { replace: true });
+    setWd(aggParam);
+    setSearchAllSources(true);
+    requestAnimationFrame(() => { void doSearch(false, aggParam, true); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aggParam]);
 
   async function loadCategory(t: string, page: number, extend: Record<string, string> = {}) {
     const k = keyRef.current;
@@ -515,6 +591,26 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ★ 2026-09-26：源列表本身变了（配置页导入/删源/切档案后广播 winbox:sources-changed）→ 重取源列表；
+  //   当前源已不存在（导入换了一批源）时自动落到第一个可用源并加载，无需重启应用。
+  //   ★ 注意：keyRef 为空时**不切源** —— 挂载瞬间还没选源，此时"自动落到第一个可用源"会把
+  //     首载 effect 即将选中的源抢走（实测会跳到列表里第一个可用源）。
+  useEffect(() => {
+    const onSources = (): void => {
+      void client.cfgGet().then((cfg) => {
+        const s = cfg.sources;
+        setSites(s);
+        if (!keyRef.current || s.some((x) => x.key === keyRef.current)) return;
+        const first = s.find((x) => sourceAvailability(x).usable) ?? s[0];
+        setErr(first ? '' : '尚未导入站源，请先到「配置」页导入');
+        if (first) chooseSource(first.key);
+      }).catch(() => undefined);
+    };
+    window.addEventListener('winbox:sources-changed', onSources);
+    return () => window.removeEventListener('winbox:sources-changed', onSources);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /**
    * 搜索。
    * - 默认（searchAllSources=false）：只搜当前选中源 —— 快，行为与上游 TVBox 的
@@ -538,6 +634,27 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     if (!term) return;
     const allScope = forceAllScope ?? searchAllSources;
     const k = keyRef.current;
+    /**
+     * ★ 2026-09-27：进搜索前拍一份「浏览态快照」（见 browseSnapRef）——
+     *   退出搜索时直接恢复，避免重跑整条 home 管线。
+     *   两个条件缺一不可：
+     *     ① `!aggMode`：已经在搜索页再搜一次时，`items` 里装的是上一次的搜索结果，不能覆盖真正的浏览态；
+     *     ② `items.length > 0`：**必须确实展示过列表才值得恢复** —— 从 `/search?agg=` 外部入口进来时
+     *        本页的浏览态是空的（还没加载任何源），拍空快照会让「退出搜索」变成空列表
+     *        （此时应保持旧行为：loadHome 去加载）。
+     */
+    if (!aggMode && items.length > 0) {
+      browseSnapRef.current = {
+        key: k,
+        items,
+        classes,
+        pageInfo,
+        pg,
+        tid,
+        filters: filtersActive,
+        fallback,
+      };
+    }
     if (allScope) {
       setLoading(true);
       setErr('');
@@ -586,13 +703,21 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         setAgg(r);
         saveSearchMem(term, r, 'all', true);
         // ★ 2026-09-24：有源因「运行时正在下载/转换」未参与（清缓存/首装后常见）→
-        //   横幅提示 + **自动重搜一次**（25s 后），不让用户面对空结果不知道下一步做什么。
-        if (r.pendingSources && r.pendingSources > 0 && !force) {
-          if (retryTimer.current) clearTimeout(retryTimer.current);
-          retryTimer.current = setTimeout(() => {
-            retryTimer.current = null;
-            if (keyRef.current === k) void doSearch(true); // 自动重搜：跳过缓存
-          }, 25_000);
+        //   横幅提示 + 自动重搜，不让用户面对空结果不知道下一步做什么。
+        //   ★ 2026-09-26（大 jar 适配）：改为**循环重搜**（每次 30s，最多 12 次 ≈ 6 分钟）——
+        //   10MB 级 dex 首次转换实测要数分钟，原先「只重搜一次（25s）」根本等不到转换完成，
+        //   用户再点也还是「未参与」。次数上限防死循环；没有 pending 时计数归零。
+        if (r.pendingSources && r.pendingSources > 0) {
+          if (aggRetryCount.current < 12) {
+            aggRetryCount.current += 1;
+            if (retryTimer.current) clearTimeout(retryTimer.current);
+            retryTimer.current = setTimeout(() => {
+              retryTimer.current = null;
+              if (keyRef.current === k) void doSearch(true); // 自动重搜：跳过缓存
+            }, 30_000);
+          }
+        } else {
+          aggRetryCount.current = 0;
         }
       } catch (e) {
         setErr(`聚合搜索失败：${(e as Error).message}`);
@@ -650,6 +775,24 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     uiMem.home.search = null;
     schedulePersist();
     const k = keyRef.current;
+    /**
+     * ★ 2026-09-27（用户报「从搜索结果返回很慢」）：**优先恢复搜索前的浏览态**，零网络、零 JVM 调用。
+     *   此前无条件 `loadHome(k)` → 重走整条 home 管线（jar/native 源可达数十秒~5 分钟），
+     *   而这份列表用户进搜索前刚看过。仅当没有快照（如从别的页面直接进搜索）才回落到重新加载。
+     */
+    const snap = browseSnapRef.current;
+    if (snap && k && snap.key === k) {
+      browseSnapRef.current = null; // 用掉即失效（下次进搜索会重新拍一份）
+      setErr('');
+      setItems(snap.items);
+      setClasses(snap.classes);
+      setPageInfo(snap.pageInfo);
+      setPg(snap.pg);
+      setTid(snap.tid);
+      setFiltersActive(snap.filters);
+      setFallback(snap.fallback);
+      return;
+    }
     if (k) void loadHome(k);
   }
 
@@ -683,6 +826,47 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const curSite = sites.find((s) => s.key === key) ?? (key ? undefined : sites[0]);
   const listStyle = !!curSite?.style && /list/i.test(curSite.style);
   const siteCats = curSite?.categories?.filter(Boolean) ?? [];
+  /**
+   * ★ 2026-09-26（用户要求）：**源内网盘绑定** —— 该源是否靠网盘 Cookie 取流（ext 带 Cloud-drive
+   *   或蜘蛛类属网盘家族）。是则在源主页给一条横幅 +「网盘绑定」入口，不用再去点源里的「配置」源。
+   */
+  /**
+   * ★ 2026-09-27（用户要求「确保每一个需要绑定网盘的都能有这段提示，不管换什么订阅什么源」）：
+   *   判定用 `needsDriveBind`（静态类名/ext 判据 ∪ **主进程运行期学到的**源 key）。
+   *   学习点 = 主进程 `play()` 里蜘蛛真实产出网盘直链 → 记入 `<userData>/drive-bind-learned.json`，
+   *   所以「摸鱼版立播（`csp_Libvio` + `ext={"site":[…]}`）之类清单漏网」也能在首次播放后被覆盖。
+   */
+  const driveSrc = needsDriveBind(curSite, learnedDriveKeys);
+  const boundDriveNames = ['quark', 'uc', 'baidu', 'ali', '115', 'bili']
+    .filter((p) => driveTokens[p])
+    .map((p) => ({ quark: '夸克', uc: 'UC', baidu: '百度', ali: '阿里', '115': '115', bili: '哔哩' } as Record<string, string>)[p]);
+  // 进入网盘类源时拉一次绑定状态（保存后由弹层回调刷新）
+  const refreshDriveTokens = (): void => {
+    void client.driveGet().then(setDriveTokens).catch(() => undefined);
+  };
+  useEffect(() => {
+    if (driveSrc) refreshDriveTokens();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [driveSrc]);
+  /**
+   * 学习结果的刷新时机：① 挂载；② 源列表变化；③ **窗口重新获得焦点** ——
+   * 播放器里点「去点播页绑定」时主进程会把主窗口 focus 起来（IPC.UI_GOTO_DRIVE_BIND），
+   * 这里据此拿到刚学到的那条，横幅才会即时出现（不必重启）。
+   */
+  useEffect(() => {
+    const load = (): void => {
+      void client.driveBindKeys().then(setLearnedDriveKeys).catch(() => undefined);
+    };
+    load();
+    const onFocus = (): void => load();
+    const onSources = (): void => load();
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('winbox:sources-changed', onSources);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('winbox:sources-changed', onSources);
+    };
+  }, []);
 
   return (
     <>
@@ -741,6 +925,20 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
             该源首页未提供推荐列表，已自动加载首个分类内容（点上方分类可切换）。
           </div>
         )}
+        {/* ★ 2026-09-26：网盘类源 → 源内绑定入口（替代「源内配置源」：cookie 直接配在应用里） */}
+        {driveSrc && !aggMode && (
+          <div
+            className="banner"
+            style={{ borderLeftColor: boundDriveNames.length ? 'var(--accent-2)' : 'var(--warn)', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}
+          >
+            <span>
+              该源用网盘取流：
+              {boundDriveNames.length ? `已绑定「${boundDriveNames.join('/')}」` : '尚未绑定网盘 Cookie'}
+              {boundDriveNames.length ? '' : '，绑定后本源才能列出/播放盘内资源'}。
+            </span>
+            <button className="primary" onClick={() => setBindOpen(true)}>网盘绑定</button>
+          </div>
+        )}
 
         {aggMode ? (
           agg && !err ? (
@@ -754,7 +952,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                     {/* ★ 缓存秒回提示：这次结果是本机缓存（5 分钟内搜过同一关键词）→ 给一个「重新搜索」 */}
                     {agg.pendingSources ? (
                       <div style={{ marginTop: 6 }}>
-                        ⏳ {agg.pendingSources} 个源正在准备运行时（首次下载/转换 jar，约 10~40 秒），本次未参与 —— 约 25 秒后会自动再搜一次；也可以点
+                        ⏳ {agg.pendingSources} 个源正在准备运行时（首次下载/转换 jar：小 jar 约 10~40 秒，大 jar 可能需数分钟），本次未参与 —— 会自动重搜（每 30 秒一次，最多 6 分钟）；也可以点
                         <button className="linkbtn" style={{ margin: '0 4px' }} onClick={() => void doSearch(true)}>立即重搜</button>
                       </div>
                     ) : null}
@@ -974,6 +1172,18 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           </>
         )}
       </div>
+      {/* ★ 2026-09-26：源内网盘绑定弹层（保存后刷新绑定状态 + 重载本源首页，让新 cookie 立即生效） */}
+      {bindOpen && curSite && (
+        <DriveBindModal
+          siteName={curSite.name || curSite.key}
+          onClose={() => setBindOpen(false)}
+          onSaved={() => {
+            refreshDriveTokens();
+            const k = keyRef.current;
+            if (k) void loadHome(k);
+          }}
+        />
+      )}
     </>
   );
 }

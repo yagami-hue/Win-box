@@ -31,6 +31,15 @@ export interface PoolResult {
   data: string;
   /** ok=false 时的失败原因（超时/退出/排队超时…） */
   reason?: PoolFailReason;
+  /**
+   * ★ 2026-09-28：serve 信封里**蜘蛛自己报的错**（`env.ok=false` 时的 data，形如
+   *   `java.lang.ClassNotFoundException: com.github.catvod.spider.Xxx` / 蜘蛛异常串）。
+   *   传输层本身是成功的（ok 仍为 true → 不回退一次性），但调用方必须据此
+   *   ① 记失败原因（翻译后上屏）② 触发「类缺失 → 缓存 jar 并集兜底」重试。
+   *   旧行为把 `env.ok=false` 的 data 当**正常蜘蛛输出**返回 → 上述两件事全部失效
+   *   （实测：`木兮影视` 报出上一请求遗留的陈旧原因 “java.lang.Object”）。
+   */
+  error?: string;
 }
 
 export interface PendingEntry {
@@ -53,6 +62,12 @@ interface Proc {
   queue: QueuedEntry[];
   lastUsed: number;
   dead: boolean;
+  /**
+   * ★ 2026-09-26：钉住到该时刻（毫秒）。本地代理（壳的 `<host>/proxy?do=proxy&key=…`）正在服务
+   *   播放时，该 JVM 是**内容源**，被回收就会让播放中段断流 → 回收器跳过钉住的进程。
+   *   只在「额度压力回收（reapOneLru）」时生效；空闲回收本就只收冗余进程。
+   */
+  pinnedUntil?: number;
 }
 
 interface SpawnSpec {
@@ -286,6 +301,7 @@ export class SpiderProcPool {
     for (const procs of this.groups.values()) {
       for (const p of procs) {
         if (p.dead || p.pending.size > 0 || p.queue.length > 0) continue; // 有在途请求的绝不回收
+        if (p.pinnedUntil && p.pinnedUntil > Date.now()) continue; // ★ 本地代理正在服务播放 → 不回收
         if (procs.length === 1 && procs === keepGroup) continue; // 本组唯一进程不可回收（还要用它排队）
         if (!victim || p.lastUsed < victim.lastUsed) victim = p;
       }
@@ -323,7 +339,14 @@ export class SpiderProcPool {
             proc.pending.delete(env.id ?? '');
             proc.lastUsed = Date.now();
             // ★ ok:true 且 data 为空串 = 蜘蛛合法空结果（不触发调用方回退）
-            p.resolve({ ok: true, data: typeof env.data === 'string' ? env.data : '' });
+            // ★ 2026-09-28：信封 ok=false = 蜘蛛自己抛了（类缺失/内部异常…）—— 传输层成功，
+            //   但 data 是**错误串**而不是蜘蛛输出：单独放进 error，data 归空，
+            //   调用方据此记原因 / 触发类缺失兜底重试（见 PoolResult.error 注释）。
+            if (env.ok === false) {
+              p.resolve({ ok: true, data: '', error: String(env.data ?? '') });
+            } else {
+              p.resolve({ ok: true, data: typeof env.data === 'string' ? env.data : '' });
+            }
             this.drainQueue(proc);
           }
         } catch {
@@ -382,6 +405,17 @@ export class SpiderProcPool {
 
   startReclaimTimer(): ReturnType<typeof setInterval> {
     return setInterval(() => this.reclaim(), RECLAIM_INTERVAL_MS);
+  }
+
+  /**
+   * ★ 2026-09-26：按 key 钉住进程（本地代理正在服务播放时不回收）。
+   * 到期自动失效，无需解除；key 不存在（进程已死/未起）时静默无操作。
+   */
+  pin(key: string, ttlMs: number): void {
+    const procs = this.groups.get(key);
+    if (!procs) return;
+    const until = Date.now() + Math.max(1000, ttlMs);
+    for (const p of procs) if (!p.dead) p.pinnedUntil = until;
   }
 
   /** 应用退出：杀掉全部（进程清理由 dispose 调用） */

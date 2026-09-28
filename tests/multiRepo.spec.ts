@@ -32,6 +32,34 @@ describe('parseMultiRepo', () => {
     expect(parseMultiRepo('{"urls":[]}')).toBeNull();
     expect(parseMultiRepo('{"urls":[{"name":"无url"},{"url":""}]}')).toBeNull();
   });
+
+  // ★ 2026-09-26：线上多仓（实测 18CR.json）在 urls 里夹 `//注释` 行，严格 JSON.parse 必挂 →
+  //   旧实现返回 null → 落到 parseSiteConfig（没有 sites）→ **导入"成功"但 0 个源**
+  //   → 用户看到「整份配置一个源都没有、搜也搜不了」。
+  it('★ 带 // 注释的多仓仍能识别（注释行不是有效项，被忽略）', () => {
+    const text = [
+      '{',
+      '  "urls": [',
+      '//https://mirror.ghproxy.com/https://raw.githubusercontent.com/xfcjp/xfcjp.github/main/ok.json',
+      '    { "url": "https://real.example/a.json", "name": "甲" },',
+      '    // 被注释掉的无效仓',
+      '    { "url": "https://real.example/b.json" }',
+      '  ]',
+      '}',
+    ].join('\n');
+    expect(parseMultiRepo(text)).toEqual({
+      items: [
+        { url: 'https://real.example/a.json', name: '甲' },
+        { url: 'https://real.example/b.json', name: undefined },
+      ],
+    });
+  });
+
+  it('★ 剥注释不会破坏字符串里的 URL（https:// 的 // 必须留着）', () => {
+    const r = parseMultiRepo('{"urls":[{"url":"https://a.example/x.json","name":"带//的名称"}]}');
+    expect(r?.items?.[0]?.url).toBe('https://a.example/x.json');
+    expect(r?.items?.[0]?.name).toBe('带//的名称');
+  });
 });
 
 describe('isFetchedRepoUrl / repoDisplayName', () => {

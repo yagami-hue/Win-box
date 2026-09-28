@@ -138,7 +138,40 @@ export function recentWatch(limit = 100): WatchHistory[] {
     .slice(0, limit);
 }
 
+// ---- ★ 2026-09-26：历史页「有更新」检测的两个纯函数（可单测）----
+
+/** 从历史记录的备注/名称里解析**已看到第几集**（解析不到返回 0，如电影「HD」） */
+export function watchedEpisodeOf(it: Pick<WatchHistory, 'remarks' | 'name'>): number {
+  const s = `${it.remarks || ''} ${it.name || ''}`;
+  const m = /(?:[Ss]\d{1,2})?[Ee][Pp]?\s*0*(\d{1,4})|第\s*0*(\d{1,4})\s*[集话話期]/.exec(s);
+  const n = m ? Number(m[1] ?? m[2]) : 0;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** 源当前最新集数：取各线路集数最大值与备注「更新至N集」两处的大者 */
+export function latestEpisodeOf(d: { episodes?: Record<string, Array<unknown>>; remarks?: string }): number {
+  let n = 0;
+  for (const list of Object.values(d.episodes || {})) n = Math.max(n, Array.isArray(list) ? list.length : 0);
+  const m = /(?:更新至|全)\s*0*(\d{1,4})\s*[集话話期]/.exec(d.remarks || '');
+  if (m) n = Math.max(n, Number(m[1]) || 0);
+  return n;
+}
+
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * ★ 2026-09-26：**只写播放进度与观看历史**（独立播放器窗口专用）。
+ *
+ * 为什么需要：播放器窗口与主窗口是两个渲染进程、共享同一份 localStorage。播放器窗口启动时
+ * 会把当时 localStorage 的 `home/detail`（含「上次搜索态」）读进自己的 uiMem；此后它每写一次历史
+ * （recordWatch / setPlayTime → schedulePersist）都会**整份**写盘 → 把主窗口已经清掉的旧值
+ * **复活**。用户症状：不在搜索页进的资源，返回列表却回到了上一次的搜索页。
+ * 打开本开关后，播放器窗口写盘时沿用 localStorage 里的 `home/detail`，只覆盖 history/playTime。
+ */
+let historyOnlyWriter = false;
+export function markHistoryOnlyWriter(): void {
+  historyOnlyWriter = true;
+}
 
 /**
  * 防抖持久化：2s 内多次变更合并为一次写盘。
@@ -161,16 +194,16 @@ export function saveUiMemory() {
   // ★ 多窗口合并写盘：主窗口与独立播放器窗口是不同渲染进程，各自持有一份 uiMem。
   //   若直接覆盖 localStorage，任一阵地 flush 都会把另一窗口刚写的历史冲掉（历史上"历史为空"的根因）。
   //   这里把 localStorage 现存 history 按每条 url 合并（同 url 取 updatedAt 更新者），再整写。
-  const existing = (() => {
+  const prev = (() => {
     try {
       const raw = localStorage.getItem('tvboxUiMemory');
       if (!raw) return null;
-      const d = JSON.parse(raw);
-      return d && Array.isArray(d.history) ? d.history as Array<[string, unknown]> : null;
+      return JSON.parse(raw) as { history?: Array<[string, unknown]> } | null;
     } catch {
       return null;
     }
   })();
+  const existing = prev && Array.isArray(prev.history) ? prev.history : null;
   const map = new Map<string, WatchHistory>(uiMem.history);
   if (existing) {
     for (const [k, v] of existing) {
@@ -194,9 +227,13 @@ export function saveUiMemory() {
       }
     }
   }
+  // 播放器窗口：浏览态（home/detail）沿用盘里主窗口写的那份，绝不用自己的旧快照覆盖（见 markHistoryOnlyWriter）
+  const keep = prev as { home?: unknown; detail?: unknown } | null;
+  const home = historyOnlyWriter && keep?.home ? keep.home : uiMem.home;
+  const detail = historyOnlyWriter && Array.isArray(keep?.detail) ? keep.detail : Array.from(uiMem.detail.entries());
   const data = {
-    home: uiMem.home,
-    detail: Array.from(uiMem.detail.entries()),
+    home,
+    detail,
     playTime: Array.from(uiMem.playTime.entries()),
     history: Array.from(map.entries()),
   };
@@ -207,7 +244,7 @@ export function saveUiMemory() {
     try {
       localStorage.setItem(
         'tvboxUiMemory',
-        JSON.stringify({ home: uiMem.home, detail: [], playTime: [], history: Array.from(map.entries()) }),
+        JSON.stringify({ home, detail: [], playTime: [], history: Array.from(map.entries()) }),
       );
     } catch {
       // ignore（彻底写不进去时静默，避免影响播放）

@@ -52,6 +52,80 @@ afterEach(() => {
   dirs.length = 0;
 });
 
+describe('UserConfigManager — 变更类别（★ 2026-09-27 切源不再触发重活）', () => {
+  /** 记录每次 onChange 的 kind */
+  function spyKinds(m: UserConfigManager): string[] {
+    const kinds: string[] = [];
+    m.setOnChange((_snap, kind) => kinds.push(kind));
+    return kinds;
+  }
+
+  it('★ setActiveSource / setActiveLiveIndex → kind = "ui"（宿主据此跳过热活）', () => {
+    const m = newManager(tmpDir());
+    m.addSource(bean('a'));
+    m.addSource(bean('b'));
+    // 先建两条 live 以便真正切换线路（默认 activeLiveIndex=0，切到自己不产生变更）
+    m.replaceFromImport(
+      {
+        sites: [bean('a'), bean('b')],
+        lives: [
+          { name: 'L1', type: '0', url: 'https://x/l1.m3u', api: '', ext: '', jar: '', epg: '', playerType: '', timeout: 10 },
+          { name: 'L2', type: '0', url: 'https://x/l2.m3u', api: '', ext: '', jar: '', epg: '', playerType: '', timeout: 10 },
+        ],
+        parses: [],
+        flags: [],
+        spider: '',
+        jarCache: 'true',
+        danmaku: '',
+        wallpaper: '',
+        hosts: {},
+        rules: [],
+        doh: [],
+        ads: [],
+        proxy: [],
+      },
+      '',
+    );
+    const kinds = spyKinds(m);
+    m.setActiveSource('b');
+    expect(kinds).toEqual(['ui']);
+
+    kinds.length = 0;
+    m.setActiveLiveIndex(1);
+    expect(kinds).toEqual(['ui']);
+
+    // 选中同一个源 → 连事件都不发（早退）
+    kinds.length = 0;
+    m.setActiveSource('b');
+    expect(kinds).toEqual([]);
+  });
+
+  it('★ 真正的配置变更仍报 "content"（源/解析/直播/全局）', () => {
+    const m = newManager(tmpDir());
+    m.addSource(bean('a'));
+    const kinds = spyKinds(m);
+    m.addSource(bean('b'));
+    m.updateSource('b', { name: 'B2' } as SourceUpdatePatch);
+    m.moveSource('b', 'up');
+    m.deleteSource('a');
+    expect(kinds.length).toBeGreaterThanOrEqual(4);
+    expect(kinds.every((k) => k === 'content')).toBe(true);
+  });
+
+  it('切源只动 ui.*，其余字段一字不变（宿主因此可以安全跳过重放）', () => {
+    const m = newManager(tmpDir());
+    m.addSource(bean('a'));
+    m.addSource(bean('b'));
+    const before = m.snapshot();
+    m.setActiveSource('b');
+    const after = m.snapshot();
+    expect(after.ui.activeSourceKey).toBe('b');
+    expect(after.sources).toEqual(before.sources);
+    expect(after.parses).toEqual(before.parses);
+    expect(after.global).toEqual(before.global);
+  });
+});
+
 describe('UserConfigManager — 增删改排序与选中', () => {
   it('addSource 后 snapshot 有序返回；重复 key 拒绝并抛中文错', () => {
     const m = newManager(tmpDir());
@@ -281,5 +355,46 @@ describe('UserConfigManager v2 — 多配置档案（profiles）', () => {
     m.deleteProfile(pa); // 现在 active=另一个，可删 A
     expect(m.profiles().some((p) => p.id === pa)).toBe(false);
     expect(m.profiles().length).toBe(1);
+  });
+
+  // ★ 2026-09-26（用户口径）：导入新订阅 → 旧档案改名「旧订阅 xx」+ 新档案「新订阅 xx」并切换过去
+  describe('导入新订阅的档案命名（旧订阅/新订阅）', () => {
+    it('自动命名的当前档案 → 改名「旧订阅 xx」；新导入存为「新订阅 xx」并生效', () => {
+      const dir = tmpDir();
+      const m = newManager(dir);
+      // 首次导入：无档案 → replaceFromImport 自动建默认档案（名「新订阅 xx」，属自动命名）
+      m.replaceFromImport(fullConfig([bean('old1')]), 'https://host/old.json');
+      expect(m.profiles()[0].name).toMatch(/^新订阅 /);
+
+      // 第二次导入（新增订阅）走的就是 SpiderHost 的口径
+      m.renameActiveProfileAsOld('旧订阅 09-26 10:00');
+      m.saveAsProfile('新订阅 09-26 10:00', { parsed: fullConfig([bean('new1'), bean('new2')]), apiUrl: 'https://host/new.json' });
+
+      expect(m.profiles().map((p) => p.name)).toEqual(['旧订阅 09-26 10:00', '新订阅 09-26 10:00']);
+      expect(m.sources().map((s) => s.key)).toEqual(['new1', 'new2']);
+      // 切回旧订阅仍可恢复旧源
+      const old = m.profiles()[0];
+      m.activateProfile(old.id);
+      expect(m.sources().map((s) => s.key)).toEqual(['old1']);
+    });
+
+    it('用户手动命名过的档案不被「旧订阅」覆盖；再次导入时旧档案名保持', () => {
+      const dir = tmpDir();
+      const m = newManager(dir);
+      m.replaceFromImport(fullConfig([bean('o1')]), 'https://host/o.json');
+      m.updateProfileName(m.activeProfileId(), '我的主力订阅');
+
+      m.renameActiveProfileAsOld('旧订阅 09-26 11:00');
+      expect(m.profiles()[0].name).toBe('我的主力订阅'); // 手动名保留
+
+      // 已经是自动名的「旧订阅 xx」可被下一次导入继续改名（避免越攒越多同名）
+      m.renameActiveProfileAsOld('旧订阅 09-26 12:00');
+      expect(m.profiles()[0].name).toBe('我的主力订阅'); // 手动名的仍不动
+      m.saveAsProfile('新订阅 09-26 12:00', { parsed: fullConfig([bean('o2')]), apiUrl: 'https://host/o2.json' });
+      m.renameActiveProfileAsOld('旧订阅 09-26 13:00');
+      // 当前生效的是「新订阅 12:00」（自动名）→ 可被改名
+      expect(m.profiles()[1].name).toBe('旧订阅 09-26 13:00');
+      expect(m.profiles()[0].name).toBe('我的主力订阅');
+    });
   });
 });

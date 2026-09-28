@@ -8,25 +8,27 @@ import mpegts from 'mpegts.js';
 import { uiMem, setPlayTime } from '../lib/uiMemory';
 import { client } from '../api/client';
 import { parseSubtitleFile, shiftCues } from '../../engine/subtitle/parseSubtitle';
-import { buildSearchQuery, extractEp, animeTitleForQuery } from '../../engine/subtitle/normalizeQuery';
+import { buildSearchQuery, extractEp, animeTitleForQuery, normalizeTitle } from '../../engine/subtitle/normalizeQuery';
 import type { SubtitleSettings, SubtitleCandidate } from '../../shared/subtitle';
 import { parseDanmakuResponse } from '../../engine/danmaku/parseDanmakuXml';
-import { danmakuQueryCandidates } from '../../engine/danmaku/normalizeQuery';
+import { danmakuQueryCandidates, parseEpisodeInput, episodeFieldFromName, formatCandidateLabel } from '../../engine/danmaku/normalizeQuery';
+import { customEndpointsText, mergeEndpoints, pickAnimesForExpand, seasonOf, sortCandidatesByEp } from '../../engine/danmaku/endpoints';
 import { resolvePlayTarget } from '../lib/playTarget';
-import { loadPlayerPrefs, savePlayerPrefs, type PlayerPrefs } from '../lib/playerPrefs';
+import { loadPlayerPrefs, savePlayerPrefs, PLAYER_FITS, type PlayerPrefs, type PlayerFit } from '../lib/playerPrefs';
 import { driveProviderFromUrl, driveProviderLabel } from '../../shared/driveProvider';
 import {
   DEFAULT_DANMAKU_SETTINGS,
   type DanmakuAnime,
   type DanmakuCandidate,
   type DanmakuItem,
-  type DanmakuSettingsView,
+  type DanmakuSettings,
 } from '../../shared/danmaku';
 import DanmakuOverlay from './DanmakuOverlay';
 
 // ---- 弹幕匹配记忆：资源名常被规避审核改得奇奇怪怪，首次命中后记住 episodeId 与规范名，
-//     下次同资源/同怪名输入直接复用（localStorage，仅渲染层）。----
-interface DmMem { episodeId: number; anime?: string; ep?: string }
+//     下次同资源/同怪名输入直接复用（localStorage，仅渲染层）。
+//     ★ 2026-09-26：多来源后同时记住 source（接口基础地址）。----
+interface DmMem { episodeId: number; source?: string; sourceName?: string; anime?: string; ep?: string }
 const DM_MEM_KEY = 'winbox-dm-mem';
 function loadDmMem(): Record<string, DmMem> {
   try {
@@ -39,8 +41,16 @@ function loadDmMem(): Record<string, DmMem> {
 function saveDmMem(m: Record<string, DmMem>): void {
   try { localStorage.setItem(DM_MEM_KEY, JSON.stringify(m)); } catch { /* ignore */ }
 }
-/** 最多展开前 2 部命中番剧的剧集列表（避免多调 bangumi 接口浪费资源） */
-const MAX_ANIME_EXPAND = 2;
+/** 最多展开前 4 部命中番剧的剧集列表（★ 跨来源优先：避免前几名全被同一来源占满） */
+const MAX_ANIME_EXPAND = 4;
+/** ★ 2026-09-26：自动匹配最多依次尝试的候选数（某来源无弹幕/失败就换下一个） */
+const MAX_DM_TRY = 5;
+/** ★ 自动尝试的总等待上限（自建接口首次取弹幕需回源聚合，单次可达 ~15s；避免长时间干等） */
+const DM_TRY_BUDGET_MS = 60000;
+/** 单次取到这么多条即视为「够看」，立即停止继续尝试其它候选 */
+const DM_RICH_ENOUGH = 40;
+/** 最优结果仍少于这么多条 → 提示「疑似花絮/预告，建议换候选」（实测花絮条目常只有 1 条） */
+const DM_THIN = 10;
 
 /** 剧集标题（第3话/03）是否与目标集号（已去前导零）同集 */
 function episodeMatches(title: string | undefined, targetEp: string): boolean {
@@ -49,28 +59,46 @@ function episodeMatches(title: string | undefined, targetEp: string): boolean {
   return !!m && m[1].replace(/^0+/, '') === targetEp;
 }
 
+/** 候选排序：优先「集号命中」的，其后按原顺序（多来源自动尝试时先试更可能命中的） */
+function orderCandidatesForEp(list: DanmakuCandidate[], targetEp: string): DanmakuCandidate[] {
+  if (!targetEp) return list;
+  const hit = list.filter((c) => episodeMatches(c.episodeTitle, targetEp));
+  const rest = list.filter((c) => !episodeMatches(c.episodeTitle, targetEp));
+  return [...hit, ...rest];
+}
+
 /**
  * 弹幕候选搜索（两级：作品名搜番剧 → 展开剧集列表）。
  * 记忆 > 原文 > 清洗变体逐个试；命中即记忆，返回剧集级候选列表。
+ * ★ 2026-09-26：搜索为主进程**多来源并行**（启用中的接口清单），候选自带来源；
+ *   `season` 由资源名提取 → 同季条目优先（否则「第N季」类剧会先命中花絮条目）。
  */
-async function searchDanmakuCandidates(baseName: string): Promise<DanmakuCandidate[]> {
+async function searchDanmakuCandidates(baseName: string, season?: number): Promise<DanmakuCandidate[]> {
   if (!baseName) return [];
   const mem = loadDmMem();
   const hit = mem[baseName];
-  if (hit) return [{ episodeId: hit.episodeId, title: hit.anime, episodeTitle: hit.ep }];
+  if (hit && hit.source) {
+    return [{ episodeId: hit.episodeId, source: hit.source, sourceName: hit.sourceName || '记忆来源', title: hit.anime, episodeTitle: hit.ep }];
+  }
   for (const q of danmakuQueryCandidates(baseName)) {
     let animes: DanmakuAnime[] = [];
-    try { animes = (await client.danmakuSearch(q)) || []; } catch { animes = []; }
+    try { animes = (await client.danmakuSearch(q, season)) || []; } catch { animes = []; }
     if (!animes.length) continue;
     const expanded: DanmakuCandidate[] = [];
-    for (const a of animes.slice(0, MAX_ANIME_EXPAND)) {
+    for (const a of pickAnimesForExpand(animes, MAX_ANIME_EXPAND)) {
       let list: DanmakuCandidate[] = [];
-      try { list = (await client.danmakuEpisodes(a.bangumiId, a.title)) || []; } catch { list = []; }
+      try { list = (await client.danmakuEpisodes(a.bangumiId, a.title, a.source)) || []; } catch { list = []; }
       expanded.push(...list);
     }
     if (expanded.length) {
       const next = loadDmMem();
-      next[baseName] = { episodeId: expanded[0].episodeId, anime: expanded[0].title, ep: expanded[0].episodeTitle };
+      next[baseName] = {
+        episodeId: expanded[0].episodeId,
+        source: expanded[0].source,
+        sourceName: expanded[0].sourceName,
+        anime: expanded[0].title,
+        ep: expanded[0].episodeTitle,
+      };
       saveDmMem(next);
       return expanded;
     }
@@ -130,6 +158,11 @@ interface VideoPlayerProps {
   startTime?: number;
 }
 
+/** ★ 2026-09-28（用户要求）：控制条图标的「长按开面板」手势状态 */
+type PressState = { timer: ReturnType<typeof setTimeout> | null; longFired: boolean };
+/** 长按判定阈值（ms）：与右键同为「打开调整框」 */
+const LONG_PRESS_MS = 450;
+
 export default function VideoPlayer(props: VideoPlayerProps) {
   const { url, canPrev, canNext, onPrev, onNext, resourceName, danmakuTitle, mini = false, driveBindProvider = null } = props;
   const ref = useRef<HTMLVideoElement>(null);
@@ -139,6 +172,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   /** 字幕/弹幕设置面板是否打开（面板打开时暂停闲置隐藏，悬停面板保持显示） */
   const panelOpenRef = useRef(false);
   const volDragRef = useRef(false);
+  /** ★ 单击/双击判别：双击窗口内到达第二击 → 取消待执行的单击暂停（见 onSurfaceClick） */
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ---- ★ 2026-09-24：播放器设置记忆（音量 / 倍速 / 字幕时间偏移）----
   //   挂载时一次性读取（localStorage，主窗口与独立播放器窗口同源共享），
@@ -245,6 +280,16 @@ export default function VideoPlayer(props: VideoPlayerProps) {
 
   // ---- 外挂字幕 ----
   const [subEnabled, setSubEnabled] = useState(false);
+  // ★ 2026-09-26：画面比例（播放器设置记忆；见 lib/playerPrefs.ts 的 PlayerFit）
+  const [fit, setFit] = useState<PlayerFit>(() => prefsRef.current!.fit);
+  const [fitPanel, setFitPanel] = useState(false);
+  // ★ 2026-09-28（用户要求）：进度条悬停气泡（指向的时间）+ 拖动状态
+  const progRef = useRef<HTMLDivElement>(null);
+  const seekDragRef = useRef(false);
+  const [progHover, setProgHover] = useState<{ x: number; t: number } | null>(null);
+  // ★ 2026-09-28（用户要求）：图标「左键开关 / 右键或长按开调整框」的手势状态（字幕、弹幕各一份）
+  const subPress = useRef<PressState>({ timer: null, longFired: false });
+  const dmPress = useRef<PressState>({ timer: null, longFired: false });
   const [subCues, setSubCues] = useState<{ start: number; end: number; text: string }[]>([]);
   const [subOffset, setSubOffset] = useState(() => prefsRef.current!.subOffset);
   const [subFont, setSubFont] = useState(20);
@@ -259,44 +304,59 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   // 可编辑剧名搜索词：点击字幕按钮后自动填入识别的剧名+集号，用户可改
   const [subQuery, setSubQuery] = useState('');
 
-  // ---- 弹幕（弹弹play，dandanplay） ----
+  // ---- 弹幕（★ 外部聚合接口清单，均在主进程侧请求） ----
   const [dmEnabled, setDmEnabled] = useState(false);
-  const [dmCfg, setDmCfg] = useState<DanmakuSettingsView>({ ...DEFAULT_DANMAKU_SETTINGS, appSecretSet: false });
+  const [dmCfg, setDmCfg] = useState<DanmakuSettings>({ ...DEFAULT_DANMAKU_SETTINGS });
   const [dmItems, setDmItems] = useState<DanmakuItem[]>([]);
   const [dmPanel, setDmPanel] = useState(false);
   const [dmCands, setDmCands] = useState<DanmakuCandidate[]>([]);
   const [dmSearching, setDmSearching] = useState(false);
   const [dmMsg, setDmMsg] = useState('');
   const [dmActiveEp, setDmActiveEp] = useState<number | null>(null);
+  // ★ 2026-09-26：「弹幕源」子面板（接口开关 + 自定义接口文本）
+  const [dmSrcPanel, setDmSrcPanel] = useState(false);
+  const [dmCustomText, setDmCustomText] = useState('');
+  /** 偏好是否已从主进程载入（载入前不触发落盘，避免默认值覆盖已存接口开关） */
+  const [dmCfgLoaded, setDmCfgLoaded] = useState(false);
   // ★ 弹幕查询剧名：有剧名时自动填入识别名，用户可手动改写后搜索（无剧名也能手动输入）
+  // ★ 2026-09-27（用户要求）：「剧名」与「集」拆成两个独立输入框（集支持 S1E01 / 第1集 / 1 等写法），
+  //   两者都自动回填、都可手改 —— 命中率低时用户能直接修正集号，而不是改整串资源名。
   const [dmQuery, setDmQuery] = useState('');
+  const [dmEp, setDmEp] = useState('');
   const dmQueryUserRef = useRef(false);
   // ★ 请求代际（D3/S5 竞态修复）：切集或发起新请求时递增；异步返回后若代际不匹配
   //   （期间换过集/发过更新请求）→ 丢弃结果，防止旧的弹幕/字幕窜到新集。
   const dmGenRef = useRef(0);
   const subGenRef = useRef(0);
   useEffect(() => {
-    if (!dmQueryUserRef.current) setDmQuery(resourceName || danmakuTitle || '');
+    // ★ 2026-09-27：剧名框回填**清洗过的剧名**（此前回填整串资源名，连集号带清晰度一起带进查询词）；
+    //   集号单独回填到「集」框。剧名框保留用户手改（怪名同系列一致）；
+    //   集号**随集重算**（手改只对本集有效——上一集的集号带到下一集必然不对）。
+    if (!dmQueryUserRef.current) {
+      const clean = danmakuTitle?.trim() || normalizeTitle(resourceName || '') || (resourceName || '').trim();
+      setDmQuery(clean);
+    }
+    setDmEp(episodeFieldFromName(resourceName || ''));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resourceName, danmakuTitle]);
-  // ref 承载最新弹幕配置，供 url effect 的闭包读取（避免重挂播放 effect）
-  const dmCfgRef = useRef(dmCfg);
-  dmCfgRef.current = dmCfg;
+  /** ★ 2026-09-26：启用中的弹幕接口数（面板展示「弹幕源 N/M 启用」） */
+  const dmEnabledCount = dmCfg.endpoints.filter((e) => e.enabled !== false).length;
 
-  // 载入弹幕偏好
+  // 载入弹幕偏好（★ 载入完成前不落盘：否则挂载瞬间会先用默认值覆盖已存设置——接口开关尤其不可丢）
   useEffect(() => {
-    client.danmakuGet().then((s: DanmakuSettingsView) => {
+    client.danmakuGet().then((s: DanmakuSettings) => {
       setDmCfg(s);
       setDmEnabled(s.enabled);
-    }).catch(() => undefined);
+      setDmCfgLoaded(true);
+    }).catch(() => setDmCfgLoaded(true));
   }, []);
 
-  // 弹幕设置变化 → 落盘（AppSecret 永不出主进程，仅回传视图）
+  // 弹幕设置变化 → 落盘
   useEffect(() => {
-    const { appSecretSet: _set, ...rest } = dmCfg;
-    void client.danmakuSet({ ...rest, enabled: dmEnabled }).catch(() => undefined);
+    if (!dmCfgLoaded) return;
+    void client.danmakuSet({ ...dmCfg, enabled: dmEnabled }).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dmCfg, dmEnabled]);
+  }, [dmCfg, dmEnabled, dmCfgLoaded]);
 
   // 播放/换集（url 变化）→ 仅清空弹幕状态。
   // ★ 不自动搜索：弹幕 API 只在用户显式打开开关/点「匹配弹幕」时才调用，避免资源浪费。
@@ -309,27 +369,42 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     setDmCands([]);
   }, [url]);
 
-  // 拉取并应用某个候选剧集的弹幕
+  // 拉取某候选的弹幕条目（不改 UI 状态；供手动点选与自动依次尝试复用）
+  const fetchDanmakuItems = async (c: DanmakuCandidate): Promise<DanmakuItem[]> => {
+    const xml = await client.danmakuFetch(c.episodeId, c.source);
+    return parseDanmakuResponse(xml || '');
+  };
+
+  // 展示某候选的弹幕（含来源标注；同步打开弹幕开关，否则 overlay 不绘制）
+  const showDanmaku = (c: DanmakuCandidate, items: DanmakuItem[], hint?: string) => {
+    const src = c.sourceName;
+    setDmItems(items);
+    setDmActiveEp(c.episodeId);
+    setDmEnabled(true);
+    const times = items.map((i) => i.time);
+    const tMin = times.length ? Math.min(...times) : 0;
+    const tMax = times.length ? Math.max(...times) : 0;
+    const base = items.length
+      ? `已加载 ${items.length} 条弹幕（${src} · ${formatCandidateLabel(c.title, c.episodeTitle)}）${tMax > 0 ? ` · 时段 ${fmt(tMin)}~${fmt(tMax)}` : ''}`
+      : `「${src}」该剧集暂无弹幕`;
+    setDmMsg(
+      hint
+        ? `${base}；${hint}`
+        : items.length
+          ? `${base}；不同步可用「时间」±30s 校准`
+          : base,
+    );
+  };
+
+  // 拉取并应用某个候选剧集的弹幕（用户手动点选候选）
   const applyDanmaku = async (c: DanmakuCandidate) => {
     const gen = ++dmGenRef.current; // 本次操作为最新代际，旧的在途请求失效
     setDmSearching(true);
     setDmMsg('');
     try {
-      const xml = await client.danmakuFetch(c.episodeId);
+      const items = await fetchDanmakuItems(c);
       if (gen !== dmGenRef.current) return; // 已换集/已发起更新拉取 → 丢弃过期结果
-      const items = parseDanmakuResponse(xml || '');
-      setDmItems(items);
-      setDmActiveEp(c.episodeId);
-      // 用户在候选列表点选某集 = 明确要看弹幕：同步打开弹幕开关（否则 overlay 不绘制）
-      setDmEnabled(true);
-      const times = items.map((i) => i.time);
-      const tMin = times.length ? Math.min(...times) : 0;
-      const tMax = times.length ? Math.max(...times) : 0;
-      setDmMsg(
-        items.length
-          ? `已加载 ${items.length} 条弹幕（${c.title || ''} ${c.episodeTitle || ''}）${tMax > 0 ? ` · 时段 ${fmt(tMin)}~${fmt(tMax)}` : ''}；不同步可用「时间」±30s 校准`
-          : '该剧集暂无弹幕',
-      );
+      showDanmaku(c, items);
     } catch (e) {
       if (gen !== dmGenRef.current) return; // 过期错误同样丢弃（避免误导）
       setDmMsg((e as Error).message || '弹幕加载失败');
@@ -338,30 +413,55 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     }
   };
 
-  // 匹配并加载弹幕：作品名搜番剧 → 展开剧集候选 → 按集号优选自动加载（点选候选可换集）
-  // query=剧名副名（详情页/兜底截断），epSource=资源名（含当前集，供提取集号）
-  const matchDanmaku = async (query: string, epSource?: string) => {
+  // 匹配并加载弹幕：作品名搜番剧（多来源并行）→ 展开剧集候选 → 按集号优选**依次尝试、保留最丰富的结果**
+  // query=剧名副名（详情页/兜底截断），epInput=「集」输入框内容（★ 2026-09-27 独立可改：
+  //   支持 S01E10 / E10 / 第10集 / 10 / 更新至10；给了季号则同季条目优先）
+  const matchDanmaku = async (query: string, epInput?: string) => {
     const name = query.trim();
     if (!name) { setDmMsg('请填写要搜索的剧名'); return; }
     const gen = ++dmGenRef.current; // 本次匹配为最新代际
     setDmSearching(true);
     setDmMsg('');
     setDmCands([]);
+    // ★ 集号/季号：「集」框优先（用户可改），提不到再退回资源名提取 —— 旧实现只认资源名，
+    //   资源名被改得奇怪时用户无从修正，只能整串改剧名（这是「手动搜索也不准」的根因）。
+    const epParsed = parseEpisodeInput(epInput || '');
+    const season = epParsed.season ?? seasonOf(epInput || '') ?? seasonOf(resourceName || '') ?? seasonOf(danmakuTitle || '') ?? seasonOf(name);
     try {
-      const list = await searchDanmakuCandidates(name);
+      const list = await searchDanmakuCandidates(name, season);
       if (gen !== dmGenRef.current) return; // 期间换集/发起新匹配 → 丢弃
-      setDmCands(list || []);
+      // ★ 2026-09-28（用户要求）：列表显示排序 —— 有集数的按集号升序在前，没集数的沉底
+      setDmCands(sortCandidatesByEp(list || []));
       if (!list || !list.length) {
-        setDmMsg(
-          dmCfgRef.current.appSecretSet
-            ? '未找到匹配番剧——试试更常见的剧名写法（去掉特殊符号/集号/括号）'
-            : '弹幕未配置：内置弹幕服务未启用',
-        );
+        setDmMsg('未找到匹配剧集——试试更常见的剧名写法（去掉特殊符号/集号/括号）；也可在「弹幕源」里开启更多接口');
         return;
       }
-      const targetEp = extractEp(epSource || name);
-      const preferred = targetEp ? list.find((c) => episodeMatches(c.episodeTitle, targetEp)) : undefined;
-      await applyDanmaku(preferred || list[0]);
+      const targetEp = epParsed.ep || extractEp(resourceName || '');
+      const attempts = orderCandidatesForEp(list, targetEp).slice(0, MAX_DM_TRY);
+      const deadline = Date.now() + DM_TRY_BUDGET_MS;
+      // ★ 保留最丰富的结果：单一「命中即停」会被花絮/预告条目骗到（实测某剧花絮条目只有 1 条弹幕，
+      //   同名的真季集有 8000+ 条）→ 未达「够看」阈值就继续试，最后取条数最多者。
+      let best: { c: DanmakuCandidate; items: DanmakuItem[] } | null = null;
+      for (let i = 0; i < attempts.length; i++) {
+        const c = attempts[i];
+        if (gen !== dmGenRef.current) return; // 用户已点选其它候选/换集 → 停止尝试
+        if (i > 0) {
+          if (Date.now() >= deadline || (best && best.items.length >= DM_RICH_ENOUGH)) break;
+          setDmMsg(
+            `「${c.sourceName}」弹幕偏少（${best ? best.items.length : 0} 条），继续尝试其它来源（${i + 1}/${attempts.length}）…`,
+          );
+        }
+        let items: DanmakuItem[] = [];
+        try { items = await fetchDanmakuItems(c); } catch { items = []; }
+        if (gen !== dmGenRef.current) return;
+        if (!best || items.length > best.items.length) best = { c, items };
+        if (best.items.length >= DM_RICH_ENOUGH) break; // 够看即停
+      }
+      if (best && best.items.length) {
+        showDanmaku(best.c, best.items, best.items.length < DM_THIN ? '数量偏少，可能匹配到了花絮/预告，可在下方候选列表换个来源' : undefined);
+      } else {
+        setDmMsg(`已尝试 ${attempts.length} 个来源均无弹幕——可在候选列表手动点选其它剧集，或换个剧名`);
+      }
     } catch (e) {
       if (gen !== dmGenRef.current) return;
       setDmMsg((e as Error).message || '弹幕匹配失败');
@@ -375,9 +475,9 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     const next = !dmEnabled;
     setDmEnabled(next);
     if (next) {
-      // 剧名副名：详情页 danmakuTitle 优先，缺则从资源名截断兜底；集号单独取自资源名
-      const anime = animeTitleForQuery(resourceName || danmakuTitle || '', danmakuTitle || '');
-      if (anime) void matchDanmaku(anime, resourceName);
+      // ★ 2026-09-27：剧名/集号取自面板两框（已按资源名自动回填，用户可改）；框为空才退回资源名截断
+      const anime = dmQuery.trim() || animeTitleForQuery(resourceName || danmakuTitle || '', danmakuTitle || '');
+      if (anime) void matchDanmaku(anime, dmEp);
       else setDmMsg('弹幕已开启：请到弹幕面板输入剧名后点「匹配弹幕」');
     }
   };
@@ -459,10 +559,10 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   //   prefsRef 同步指向最新值，供 url effect / onCanPlay 等闭包读取（避免闭包读到旧 state）。
   //   老板键（暂停+静音）期间只更新 ref、不写盘 —— 临时静音不该覆盖用户的上次音量。
   useEffect(() => {
-    prefsRef.current = { vol, rate, subOffset };
+    prefsRef.current = { vol, rate, subOffset, fit };
     if (bossActiveRef.current) return;
-    savePlayerPrefs({ vol, rate, subOffset });
-  }, [vol, rate, subOffset]);
+    savePlayerPrefs({ vol, rate, subOffset, fit });
+  }, [vol, rate, subOffset, fit]);
 
   const toggleSub = () => {
     setSubPanel(false);
@@ -551,14 +651,14 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     };
   }, [poke]);
 
-  // 字幕/弹幕设置面板打开：同步 ref + 清闲置计时并锁定显示（关闭面板恢复自动隐藏）
+  // 字幕/弹幕/画面比例面板打开：同步 ref + 清闲置计时并锁定显示（关闭面板恢复自动隐藏）
   useEffect(() => {
-    panelOpenRef.current = !!(subPanel || dmPanel);
-    if (subPanel || dmPanel) {
+    panelOpenRef.current = !!(subPanel || dmPanel || fitPanel);
+    if (subPanel || dmPanel || fitPanel) {
       if (idleTimer.current) clearTimeout(idleTimer.current);
       setUi(true);
     }
-  }, [subPanel, dmPanel]);
+  }, [subPanel, dmPanel, fitPanel]);
 
   // 键盘 ↑/↓ 调节音量时，短暂展开音量面板（1s 后自动淡出）
   const flashVol = useCallback(() => {
@@ -815,6 +915,36 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     else v.pause();
   };
 
+  /**
+   * ★ 2026-09-26（用户要求）：**单击暂停 / 双击全屏的判别**。
+   *   浏览器总在 dblclick 之前先派发两轮 click → 旧实现下「双击全屏」必然先暂停再播（观感：全屏前老要暂停一下）。
+   *   修复：单击动作延迟到双击窗口（280ms，与系统双击间隔阈值一致）后再执行；
+   *   第二击到达即取消待执行的单击动作 → 双击只切全屏、画面不闪暂停。
+   *   小窗口模式没有双击全屏，单击立即生效（否则暂停有可感知的延迟）。
+   */
+  const onSurfaceClick = () => {
+    if (mini) {
+      togglePlay();
+      return;
+    }
+    if (clickTimerRef.current) {
+      clearTimeout(clickTimerRef.current); // 第二击 = 双击（交由 onDoubleClick 切全屏）→ 撤销这次暂停/播放
+      clickTimerRef.current = null;
+      return;
+    }
+    clickTimerRef.current = setTimeout(() => {
+      clickTimerRef.current = null;
+      togglePlay();
+    }, 280);
+  };
+  // 卸载时清掉未决的单击动作（避免对已销毁的 video 执行 play/pause）
+  useEffect(
+    () => () => {
+      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+    },
+    [],
+  );
+
   // ★ 播放器键盘（参照用户期望 / Playhub 快捷键）：
   //   空格：播放/暂停；
   //   ←/→ 单击：±5s；长按(>500ms 仍按住)：每 40ms 持续 ±2s（连续快退/快进）；
@@ -918,14 +1048,76 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     };
   }, []);
 
-  const seek = (clientX: number) => {
-    const v = ref.current;
-    const wrap = wrapRef.current;
-    if (!v || !wrap || !dur) return;
+  // ★ 2026-09-28（用户要求）：进度条交互重做 ——
+  //   ① 悬停显示「指向的时间」气泡 + 定位细线；② 支持按住拖动（旧实现只认 pointerdown，拖不动）；
+  //   ③ 滚轮 ±1s 微调（鼠标可获得 1 秒级步进，旧实现只能按像素跳、长片一次跳好几秒）；
+  //   ④ 落点按整秒取整（避免抖动/出现 12.837 这类碎秒）。
+  const timeAtX = (clientX: number): number | null => {
+    const wrap = progRef.current;
+    if (!wrap || !dur) return null;
     const rect = wrap.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    v.currentTime = ratio * dur;
+    return Math.min(dur, Math.max(0, Math.round(ratio * dur)));
+  };
+  const seekTo = (t: number) => {
+    const v = ref.current;
+    if (!v || !dur) return;
+    v.currentTime = Math.min(dur, Math.max(0, t));
     setCur(v.currentTime);
+  };
+  const seek = (clientX: number) => {
+    const t = timeAtX(clientX);
+    if (t != null) seekTo(t);
+  };
+  /** 悬停气泡：x 相对进度条（两端各留 22px 防溢出），t 为指向的时间 */
+  const hoverAt = (clientX: number) => {
+    const wrap = progRef.current;
+    const t = timeAtX(clientX);
+    if (!wrap || t == null) { setProgHover(null); return; }
+    const rect = wrap.getBoundingClientRect();
+    setProgHover({ x: Math.min(Math.max(clientX - rect.left, 22), Math.max(rect.width - 22, 22)), t });
+  };
+  // 滚轮微调：每格 ±1s（鼠标精调的最小步进）——需非 passive 监听才能 preventDefault 阻止页面滚动
+  useEffect(() => {
+    const el = progRef.current;
+    if (!el || mini || isLive) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const v = ref.current;
+      if (!v || !dur) return;
+      seekTo(Math.round(v.currentTime) + (e.deltaY < 0 ? 1 : -1));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dur, mini, isLive]);
+
+  // ★ 2026-09-28（用户要求）：字幕/弹幕图标手势 —— 左键单击=开关，右键或长按=打开调整框（三者互斥）
+  const openPanel = (which: 'sub' | 'dm' | 'fit') => {
+    setSubPanel(which === 'sub');
+    setDmPanel(which === 'dm');
+    setFitPanel(which === 'fit');
+    poke();
+  };
+  const clearPress = (ref: React.MutableRefObject<PressState>) => {
+    if (ref.current.timer) { clearTimeout(ref.current.timer); ref.current.timer = null; }
+  };
+  const pressProps = (ref: React.MutableRefObject<PressState>, open: () => void) => ({
+    onContextMenu: (e: React.MouseEvent) => { e.preventDefault(); clearPress(ref); open(); },
+    onPointerDown: () => {
+      ref.current.longFired = false;
+      clearPress(ref);
+      ref.current.timer = setTimeout(() => { ref.current.longFired = true; open(); }, LONG_PRESS_MS);
+    },
+    onPointerUp: () => clearPress(ref),
+    onPointerLeave: () => clearPress(ref),
+    onPointerCancel: () => clearPress(ref),
+  });
+  /** 长按已开面板时吞掉随后的 click（否则又会把刚打开的开关切回去） */
+  const consumeLongFired = (ref: React.MutableRefObject<PressState>): boolean => {
+    if (!ref.current.longFired) return false;
+    ref.current.longFired = false;
+    return true;
   };
 
   // 进入小窗口模式时退出元素全屏（mini 下全屏功能消失）
@@ -974,12 +1166,22 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       onMouseLeave={() => setUi(false)}
       onDoubleClick={mini ? undefined : toggleFull}
     >
-      <video ref={ref} style={{ width: '100%', height: '100%' }} onClick={togglePlay} playsInline />
-      {/* 弹幕叠加层（canvas，全屏区域，不拦截鼠标） */}
+      {/* ★ 2026-09-26：画面比例（用户要求）—— video 包进 stage/ratio 两层：
+          · `.vp-stage` 绝对定位、撑满 `.vplayer` 且 `overflow:hidden` → **画面永不越出播放器区域**；
+          · `.vp-ratio` 承载「强制 16:9 / 4:3」的定比盒子（其余模式为 100%×100%）；
+          · 具体缩放交由 `object-fit`（contain/fill/cover/none），不改变元素盒尺寸。
+          这同时修掉「某些比例的视频把底部控制条挤出可视区」的老问题（flex min-height 链见 global.css）。 */}
+      <div className={`vp-stage fit-${fit}`} onClick={onSurfaceClick}>
+        <div className="vp-ratio">
+          <video ref={ref} style={{ width: '100%', height: '100%' }} playsInline />
+        </div>
+      </div>
+      {/* 弹幕叠加层（canvas，全屏区域，不拦截鼠标；fit 决定绘制区是否避让宽银幕黑边） */}
       <DanmakuOverlay
         videoRef={ref}
         items={dmItems}
         enabled={dmEnabled}
+        fit={fit}
         region={dmCfg.region}
         fontSize={dmCfg.fontSize}
         opacity={dmCfg.opacity}
@@ -1002,7 +1204,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       )}
       {/* 中央大按钮（小窗口只保留控制条的 上/下集 + 播放暂停） */}
       {!loading && !err && !mini && (
-        <button className="vp-big" onClick={togglePlay} title={paused ? '播放' : '暂停'}>
+        <button className="vp-big" onClick={onSurfaceClick} title={paused ? '播放' : '暂停'}>
           {paused ? (
             <svg width="44" height="44" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z" fill="currentColor" /></svg>
           ) : (
@@ -1010,29 +1212,31 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           )}
         </button>
       )}
-      {/* ★ 网盘资源未绑定 cookie → 提示去配置页绑定（优先于加载/错误，确保用户可操作） */}
+      {/* ★ 网盘资源未绑定 cookie → 提示到源内「网盘绑定」写入（优先于加载/错误，确保用户可操作） */}
       {needBind && (
-        <div className="vp-drive-bind">
+        <div className="vp-drive-bind" onDoubleClick={(e) => e.stopPropagation()}>
           <div>
             此片源来自<b>「{driveProviderLabel(needBind)}」网盘</b>的专用链接，
-            需要先在<b>配置 → 账号与凭据</b>绑定对应网盘凭据（Cookie）才能取流播放。
+            需要先绑定对应网盘凭据（Cookie）才能取流播放：
+            到<b>点播页 → 正在用的那个源</b>（如立播/玩偶/我的云盘等）点源主页的<b>「网盘绑定」</b>按钮写入
+            （夸克/UC 请粘贴含 <code>__pus</code> 与 <code>__puus</code> 的完整 Cookie，或用其中的「扫码登录」自动抓取）。
           </div>
           <div className="row" style={{ gap: 10, justifyContent: 'center' }}>
-            <button className="primary" onClick={() => void client.gotoCfgAccount()}>去绑定 Cookie</button>
+            <button className="primary" onClick={() => void client.gotoDriveBind()}>去点播页绑定</button>
             <button onClick={() => { bindDismissedRef.current = true; setNeedBind(null); }}>知道了</button>
           </div>
         </div>
       )}
       {/* 错误 */}
       {err && (
-        <div className="vp-err">
+        <div className="vp-err" onDoubleClick={(e) => e.stopPropagation()}>
           <div>{err}</div>
           <button className="primary" onClick={() => window.location.reload()}>刷新重试</button>
         </div>
       )}
       {/* 自动下一集倒计时 / 已播完 */}
       {(nextCount !== null || endAll) && (
-        <div className="vp-next">
+        <div className="vp-next" onDoubleClick={(e) => e.stopPropagation()}>
           {endAll ? (
             <span>已播完全部剧集</span>
           ) : (
@@ -1044,7 +1248,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         </div>
       )}
       {/* 控制条（小窗口：只保留 上/下集 + 播放暂停） */}
-      <div className={`vp-controls${mini ? ' vp-mini' : ''}`} onClick={(e) => e.stopPropagation()}>
+      <div className={`vp-controls${mini ? ' vp-mini' : ''}`} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
         {mini ? (
           <div className="vp-bar">
             {(canPrev !== undefined || canNext !== undefined) && (
@@ -1069,13 +1273,37 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         <>
         {!isLive && (
           <div
+            ref={progRef}
             className="vp-progress"
-            onPointerDown={(e) => seek(e.clientX)}
             style={{ cursor: 'pointer' }}
+            onPointerDown={(e) => {
+              seekDragRef.current = true;
+              try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+              hoverAt(e.clientX);
+              seek(e.clientX);
+            }}
+            onPointerMove={(e) => {
+              hoverAt(e.clientX);
+              if (seekDragRef.current) seek(e.clientX);
+            }}
+            onPointerUp={(e) => {
+              seekDragRef.current = false;
+              try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+            }}
+            onPointerCancel={() => { seekDragRef.current = false; }}
+            onPointerLeave={() => { if (!seekDragRef.current) setProgHover(null); }}
           >
             <div className="vp-buffer" style={{ width: dur ? `${(buffered / dur) * 100}%` : '0%' }} />
             <div className="vp-played" style={{ width: dur ? `${(cur / dur) * 100}%` : '0%' }} />
-            <div className="vp-thumb" style={{ left: dur ? `calc(${(cur / dur) * 100}% - 6px)` : '-6px' }} />
+            {/* ★ 2026-09-28（用户要求）：悬停时间气泡 + 定位细线（指向哪里显示哪里的时间） */}
+            {progHover && (
+              <>
+                <div className="vp-hline" style={{ left: progHover.x }} />
+                <div className="vp-htip" style={{ left: progHover.x }}>{fmt(progHover.t)}</div>
+              </>
+            )}
+            {/* 进度点：直径由 CSS 决定（基础 7px / 主题皮肤各自覆盖），translate(-50%) 居中 */}
+            <div className="vp-thumb" style={{ left: dur ? `${(cur / dur) * 100}%` : '0%' }} />
           </div>
         )}
         <div className="vp-bar">
@@ -1143,8 +1371,9 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           </div>
           <button
             className="vp-ctl"
-            title={subEnabled ? '字幕开' : '字幕'}
-            onClick={() => { setSubPanel((p) => !p); if (!subPanel) poke(); }}
+            title={`字幕：${subEnabled ? '开' : '关'}（左键开关 · 右键/长按调整）`}
+            onClick={() => { if (consumeLongFired(subPress)) return; toggleSub(); }}
+            {...pressProps(subPress, () => openPanel('sub'))}
           >
             <svg width="15" height="15" viewBox="0 0 24 24">
               <rect x="2.5" y="5" width="19" height="14" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.6" />
@@ -1223,8 +1452,9 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           )}
           <button
             className="vp-ctl"
-            title={dmEnabled ? '弹幕开' : '弹幕'}
-            onClick={() => { setDmPanel((p) => !p); if (!dmPanel) poke(); }}
+            title={`弹幕：${dmEnabled ? '开' : '关'}（左键开关 · 右键/长按调整）`}
+            onClick={() => { if (consumeLongFired(dmPress)) return; toggleDanmaku(); }}
+            {...pressProps(dmPress, () => openPanel('dm'))}
           >
             <svg width="15" height="15" viewBox="0 0 24 24">
               <path d="M3.5 8a2 2 0 012-2h13a2 2 0 012 2v8a2 2 0 01-2 2h-13a2 2 0 01-2-2z" fill="none" stroke="currentColor" strokeWidth="1.6" />
@@ -1233,7 +1463,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
             {dmEnabled && <span className="vp-subdot" />}
           </button>
           {dmPanel && (
-            <div className="vp-subpanel" onClick={(e) => e.stopPropagation()}>
+            <div className="vp-subpanel vp-dmpanel" onClick={(e) => e.stopPropagation()}>
               <div className="vsp-row">
                 <button className={`tag ${dmEnabled ? 'active' : ''}`} onClick={toggleDanmaku}>弹幕：{dmEnabled ? '开' : '关'}</button>
                 <span className="muted" style={{ marginLeft: 'auto', fontSize: 11 }}>{dmMsg || (dmActiveEp != null ? '已加载' : '')}</span>
@@ -1298,41 +1528,108 @@ export default function VideoPlayer(props: VideoPlayerProps) {
                 <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, offset: c.offset + 30 }))} title="整体延后 30 秒（弹幕比视频早则用）">+30s</button>
               </div>
               <div className="vsp-row">
+                {/* ★ 2026-09-27（用户要求）：剧名与集拆成两个独立框（都可手改，命中率低时精准修正） */}
                 <input
                   type="text"
                   value={dmQuery}
                   placeholder="剧名（自动清洗；可改输常见名）…"
                   style={{ flex: 1, minWidth: 120 }}
                   onChange={(e) => { dmQueryUserRef.current = true; setDmQuery(e.target.value); }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') void matchDanmaku(dmQuery); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void matchDanmaku(dmQuery, dmEp); }}
+                />
+                <input
+                  type="text"
+                  value={dmEp}
+                  placeholder="集（如 S1E01 / 第1集 / 1）"
+                  title="集号：支持 S1E01、E01、第01集、1、更新至1 等写法；填 S2 可只指定季"
+                  style={{ width: 128, flex: '0 0 128px' }}
+                  onChange={(e) => setDmEp(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void matchDanmaku(dmQuery, dmEp); }}
                 />
               </div>
               <div className="vsp-row" style={{ marginBottom: 6 }}>
                 <button
                   className="vsp-btn primary"
-                  disabled={dmSearching || !dmCfg.appSecretSet || !dmQuery.trim()}
-                  onClick={() => void matchDanmaku(dmQuery)}
+                  disabled={dmSearching || !dmQuery.trim()}
+                  onClick={() => void matchDanmaku(dmQuery, dmEp)}
                 >
                   {dmSearching ? '匹配中…' : '匹配弹幕'}
                 </button>
                 {!dmQuery.trim() && (
-                  <span className="vsp-hint" style={{ marginTop: 0 }}>请输入剧名后再匹配弹幕库；仍可调整上方样式与开关</span>
+                  <span className="vsp-hint" style={{ marginTop: 0 }}>请输入剧名</span>
                 )}
-                {!dmCfg.appSecretSet && dmQuery.trim() && (
-                  <span className="vsp-hint" style={{ marginTop: 0 }}>内置弹幕服务未启用（凭据内置加密）</span>
+                {dmQuery.trim() && dmEnabledCount === 0 && (
+                  <span className="vsp-hint" style={{ marginTop: 0 }}>弹幕源已全部关闭</span>
                 )}
               </div>
+              {/* ★ 2026-09-26：弹幕源面板 —— 内置清单 + 自定义接口 */}
               <div className="vsp-row" style={{ marginBottom: 4 }}>
-                <span className="muted" style={{ fontSize: 10 }}>弹幕来自 弹弹play 开放弹幕网络</span>
+                <button
+                  className="vsp-btn"
+                  onClick={() => {
+                    setDmCustomText(customEndpointsText(dmCfg.endpoints));
+                    setDmSrcPanel((p) => !p);
+                  }}
+                >
+                  弹幕源 {dmEnabledCount}/{dmCfg.endpoints.length} 启用 {dmSrcPanel ? '▲' : '▼'}
+                </button>
+                <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, endpoints: c.endpoints.map((e) => ({ ...e, enabled: true })) }))}>全开</button>
+                <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, endpoints: c.endpoints.map((e) => ({ ...e, enabled: false })) }))}>全关</button>
               </div>
+              {dmSrcPanel && (
+                <div className="vsp-dmsrc">
+                  <div className="vsp-dmsrc-list">
+                    {dmCfg.endpoints.map((e, i) => (
+                      <label key={e.url} className="vsp-dmsrc-item" title={e.url}>
+                        <input
+                          type="checkbox"
+                          checked={e.enabled}
+                          onChange={() =>
+                            setDmCfg((c) => ({
+                              ...c,
+                              endpoints: c.endpoints.map((x, j) => (j === i ? { ...x, enabled: !x.enabled } : x)),
+                            }))
+                          }
+                        />
+                        <span className="vsp-dmsrc-name">{e.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <textarea
+                    className="vsp-dmsrc-text"
+                    rows={2}
+                    value={dmCustomText}
+                    placeholder="自定义接口：一行一个，支持「名字@https://host/token」"
+                    onChange={(ev) => setDmCustomText(ev.target.value)}
+                  />
+                  <div className="vsp-row" style={{ marginBottom: 4 }}>
+                    <button className="vsp-btn" onClick={() => setDmCfg((c) => ({ ...c, endpoints: mergeEndpoints(c.endpoints, dmCustomText) }))}>
+                      保存自定义接口
+                    </button>
+                  </div>
+                </div>
+              )}
               {dmCands.length > 0 && (
                 <div className="vsp-list">
-                  {dmCands.map((c, i) => (
-                    <button key={i} className="vsp-item" onClick={() => void applyDanmaku(c)}>
-                      <span className="vsp-item-name">{c.title || '未知番剧'} {c.episodeTitle || ''}</span>
-                      <span className="muted">{c.episodeId === dmActiveEp ? '当前' : '点击加载'}{dmCands.length > 1 ? ' · 共 ' + dmCands.length + ' 集' : ''}</span>
-                    </button>
-                  ))}
+                  {dmCands.map((c, i) => {
+                    // ★ 2026-09-28（用户要求）：候选显示压缩为「剧名（年份）· 第N季 · 第M集」，
+                    //   原始长标题放 title 里（鼠标悬停可看全），面板同时已加宽（.vp-dmpanel）
+                    const label = formatCandidateLabel(c.title, c.episodeTitle) || '未知番剧';
+                    return (
+                      <button
+                        key={i}
+                        className="vsp-item"
+                        title={`${c.sourceName}${c.title ? ' · ' + c.title : ''}${c.episodeTitle ? ' ' + c.episodeTitle : ''}`}
+                        onClick={() => void applyDanmaku(c)}
+                      >
+                        <span className="vsp-item-name">
+                          <span className="vsp-dmsrc-tag">{c.sourceName}</span>
+                          {label}
+                        </span>
+                        <span className="muted">{c.episodeId === dmActiveEp ? '当前' : '点击加载'}{dmCands.length > 1 ? ' · 共 ' + dmCands.length + ' 集' : ''}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1352,6 +1649,45 @@ export default function VideoPlayer(props: VideoPlayerProps) {
             ))}
           </select>
           <div style={{ flex: 1 }} />
+          {/* ★ 2026-09-26（用户要求）：**画面比例** —— 竖屏/超宽等特殊比例片源可手动切换；
+              选择随播放器设置记忆（localStorage）保留到下次播放
+              ★ 2026-09-28（用户要求）：面板改为「悬停开 / 鼠标离开即收」（与音量条一致）；
+              间隙用 .vp-fithost 的 padding 桥接，避免移动中丢 hover */}
+          <div
+            className="vp-vol"
+            onPointerEnter={() => { setSubPanel(false); setDmPanel(false); setFitPanel(true); poke(); }}
+            onPointerLeave={() => setFitPanel(false)}
+          >
+            <button
+              className="vp-ctl"
+              title={`画面比例：${PLAYER_FITS.find((f) => f.value === fit)?.label ?? '适应'}（悬停选择）`}
+              onClick={() => openPanel('fit')}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24">
+                <rect x="2.6" y="5" width="18.8" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M8.4 5v14M15.6 5v14" stroke="currentColor" strokeWidth="1.1" strokeDasharray="2 2" />
+              </svg>
+              {fit !== 'contain' && <span className="vp-subdot" />}
+            </button>
+            <div className={`vp-fithost${fitPanel ? ' open' : ''}`}>
+              <div className="vp-subpanel vp-fitpanel" onClick={(e) => e.stopPropagation()}>
+                <div className="vsp-row" style={{ marginBottom: 6 }}>
+                  <span className="muted" style={{ fontSize: 11 }}>画面比例（会记住选择；强制比例为拉伸显示）</span>
+                </div>
+                <div className="vsp-fits">
+                  {PLAYER_FITS.map((f) => (
+                    <button
+                      key={f.value}
+                      className={`vsp-btn${fit === f.value ? ' active' : ''}`}
+                      onClick={() => setFit(f.value)}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
           <button className="vp-ctl" title="全屏" onClick={toggleFull}>
             {full ? (
               <svg width="15" height="15" viewBox="0 0 24 24"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>

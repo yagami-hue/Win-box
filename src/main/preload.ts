@@ -2,7 +2,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { IpcResult } from '../shared/ipc-result';
 import { IPC } from '../shared/ipc-channels';
-import type { SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile, MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../shared/types';
+import type { SiteConfig, ImportReport, SourceBean, SourceMoveDirection, SourceUpdatePatch, UserConfig, UserProfile, MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../shared/types';
 import type { SubtitleFetchResult } from '../shared/subtitle';
 import type { MetaSettings, MetaSettingsView, MetaSuggestion } from '../shared/meta';
 
@@ -22,8 +22,16 @@ const api = {
     moveSource: (key: string, direction: SourceMoveDirection) => invoke<void>(IPC.CFG_MOVE_SOURCE, { key, direction }),
     setActiveSource: (key: string) => invoke<void>(IPC.CFG_SET_ACTIVE_SOURCE, key),
     setActiveLive: (index: number) => invoke<void>(IPC.CFG_SET_ACTIVE_LIVE, index),
-    importUrl: (url: string) => invoke(IPC.CFG_IMPORT_URL, { url }),
-    importJson: (json: string) => invoke(IPC.CFG_IMPORT_JSON, { json }),
+    importUrl: (url: string, name?: string) => invoke(IPC.CFG_IMPORT_URL, { url, name }),
+    // ★ 2026-09-27（用户要求）：本地 .json 订阅文件导入（文件选择器；档案名默认取原始文件名）
+    importJsonLocal: (name?: string) =>
+      invoke<{
+        ok: boolean;
+        file?: string;
+        name?: string;
+        error?: string;
+        result?: { config: SiteConfig; report: ImportReport; warnings: string[]; urls?: { name: string; url: string }[] };
+      }>(IPC.CFG_IMPORT_JSON_LOCAL, name),
     importPyLocal: () => invoke<{ ok: boolean; key?: string; error?: string }>(IPC.CFG_IMPORT_PY_LOCAL),
     saveAsProfile: (name: string) => invoke<UserProfile>(IPC.CFG_PROFILE_SAVE, name),
     activateProfile: (id: string) => invoke<void>(IPC.CFG_PROFILE_ACTIVATE, id),
@@ -33,13 +41,15 @@ const api = {
     vodDebug: (key: string) => invoke(IPC.VOD_DEBUG, key),
     audit: () => invoke(IPC.VOD_AUDIT),
     cacheClear: () => invoke<{ freedBytes: number; cleared: string[]; failed: string[] }>(IPC.CACHE_CLEAR),
-    // ★ 播放网盘资源未绑定 cookie → 请求主窗口跳到「配置 → 账号与凭据」tab
-    gotoAccount: () => invoke<void>(IPC.CFG_GOTO_ACCOUNT),
+    // ★ 2026-09-27：已学到的「需要网盘绑定」源 key（源主页显示绑定入口的兜底判据，见 needsDriveBind）
+    driveBindKeys: () => invoke<string[]>(IPC.DRIVE_BIND_KEYS),
+    // ★ 播放网盘资源未绑定 cookie → 请求主窗口跳到「点播页」（源主页有「网盘绑定」入口）
+    gotoDriveBind: () => invoke<void>(IPC.UI_GOTO_DRIVE_BIND),
     // 主窗口接收跨窗口跳转指令（播放器窗口发起时主进程转发到主窗口）
-    onNavCfgAccount: (cb: () => void) => {
+    onNavDriveBind: (cb: () => void) => {
       const l = () => cb();
-      ipcRenderer.on(IPC.NAV_CFG_ACCOUNT, l);
-      return () => ipcRenderer.removeListener(IPC.NAV_CFG_ACCOUNT, l);
+      ipcRenderer.on(IPC.NAV_DRIVE_BIND, l);
+      return () => ipcRenderer.removeListener(IPC.NAV_DRIVE_BIND, l);
     },
   },
   vod: {
@@ -77,9 +87,10 @@ const api = {
   danmaku: {
     get: () => invoke(IPC.DANMAKU_GET),
     set: (patch: unknown) => invoke(IPC.DANMAKU_SET, patch),
-    search: (name: string) => invoke(IPC.DANMAKU_SEARCH, name),
-    episodes: (bangumiId: number, animeTitle?: string) => invoke(IPC.DANMAKU_EPISODES, bangumiId, animeTitle),
-    fetch: (episodeId: number) => invoke(IPC.DANMAKU_FETCH, episodeId),
+    search: (name: string, season?: number) => invoke(IPC.DANMAKU_SEARCH, name, season),
+    episodes: (bangumiId: number, animeTitle?: string, source?: string) => invoke(IPC.DANMAKU_EPISODES, bangumiId, animeTitle, source),
+    // ★ 2026-09-26：source = 接口基础地址
+    fetch: (episodeId: number, source?: string) => invoke(IPC.DANMAKU_FETCH, episodeId, source),
   },
   meta: {
     // TMDB 元数据补全（缺封面/缺简介兜底；凭据内置密文，用户无需填 key）

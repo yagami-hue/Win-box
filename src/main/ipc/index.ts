@@ -6,6 +6,7 @@ import { fileLogger } from '../util/logger';
 import { SpiderHost } from '../spider/SpiderHost';
 import { resourcesDir, userDataDir, spiderCacheDir } from '../util/paths';
 import { clearAppCache } from '../util/cacheClean';
+import { nameFromLocalFile } from '../util/importNaming';
 import { join, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IPC } from '../../shared/ipc-channels';
@@ -17,7 +18,7 @@ import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow,
 import { bossKey, BOSS_DEFAULT_ACCEL } from '../bossKey';
 import { ok } from '../../shared/ipc-result';
 import type { IpcMainInvokeEvent } from 'electron';
-import type { BossKeySettings, SourceBean, SourceMoveDirection, SourceUpdatePatch } from '../../shared/types';
+import type { BossKeySettings, ImportReport, MultiConfigEntry, SiteConfig, SourceBean, SourceMoveDirection, SourceUpdatePatch } from '../../shared/types';
 import type { MetaSettings } from '../../shared/meta';
 
 function winOf(e: IpcMainInvokeEvent): BrowserWindow | null {
@@ -59,7 +60,7 @@ export function registerIpc(host: SpiderHost): void {
     return 'data:image/png;base64,' + readFileSync(p).toString('base64');
   }, log);
 
-  registerHandler(IPC.CONFIG_IMPORT, async (e: any, args: { url?: string; json?: string }) => {
+  registerHandler(IPC.CONFIG_IMPORT, async (e: any, args: { url?: string; json?: string; name?: string }) => {
     const r = await host.importConfig(args || {});
     return { config: r.config, report: r.report, warnings: r.warnings, urls: r.urls };
   }, log);
@@ -69,6 +70,8 @@ export function registerIpc(host: SpiderHost): void {
 
   // 用户配置持久化 + 源管理（任务 B）
   registerHandler(IPC.CFG_GET, () => host.cfgSnapshot(), log);
+  // ★ 2026-09-27：已学到的「需要网盘绑定」源 key（学习点 = play() 命中网盘直链，见 SpiderHost.markDriveBindNeeded）
+  registerHandler(IPC.DRIVE_BIND_KEYS, () => host.driveBindLearned(), log);
   registerHandler(IPC.CFG_ADD_SOURCE, (_e: any, bean: SourceBean) => host.cfgAddSource(bean), log);
   registerHandler(IPC.CFG_UPDATE_SOURCE, (_e: any, a: { key: string; patch: SourceUpdatePatch }) =>
     host.cfgUpdateSource(a.key, a.patch || {}), log);
@@ -77,8 +80,8 @@ export function registerIpc(host: SpiderHost): void {
     host.cfgMoveSource(a.key, a.direction), log);
   registerHandler(IPC.CFG_SET_ACTIVE_SOURCE, (_e: any, key: string) => host.cfgSetActiveSource(key), log);
   registerHandler(IPC.CFG_SET_ACTIVE_LIVE, (_e: any, index: number) => host.cfgSetActiveLive(index), log);
-  registerHandler(IPC.CFG_IMPORT_URL, async (_e: any, a: { url: string }) => {
-    const r = await host.importConfig({ url: a.url });
+  registerHandler(IPC.CFG_IMPORT_URL, async (_e: any, a: { url: string; name?: string }) => {
+    const r = await host.importConfig({ url: a.url, name: a.name });
     return { config: r.config, report: r.report, warnings: r.warnings, urls: r.urls };
   }, log);
   registerHandler(IPC.CFG_PROFILES, () => host.cfgProfiles(), log);
@@ -108,12 +111,17 @@ export function registerIpc(host: SpiderHost): void {
   registerHandler(IPC.SUBTITLE_SET, (_e: any, patch: any) => host.subtitleSetSettings(patch || {}), log);
   registerHandler(IPC.SUBTITLE_SEARCH, (_e: any, name: string) => host.subtitleSearch(String(name)), log);
   registerHandler(IPC.SUBTITLE_FETCH, (_e: any, cand: any) => host.subtitleFetch(cand), log);
-  // 弹幕（弹弹play）
+  // 弹幕（外部接口清单）
   registerHandler(IPC.DANMAKU_GET, () => host.danmakuGetSettings(), log);
   registerHandler(IPC.DANMAKU_SET, (_e: any, patch: any) => host.danmakuSetSettings(patch || {}), log);
-  registerHandler(IPC.DANMAKU_SEARCH, (_e: any, name: string) => host.danmakuSearch(String(name)), log);
-  registerHandler(IPC.DANMAKU_EPISODES, (_e: any, bangumiId: number, animeTitle?: string) => host.danmakuEpisodes(Number(bangumiId), animeTitle ? String(animeTitle) : undefined), log);
-  registerHandler(IPC.DANMAKU_FETCH, (_e: any, episodeId: number) => host.danmakuFetch(Number(episodeId)), log);
+  // ★ 2026-09-26：season = 资源名提取的季号（同季条目优先）
+  registerHandler(IPC.DANMAKU_SEARCH, (_e: any, name: string, season?: number) =>
+    host.danmakuSearch(String(name), Number.isFinite(Number(season)) && Number(season) > 0 ? Number(season) : undefined), log);
+  // ★ 2026-09-26：source = 接口基础地址（候选项自带来源，透传回来即可）
+  registerHandler(IPC.DANMAKU_EPISODES, (_e: any, bangumiId: number, animeTitle?: string, source?: string) =>
+    host.danmakuEpisodes(Number(bangumiId), animeTitle ? String(animeTitle) : undefined, source ? String(source) : ''), log);
+  registerHandler(IPC.DANMAKU_FETCH, (_e: any, episodeId: number, source?: string) =>
+    host.danmakuFetch(Number(episodeId), source ? String(source) : ''), log);
   // TMDB 元数据补全（缺封面/缺简介兜底；凭据内置密文，仅查询）
   registerHandler(IPC.META_SEARCH, (_e: any, name: string, year?: string) => host.metaSearch(String(name || ''), year ? String(year) : undefined), log);
   // ★ 2026-09-24：详情页增强（演职员/类型/相关推荐）与发现页榜单（无源默认主页）
@@ -141,9 +149,9 @@ export function registerIpc(host: SpiderHost): void {
     writeFileSync(r.filePath, a.content, 'utf-8'); // 只写新文件，绝不改动任何原始文件
     return { saved: true, path: r.filePath };
   }, log);
-  // ★ 播放网盘资源未绑定 cookie → 从任意窗口请求主窗口跳到「配置 → 账号与凭据」tab
-  //   播放器窗口没有绑定 UI，必须落到主窗口操作。
-  registerHandler(IPC.CFG_GOTO_ACCOUNT, () => {
+  // ★ 播放网盘资源未绑定 cookie → 从任意窗口请求主窗口跳到「点播页」
+  //   （网盘绑定入口已统一到源内：点播页 → 该源 → 「网盘绑定」按钮；配置页不再放网盘配置）
+  registerHandler(IPC.UI_GOTO_DRIVE_BIND, () => {
     const pwin = playerWindow();
     for (const w of BrowserWindow.getAllWindows()) {
       if (w === pwin || w.isDestroyed()) continue;
@@ -151,18 +159,45 @@ export function registerIpc(host: SpiderHost): void {
         if (w.isMinimized()) w.restore();
         w.show();
         w.focus();
-        w.webContents.send(IPC.NAV_CFG_ACCOUNT);
+        w.webContents.send(IPC.NAV_DRIVE_BIND);
       } catch { /* ignore */ }
       break;
     }
     return true;
   }, log);
-  registerHandler(IPC.CFG_IMPORT_JSON, async (_e: any, a: { json: string }) => {
-    const r = await host.importConfig({ json: a.json });
-    return { config: r.config, report: r.report, warnings: r.warnings, urls: r.urls };
+  /**
+   * ★ 2026-09-27（用户要求）：导入**本地 .json 订阅文件**（替代原「粘贴 JSON 文本」入口）。
+   *   档案名：自填名优先，否则**取原始文件名**（去扩展名）——不再一律「新订阅 xx」。
+   */
+  registerHandler(IPC.CFG_IMPORT_JSON_LOCAL, async (e: any, customName?: string): Promise<{
+    ok: boolean; file?: string; name?: string; error?: string;
+    result?: { config: SiteConfig; report: ImportReport; warnings: string[]; urls?: MultiConfigEntry[] };
+  }> => {
+    const win = winOf(e);
+    const picked = await dialog.showOpenDialog(win ?? undefined!, {
+      properties: ['openFile'],
+      filters: [{ name: 'JSON 订阅文件', extensions: ['json'] }],
+    });
+    if (picked.canceled || !picked.filePaths?.[0]) return { ok: false }; // 用户取消，不视为错误
+    const filePath = picked.filePaths[0];
+    try {
+      const text = readFileSync(filePath, 'utf-8');
+      if (!text.trim()) return { ok: false, error: '所选 .json 文件为空' };
+      const name = nameFromLocalFile(filePath, customName);
+      const r = await host.importConfig({ json: text, name });
+      return {
+        ok: true,
+        file: basename(filePath),
+        name,
+        result: { config: r.config, report: r.report, warnings: r.warnings, urls: r.urls },
+      };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }, log);
 
   // ★ 从本地 .py 文件导入为新的 py 源：选文件 → 复制到 userData 持久区 → 与 JSON 源一样入库/可切换
+  //   ★ 2026-09-27（用户要求）：源名/源 key 用**原始文件名**（去扩展名）——与本地 .json 同一命名口径
   registerHandler(IPC.CFG_IMPORT_PY_LOCAL, async (e: any): Promise<{ ok: boolean; key?: string; error?: string }> => {
     const win = winOf(e);
     const picked = await dialog.showOpenDialog(win ?? undefined!, {
@@ -180,7 +215,7 @@ export function registerIpc(host: SpiderHost): void {
       const storeName = `${md5Hex(content.toString('utf8'))}.py`;
       const storePath = join(dir, storeName);
       if (!existsSync(storePath)) writeFileSync(storePath, content);
-      const name = basename(srcPath).replace(/\.py$/i, '');
+      const name = nameFromLocalFile(srcPath);
       const api = pathToFileURL(storePath).href; // file:///C:/...
       const bean = host.cfgAddSource({ key: name, name, type: 3, api, ext: '', jar: '' } as SourceBean);
       return { ok: true, key: bean.key };

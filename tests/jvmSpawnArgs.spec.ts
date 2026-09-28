@@ -1,4 +1,4 @@
-// tests/jvmSpawnArgs.spec.ts — 任务 A：JVM 桥 spawn 必须强制 UTF-8（JRE17 zh-CN Windows 管道默认 GBK，蜘蛛返回中文必乱码）。
+﻿// tests/jvmSpawnArgs.spec.ts — 任务 A：JVM 桥 spawn 必须强制 UTF-8（JRE17 zh-CN Windows 管道默认 GBK，蜘蛛返回中文必乱码）。
 // JEP400(Java18) 才默认 UTF-8；JDK17 中 System.out 实际由 sun.stdout.encoding 控制，三旗标齐加最稳。
 // 只 mock child_process.spawn（不触网、不跑真 JVM），断言 argv 形状与结果回传。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -6,7 +6,8 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { JarSpiderBridge } from '../src/engine/spider/JarSpiderBridge';
+import { JarSpiderBridge, spiderProxyPort } from '../src/engine/spider/JarSpiderBridge';
+import { LOCAL_PROXY_BASE, LOCAL_PROXY_PORT } from '../src/shared/constants';
 import { NullLogger } from '../src/engine/util/logger';
 
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -70,16 +71,66 @@ describe('JarSpiderBridge.call — spawn argv 强制 UTF-8（任务 A）', () =>
     //   deleteFilesWithFeature）再怎么递归也碰不到 converted 里的转换产物
     //   —— 否则 jar 缓存被删会让整套配置所有源集体 ClassNotFoundException。
     expect(argv[3]).toBe(`-Dtvbox.spiderCacheDir=${join(dir, 'sandbox')}`);
-    expect(argv[4]).toBe('-Dfile.encoding=UTF-8');
-    expect(argv[5]).toBe('-Dsun.stdout.encoding=UTF-8');
-    expect(argv[6]).toBe('-Dsun.stderr.encoding=UTF-8');
-    // 其后仍是既定编排：-cp <classpath> SpiderRunner <jars> <className> <method> <args...>
-    expect(argv[7]).toBe('-cp');
-    expect(argv[9]).toBe('SpiderRunner');
-    expect(argv[10]).toBe(join(dir, 'a.jar'));
-    expect(argv[11]).toBe('com.github.catvod.spider.Doll');
-    expect(argv[12]).toBe('homeContent');
-    expect(argv[13]).toBe('[]');
+    // ★ argv[4..13] = JDK 模块封装放行（2026-09-26 壳类取证新增，勿删）：
+    //   加固壳的混淆 VM 用反射做深拷贝（`java.lang.Object.clone` 等 JDK 内部成员）。
+    //   Android(ART)/Java8 无模块封装 → 成功；JDK17 默认不 open → InaccessibleObjectException
+    //   → 壳内 SO 装载/加密链路降级（现象：详情有、剧集空；`[FishSoLoader] prepare failed`）。
+    //   这一段缺失 = 摸鱼/同类壳源回到「详情能开、资源列表空」的回归。
+    expect(argv.slice(4, 15)).toEqual([
+      '--add-opens=java.base/java.lang=ALL-UNNAMED',
+      '--add-opens=java.base/java.lang.reflect=ALL-UNNAMED',
+      '--add-opens=java.base/java.lang.invoke=ALL-UNNAMED',
+      '--add-opens=java.base/java.util=ALL-UNNAMED',
+      '--add-opens=java.base/java.util.concurrent=ALL-UNNAMED',
+      '--add-opens=java.base/java.io=ALL-UNNAMED',
+      '--add-opens=java.base/java.net=ALL-UNNAMED',
+      '--add-opens=java.base/java.nio=ALL-UNNAMED',
+      '--add-opens=java.base/java.security=ALL-UNNAMED',
+      '--add-opens=java.base/java.text=ALL-UNNAMED',
+      // ★ 2026-09-27 壳通解：壳 native 会 close() JarURLInputStream（JDK 内部类），
+      //   unidbg 反射代理 setAccessible 需要放行 sun.net.www.protocol.jar，勿删。
+      '--add-opens=java.base/sun.net.www.protocol.jar=ALL-UNNAMED',
+    ]);
+    expect(argv[15]).toBe('-Dfile.encoding=UTF-8');
+    expect(argv[16]).toBe('-Dsun.stdout.encoding=UTF-8');
+    expect(argv[17]).toBe('-Dsun.stderr.encoding=UTF-8');
+    // ★ argv[18..19] = 宿主代理端口/入口（2026-09-26）：壳与蜘蛛的 `<entry>?do=proxy&key=…`
+    //   播放地址靠它（key 只能由本 JVM 解，服务必须跑在 JVM 里）。端口按加载器参数确定性分配。
+    const loadCp = join(dir, 'a.jar');
+    expect(argv[18]).toBe(`-Dtvbox.proxy.port=${spiderProxyPort(loadCp)}`);
+    expect(argv[19]).toBe(`-Dtvbox.proxy.entry=${LOCAL_PROXY_BASE}/proxy/${spiderProxyPort(loadCp)}`);
+    // ★ argv[20..22] = 壳通解：dex 加载器 stub 的运行时 dex2jar 参数（2026-09-27）
+    //   壳 native 解出裸 dex 后 → stub 就地转 jar 再加载（缺任一项则退回可解释失败）
+    expect(argv[20]).toBe(`-Dtvbox.d2j.java=${join(dir, 'jre', 'bin', 'java.exe')}`);
+    expect(argv[21]).toContain('-Dtvbox.d2j.cp=');
+    expect(argv[22]).toBe(`-Dtvbox.d2j.cache=${join(dir, 'cache', 'runtime-dex')}`);
+    // 其后仍是既定编排：-cp <运行时 classpath> SpiderRunner <加载器 cp> <className> <method> <args...>
+    expect(argv[23]).toBe('-cp');
+    // ★★ 分层铁律（勿回退）：**蜘蛛 jar / shell-shim jar 绝不能进 -cp** —— 父加载器（应用加载器）
+    //   会先加载 jar 里的原始类，SpiderRunner 子加载器里排最前的「native 改写产物目录」就永不生效
+    //   → 壳的 `System.load` 照旧失败、守卫不 ready（App88「bridge request encryption failed」）。
+    expect(argv[24]).not.toContain('a.jar');
+    expect(argv[24]).toContain('stubs.jar');
+    expect(argv[25]).toBe('SpiderRunner');
+    expect(argv[26]).toBe(loadCp);
+    expect(argv[27]).toBe('com.github.catvod.spider.Doll');
+    expect(argv[28]).toBe('homeContent');
+    expect(argv[29]).toBe('[]');
+  });
+
+  it('spiderProxyPort：确定性（同加载器参数 → 同端口）+ 落在 19970~19999 + 与 9978 不冲突', () => {
+    const a = spiderProxyPort('C:/cache/a.jar');
+    expect(spiderProxyPort('C:/cache/a.jar')).toBe(a);
+    expect(a).toBeGreaterThanOrEqual(19970);
+    expect(a).toBeLessThanOrEqual(19999);
+    expect(spiderProxyPort('C:/cache/b.jar;C:/cache/c.jar')).not.toBe(a);
+    // 绝不落在本地代理端口（9978）与常见端口区
+    for (let i = 0; i < 50; i++) {
+      const p = spiderProxyPort(`C:/x/${i}.jar`);
+      expect(p).toBeGreaterThanOrEqual(19970);
+      expect(p).toBeLessThanOrEqual(19999);
+      expect(p).not.toBe(LOCAL_PROXY_PORT);
+    }
   });
 
   it('spawn 选项保留 windowsHide + 超时；stderr 报警与 error 事件不破坏 resolve', async () => {
@@ -101,3 +152,4 @@ describe('JarSpiderBridge.call — spawn argv 强制 UTF-8（任务 A）', () =>
     await expect(p2).resolves.toBe('');
   });
 });
+

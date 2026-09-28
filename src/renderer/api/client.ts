@@ -21,7 +21,7 @@ import type {
   BossKeySettings,
 } from '../../shared/types';
 import type { SubtitleCandidate, SubtitleFetchResult, SubtitleSettings } from '../../shared/subtitle';
-import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
+import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings } from '../../shared/danmaku';
 import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../../shared/types';
 import type { MetaSettings, MetaSettingsView, MetaSuggestion } from '../../shared/meta';
 
@@ -58,8 +58,10 @@ declare global {
         moveSource: (key: string, direction: SourceMoveDirection) => Promise<IpcResult<void>>;
         setActiveSource: (key: string) => Promise<IpcResult<void>>;
         setActiveLive: (index: number) => Promise<IpcResult<void>>;
-        importUrl: (url: string) => Promise<IpcResult<ImportReturn>>;
-        importJson: (json: string) => Promise<IpcResult<ImportReturn>>;
+        importUrl: (url: string, name?: string) => Promise<IpcResult<ImportReturn>>;
+        // ★ 2026-09-27：本地 .json 订阅文件导入（文件选择器；档案名默认取原始文件名）
+        importJsonLocal: (name?: string) =>
+          Promise<IpcResult<{ ok: boolean; file?: string; name?: string; error?: string; result?: ImportReturn }>>;
         importPyLocal: () => Promise<IpcResult<{ ok: boolean; key?: string; error?: string }>>;
         saveAsProfile: (name: string) => Promise<IpcResult<UserProfile>>;
         activateProfile: (id: string) => Promise<IpcResult<void>>;
@@ -69,8 +71,9 @@ declare global {
         vodDebug: (key: string) => Promise<IpcResult<SourceDebugReport>>;
         audit: () => Promise<IpcResult<AuditItem[]>>;
         cacheClear: () => Promise<IpcResult<{ freedBytes: number; cleared: string[]; failed: string[] }>>;
-        gotoAccount: () => Promise<IpcResult<void>>;
-        onNavCfgAccount: (cb: () => void) => () => void;
+        driveBindKeys: () => Promise<IpcResult<string[]>>;
+        gotoDriveBind: () => Promise<IpcResult<void>>;
+        onNavDriveBind: (cb: () => void) => () => void;
       };
       vod: {
         home: (key: string) => Promise<IpcResult<HomeResult>>;
@@ -94,11 +97,11 @@ declare global {
         fetch: (cand: SubtitleCandidate) => Promise<IpcResult<SubtitleFetchResult>>;
       };
       danmaku: {
-        get: () => Promise<IpcResult<DanmakuSettingsView>>;
-        set: (patch: Partial<DanmakuSettings>) => Promise<IpcResult<DanmakuSettingsView>>;
-        search: (name: string) => Promise<IpcResult<DanmakuAnime[]>>;
-        episodes: (bangumiId: number, animeTitle?: string) => Promise<IpcResult<DanmakuCandidate[]>>;
-        fetch: (episodeId: number) => Promise<IpcResult<string>>;
+        get: () => Promise<IpcResult<DanmakuSettings>>;
+        set: (patch: Partial<DanmakuSettings>) => Promise<IpcResult<DanmakuSettings>>;
+        search: (name: string, season?: number) => Promise<IpcResult<DanmakuAnime[]>>;
+        episodes: (bangumiId: number, animeTitle: string | undefined, source: string) => Promise<IpcResult<DanmakuCandidate[]>>;
+        fetch: (episodeId: number, source: string) => Promise<IpcResult<string>>;
       };
       meta: {
         search: (name: string, year?: string) => Promise<IpcResult<MetaHit | null>>;
@@ -188,8 +191,8 @@ export const client = {
   cfgMoveSource: (key: string, direction: SourceMoveDirection) => unwrap(window.api.config.moveSource(key, direction)),
   cfgSetActiveSource: (key: string) => unwrap(window.api.config.setActiveSource(key)),
   cfgSetActiveLive: (index: number) => unwrap(window.api.config.setActiveLive(index)),
-  cfgImportUrl: (url: string) => unwrap(window.api.config.importUrl(url)),
-  cfgImportJson: (json: string) => unwrap(window.api.config.importJson(json)),
+  cfgImportUrl: (url: string, name?: string) => unwrap(window.api.config.importUrl(url, name)),
+  cfgImportJsonLocal: (name?: string) => unwrap(window.api.config.importJsonLocal(name)),
   cfgImportPyLocal: () => unwrap(window.api.config.importPyLocal()),
   cfgSaveAsProfile: (name: string) => unwrap(window.api.config.saveAsProfile(name)),
   cfgActivateProfile: (id: string) => unwrap(window.api.config.activateProfile(id)),
@@ -199,9 +202,11 @@ export const client = {
   vodDebug: (key: string) => unwrap(window.api.config.vodDebug(key)),
   audit: () => unwrap(window.api.config.audit()),
   cacheClear: () => unwrap(window.api.config.cacheClear()),
-  // ★ 播放网盘资源未绑定 cookie → 让主窗口跳到「配置 → 账号与凭据」tab（播放器窗口也走此路径）
-  gotoCfgAccount: () => unwrap(window.api.config.gotoAccount()),
-  onNavCfgAccount: (cb: () => void) => window.api.config.onNavCfgAccount(cb),
+  /** ★ 2026-09-27：已学到的「需要网盘绑定」源 key（源主页显示绑定入口的兜底判据） */
+  driveBindKeys: () => unwrap(window.api.config.driveBindKeys()),
+  // ★ 播放网盘资源未绑定 cookie → 让主窗口跳到「点播页」（源主页有「网盘绑定」入口；播放器窗口也走此路径）
+  gotoDriveBind: () => unwrap(window.api.config.gotoDriveBind()),
+  onNavDriveBind: (cb: () => void) => window.api.config.onNavDriveBind(cb),
   winMinimize: () => unwrap(window.api.win.minimize()),
   winMaximize: () => unwrap(window.api.win.maximize()),
   winClose: () => unwrap(window.api.win.close()),
@@ -247,9 +252,10 @@ export const client = {
     unwrap(window.api.subtitle.fetch(cand)) as Promise<SubtitleFetchResult>,
   danmakuGet: () => unwrap(window.api.danmaku.get()),
   danmakuSet: (patch: Partial<DanmakuSettings>) => unwrap(window.api.danmaku.set(patch)),
-  danmakuSearch: (name: string) => unwrap(window.api.danmaku.search(name)),
-  danmakuEpisodes: (bangumiId: number, animeTitle?: string) => unwrap(window.api.danmaku.episodes(bangumiId, animeTitle)),
-  danmakuFetch: (episodeId: number) => unwrap(window.api.danmaku.fetch(episodeId)),
+  danmakuSearch: (name: string, season?: number) => unwrap(window.api.danmaku.search(name, season)),
+  danmakuEpisodes: (bangumiId: number, animeTitle: string | undefined, source: string) =>
+    unwrap(window.api.danmaku.episodes(bangumiId, animeTitle, source)),
+  danmakuFetch: (episodeId: number, source: string) => unwrap(window.api.danmaku.fetch(episodeId, source)),
   // TMDB 元数据补全（缺封面/缺简介兜底，凭据内置密文）
   metaSearch: (name: string, year?: string) => unwrap(window.api.meta.search(name, year)),
   /** ★ 详情页增强：演职员/类型/相关推荐 */

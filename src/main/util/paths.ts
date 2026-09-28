@@ -7,8 +7,31 @@ import { resourceRootCandidates, pickResourceRoot, type ResolveCtx } from './res
 export function userDataDir(): string {
   return app.getPath('userData');
 }
+
+/**
+ * ★★ 应用私有缓存目录的**目录名**（★ 不能叫 `cache` / `Cache`，勿改回）★★
+ *
+ * 事故（2026-09-27 真机取证）：Windows 路径**大小写不敏感**，而 Electron/Chromium 的磁盘缓存
+ * 目录正好是 `<userData>/Cache` —— 我们若用 `<userData>/cache`，两者会落到**同一个物理目录**
+ * （实测 `Get-Item ...\cache` 与 `...\Cache` 返回同一 FullName）。Chromium 启动时会清理这个
+ * 由它「拥有」的缓存目录：真机 3.54 秒时段观测到启动 2.5s 后该目录里的内容被删（手动放入的
+ * 探针文件 `PROBE.txt`/`PROBE_DIR` 一并消失，只剩 Chromium 自己的 `Cache_Data`）。
+ *
+ * 后果（用户报「第一次加载完，关闭软件第二次重启，依旧提示首次加载」）：
+ *   - `<cache>/spider`（**jar 转换产物**）每次启动被清 → 每次都重跑 3~4 分钟 dex2jar；
+ *   - `<cache>/native`（unidbg 运行时，约 39MB）每次重新下载；
+ *   - `<cache>/python`（内嵌 CPython，11MB）每次重新下载；
+ *   - `spider-local.json`（SpiderLocal 的 KV）无法跨重启保存。
+ *
+ * 因此应用私有缓存必须放在**与本机 Chromium 缓存不重名**的目录里。
+ * 回归护栏见 `tests/appCacheDir.spec.ts`（该名字不得与 `cacheClean` 里视为「Chromium 缓存」
+ * 的目录名重名）。
+ */
+export const APP_CACHE_DIR_NAME = 'winbox-cache';
+
+/** 应用私有缓存目录（jar 转换产物 / unidbg / 内嵌 Python / SpiderLocal KV 等都挂在这里） */
 export function cacheDir(): string {
-  return join(userDataDir(), 'cache');
+  return join(userDataDir(), APP_CACHE_DIR_NAME);
 }
 export function logsDir(): string {
   return join(userDataDir(), 'logs');

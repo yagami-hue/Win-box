@@ -3,6 +3,7 @@
 //   { "urls": [ { "url": "https://...", "name": "线路A" }, ... ] }
 // 每个 url 是一个独立子仓（站源配置 / 多仓 / 本地 clan:// 等）。
 // 纯 TS，不依赖 Electron/Node，可独立单测。
+import { parseJsonLenient } from '../util/json';
 
 export interface MultiRepoItem {
   url: string;
@@ -16,12 +17,20 @@ export interface MultiRepo {
 /**
  * 尝试把文本解析为多仓。非 JSON / 顶层无 urls 数组 / urls 无有效项 → null。
  * 仅识别「形如多仓」的输入，普通站源配置（含 sites/lives 等字段）原样返回 null 走既有流程。
+ *
+ * ★ 2026-09-26（用户报「R18 那份配置一个页面都加载不出来、搜索也用不了」）：
+ *   **必须先剥 `//` 注释再解析**。实测线上多仓（如 `18CR.json`）在 urls 数组里夹着
+ *   `//https://mirror.ghproxy.com/...` 这类被注释掉的行 —— 严格 JSON.parse 直接抛错 →
+ *   本函数返回 null → 落到 parseSiteConfig，而它看到的是 `{urls:[…]}`（没有 sites）→
+ *   **导入"成功"但 0 个源** → 界面就是「什么源都没有 / 搜不了」。
+ *   （对齐安卓端 lenient Gson 的容忍度；站源配置那条路早已这么处理。）
  */
 export function parseMultiRepo(text: string): MultiRepo | null {
   if (!text || !text.trim()) return null;
   let j: unknown;
   try {
-    j = JSON.parse(text.trim());
+    // 宽容解析（注释 + 尾随逗号，对齐 org.json）——见 parseJsonLenient 注释
+    j = parseJsonLenient(text.trim());
   } catch {
     return null;
   }

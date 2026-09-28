@@ -6,8 +6,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import VideoPlayer from '../components/VideoPlayer';
 import TitleBar from '../components/TitleBar';
 import { client } from '../api/client';
-import { uiMem, recordWatch, saveUiMemory } from '../lib/uiMemory';
+import { uiMem, recordWatch, saveUiMemory, markHistoryOnlyWriter } from '../lib/uiMemory';
 import { formatEpisodeLabel } from '../lib/epName';
+
+/**
+ * ★ 2026-09-26：本页只在**独立播放器窗口**运行（主窗口无 /player 路由）。
+ *   该窗口与主窗口共享同一份 localStorage，但自己持有一份启动时的 uiMem 快照 ——
+ *   若整份写盘就会把主窗口已清掉的「上次搜索态」等旧值复活（用户症状：不在搜索页进的资源，
+ *   返回列表却回到了上一次的搜索页）。这里声明「只写历史与进度」。
+ */
+markHistoryOnlyWriter();
 
 export interface PlayerInitData {
   key: string;
@@ -206,13 +214,16 @@ export default function PlayerPage() {
           onMiniToggle={() => void client.playerSetMini(!mini)}
         />
       )}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+      {/* ★ 2026-09-26：这两层改用 CSS 类（`.pwin-body` / `.pwin-stage`）——内联样式没有
+          `min-height: 0`，flex 的默认 `min-height: auto` 会被视频固有比例撑高，
+          竖屏/超宽视频会把播放器整体顶出视口，底部控制条随之不可见（用户报的「下方 UI 消失」）。 */}
+      <div className="pwin-body">
         {parseMsg && (
           <div className="err" style={{ margin: '8px 12px 0', fontSize: 12 }} title={parseMsg}>
             {parseMsg}
           </div>
         )}
-        <div style={{ flex: 1, display: 'flex' }}>
+        <div className="pwin-stage">
           {activeUrl && !loadingRef.current ? (
             <VideoPlayer
               url={activeUrl}

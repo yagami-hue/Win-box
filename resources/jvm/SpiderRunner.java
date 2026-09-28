@@ -277,8 +277,63 @@ public class SpiderRunner {
     }
 
     List<URL> urls = new ArrayList<URL>();
+    // ★ 2026-09-26 原生桥（ARM .so，见 resources/jvm/native-bridge/）：
+    //   jar 内带 ARM/AArch64 .so 时，先把「native 方法改写产物目录」占位在 URL **最前**
+    //   （类加载顺序覆盖原类），再建 URLClassLoader，随后用**同一个 cl** 反射调用桥门面生成改写类。
+    //   必须同一个 cl：改写类引用的 NativeBridge 与桥的静态状态（unidbg 会话）要落在同一个类上，
+    //   否则状态为空、所有 native 调用都会失败。
+    //   ★★ 2026-09-27 修正（实测「第一次进源必空」）：URLClassLoader 对**目录 URL** 的查找
+    //   **不是**每次直读磁盘（早期注释说反了）——空目录被查过一次后列表会缓存，
+    //   之后写进去的 .class 在同一 JVM 内**查不到**。因此顺序必须是：
+    //   先用临时 loader 做改写 → 再建正式 loader（含改写目录）。见下方实现。
+    //   目录要先 mkdirs —— File.toURI() 只有对已存在目录才会带结尾斜杠（否则 URL 指向父目录）。
+    File nativeJar = nativeJarOf(jars);
+    File patchedDir = null;
+    if (nativeJar != null) {
+      String patchRoot = System.getProperty("tvbox.native.patch");
+      if (patchRoot != null && !patchRoot.trim().isEmpty()) {
+        patchedDir = new File(patchRoot.trim(), nativeJar.getName() + ".patched");
+        try {
+          if (!patchedDir.exists() && !patchedDir.mkdirs()) throw new java.io.IOException("mkdirs failed: " + patchedDir);
+          // ★★ 2026-09-27（实测「第一次进源必空」修复，勿回退）★★
+          //   改写产物必须**先写好、再建正式 URLClassLoader**：反序（先建 loader 再写）时，
+          //   patch 期间用 loader 解析 jar 里的类会让 URLClassLoader 对「目录 URL」缓存一次
+          //   （当时还是空目录的）列表 → 改写类「写好了却加载不到」→ 同一 JVM 的首次调用
+          //   落到原始 DexNative（`System.load(ARM .so)` → UnsatisfiedLinkError → 该源空结果），
+          //   第二次调用（新进程，产物已在盘上）才正常 —— 用户侧就是「第一次进源必空」。
+          //   这里先用「临时 loader（只含蜘蛛 jar）」做改写，随后再建正式 loader 并把
+          //   正式 loader 重新 arm 给桥（见下方 armNativeBridge）。
+          URLClassLoader patchLoader = new URLClassLoader(
+              new URL[]{nativeJar.toURI().toURL()}, SpiderRunner.class.getClassLoader());
+          try {
+            prepareNativeBridge(nativeJar, patchedDir, patchLoader);
+          } finally {
+            try { patchLoader.close(); } catch (Throwable ignored) { }
+          }
+        } catch (Throwable t) {
+          System.err.println("[native-bridge] 准备失败，按无原生桥降级: " + t);
+          // ★ 关键：只有在「状态戳缺失/不属于当前 jar」时才清产物 —— 戳存在且 jar 匹配说明
+          //   这是**别的进程**刚写好的有效产物（同一只 jar 会被池并行拉起多个 JVM）；
+          //   失败方一律清掉会让桥在整机永久失效（真机实测踩过）。陈旧戳由桥自己按状态键重写。
+          if (stampMatchesJar(patchedDir, nativeJar)) {
+            System.err.println("[native-bridge] 保留其它进程已写好的改写产物（状态戳匹配当前 jar）");
+          } else {
+            clearDirQuietly(patchedDir);
+            deleteQuietly(new File(patchedDir.getAbsolutePath() + ".ok"));
+            patchedDir = null;
+          }
+        }
+      }
+    }
+    if (patchedDir != null) {
+      urls.add(patchedDir.toURI().toURL());
+    }
     for (String j : jars) urls.add(new File(j).toURI().toURL());
     URLClassLoader cl = new URLClassLoader(urls.toArray(new URL[0]), SpiderRunner.class.getClassLoader());
+    if (nativeJar != null && patchedDir != null) {
+      // 正式 loader 建好后再 arm 一次：桥的惰性初始化/类工厂要用**最终**加载器解析壳类
+      armNativeBridge(nativeJar, cl);
+    }
 
     // 沙箱数据根（防蜘蛛清理缓存目录）
     try {
@@ -322,6 +377,119 @@ public class SpiderRunner {
     } catch (ClassNotFoundException ig) { }
 
     return new Env(cl, app);
+  }
+
+  /**
+   * 正式加载器建好后把桥的整套绑定**重绑**到它（`NativeBridgeMain.rebind`）。
+   * 为什么必须（实测，勿回退）：改写产物「先写后建 loader」⇒ prepare 拿到的是临时加载器，
+   * 而 init 把 resolver 捕获进壳类工厂 / EnvJni host loader / `Context.getClassLoader()`；
+   * 不重绑时原生侧 `Context.getClassLoader()` 与 `Init.classLoader()` 不是同一个加载器，
+   * jmethodID 对不上 → `Init->classLoader()` 仿真异常 → getLoader 崩 → 该源全空。
+   * 桥不在/属性缺失 → 静默跳过（该 jar 按无桥方式运行）。
+   */
+  private static void armNativeBridge(File jar, ClassLoader cl) {
+    try {
+      Class<?> facade = Class.forName("com.winbox.nativebridge.NativeBridgeMain", true, cl);
+      String workRoot = System.getProperty("tvbox.native.work");
+      if (workRoot == null || workRoot.trim().isEmpty()) return;
+      File workDir = new File(workRoot.trim(), jar.getName());
+      facade.getMethod("rebind", File.class, File.class, ClassLoader.class).invoke(null, jar, workDir, cl);
+    } catch (Throwable t) {
+      System.err.println("[native-bridge] 正式加载器重绑失败（按已初始化状态继续）: " + t);
+    }
+  }
+
+  /**
+   * 反射调用原生桥门面（com.winbox.nativebridge.NativeBridgeMain）生成 native 方法改写类。
+   * 桥实现与原生运行时（unidbg）都在 cl 的 URL 里；缺任何一样都静默跳过（该 jar 按无桥方式运行）。
+   * @param jar        含 ARM .so 的蜘蛛 jar（转换产物）
+   * @param patchedDir 改写产物目录（**正式加载器须在改写完成后创建**，见 setupEnv 注释）
+   */
+  private static void prepareNativeBridge(File jar, File patchedDir, ClassLoader cl) throws Exception {
+    Class<?> facade;
+    try {
+      facade = Class.forName("com.winbox.nativebridge.NativeBridgeMain", true, cl);
+    } catch (ClassNotFoundException e) {
+      return; // 未安装原生运行时 → 原样运行
+    }
+    String workRoot = System.getProperty("tvbox.native.work");
+    if (workRoot == null || workRoot.trim().isEmpty()) return;
+    File workDir = new File(workRoot.trim(), jar.getName());
+    if (!workDir.exists() && !workDir.mkdirs()) throw new java.io.IOException("mkdirs failed: " + workDir);
+    Object report = facade
+        .getMethod("prepare", File.class, File.class, File.class, ClassLoader.class)
+        .invoke(null, jar, workDir, patchedDir, cl);
+    if (report != null) System.err.println("[SpiderRunner] " + report);
+  }
+
+  /**
+   * 改写产物的状态戳（`<outDir>.ok`，落在 outDir 之外）里是否含当前 jar 的体积/时间。
+   * 状态键形如 `<BRIDGE_REV>/<jarLength>/<jarMtime>/<soName>/<soSize>/<planHash>` —— 只比对 jar 段。
+   */
+  private static boolean stampMatchesJar(File outDir, File jar) {
+    try {
+      File stamp = new File(outDir.getAbsolutePath() + ".ok");
+      if (!stamp.isFile()) return false;
+      String s = new String(java.nio.file.Files.readAllBytes(stamp.toPath()), java.nio.charset.StandardCharsets.UTF_8);
+      return s.contains("/" + jar.length() + "/" + jar.lastModified() + "/");
+    } catch (Throwable t) {
+      return false;
+    }
+  }
+
+  /** 找第一个「内含 ARM/AArch64 .so」的 jar（只读 zip 条目头 20 字节判 ELF，不解压整包） */
+  private static File nativeJarOf(String[] jars) {
+    for (String j : jars) {
+      File f = new File(j);
+      if (!f.isFile()) continue;
+      try (java.util.jar.JarFile jf = new java.util.jar.JarFile(f)) {
+        java.util.Enumeration<java.util.jar.JarEntry> it = jf.entries();
+        while (it.hasMoreElements()) {
+          java.util.jar.JarEntry e = it.nextElement();
+          if (e.isDirectory() || !e.getName().endsWith(".so")) continue;
+          byte[] head = new byte[20];
+          try (java.io.InputStream is = jf.getInputStream(e)) {
+            int n = 0;
+            while (n < head.length) {
+              int r = is.read(head, n, head.length - n);
+              if (r < 0) break;
+              n += r;
+            }
+          }
+          if (isArmElf(head)) return f;
+        }
+      } catch (Throwable ignore) { /* 非 zip / 读失败 → 跳过 */ }
+    }
+    return null;
+  }
+
+  /** ELF 头：AArch64(0xb7, ELF64) 或 ARM32(0x28, ELF32) */
+  private static boolean isArmElf(byte[] d) {
+    if (d.length < 20 || d[0] != 0x7f || d[1] != 'E' || d[2] != 'L' || d[3] != 'F') return false;
+    int machine = (d[18] & 0xff) | ((d[19] & 0xff) << 8);
+    return (d[4] == 2 && machine == 0xb7) || (d[4] == 1 && machine == 0x28);
+  }
+
+  /** 清空目录内容（保留目录），失败只打日志 */
+  private static void clearDirQuietly(File dir) {
+    try {
+      File[] kids = dir.listFiles();
+      if (kids == null) return;
+      for (File k : kids) {
+        if (k.isDirectory()) clearDirQuietly(k);
+        if (!k.delete()) System.err.println("[native-bridge] 删除失败: " + k);
+      }
+    } catch (Throwable t) {
+      System.err.println("[native-bridge] 清目录失败: " + t);
+    }
+  }
+
+  private static void deleteQuietly(File f) {
+    try {
+      if (f.exists() && !f.delete()) System.err.println("[native-bridge] 删除失败: " + f);
+    } catch (Throwable t) {
+      System.err.println("[native-bridge] 删除失败: " + t);
+    }
   }
 
   /**

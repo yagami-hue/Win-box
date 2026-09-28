@@ -119,6 +119,18 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
     expect(await p).toEqual({ ok: true, data: '' });
   });
 
+  it('信封 ok=false（蜘蛛自己抛）→ 错误进 error、data 归空、仍 ok:true 不回退一次性', async () => {
+    const { pool, spawned } = makeEnv(false);
+    const p = pool.submit('k1', SPEC, REQ('boom'));
+    reply(spawned[0].child, 'boom', 'java.lang.ClassNotFoundException: com.github.catvod.spider.Symx', false);
+    // ★ 2026-09-28：错误串不再当「正常蜘蛛输出」返回 —— 调用方凭 error 记原因/触发类缺失兜底重试
+    expect(await p).toEqual({
+      ok: true,
+      data: '',
+      error: 'java.lang.ClassNotFoundException: com.github.catvod.spider.Symx',
+    });
+  });
+
   it('排队超时 → 只失败该请求（ok:false），进程不被杀', async () => {
     vi.useFakeTimers();
     const killed: string[] = [];

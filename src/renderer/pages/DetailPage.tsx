@@ -101,6 +101,11 @@ export default function DetailPage({
   // ---- ★ 2026-09-24 详情页增强：TMDB 演职员 / 类型 / 相关推荐 ----
   //   供下方「演员名单 + 相关推荐」区块使用；点击演员或推荐影片 → 回首页对关键词跑一次全源搜索。
   const [extra, setExtra] = useState<MetaExtra | null>(null);
+  /** metaHit 的镜像（副作用里判断「当前命中是否带 tmdbId」用，不依赖闭包旧值） */
+  const metaHitRef = useRef<MetaHit | null>(null);
+  useEffect(() => { metaHitRef.current = metaHit; }, [metaHit]);
+  /** 本页已补查过一次带 id 的命中（防止反复请求） */
+  const metaUpgraded = useRef(false);
   useEffect(() => {
     if (!detail) { setExtra(null); return; }
     const name = detailName;
@@ -109,9 +114,23 @@ export default function DetailPage({
     let alive = true;
     client
       .metaExtra(name, y ? y[1] : undefined)
-      .then((x) => { if (alive) setExtra(x); })
+      .then((x) => {
+        if (!alive) return;
+        setExtra(x);
+        // ★ 2026-09-26：老缓存命中可能**没有 tmdbId**（当年 TMDB 不可达时落盘的是豆瓣/360 结果），
+        //   而 netflix 详情页背景 = TMDB 剧照（`meta:images` 必须先有 tmdbId）。
+        //   metaExtra 内部已 forceFresh 重查并把带 id 的结果写回缓存 → 这里补一次 metaSearch
+        //   让 metaHit 一起升级；每次进页面最多补一次，失败静默（下次进来缓存已带 id）。
+        if (x && !metaUpgraded.current && !metaHitRef.current?.tmdbId) {
+          metaUpgraded.current = true;
+          client
+            .metaSearch(name, y ? y[1] : undefined)
+            .then((h) => { if (alive && h?.tmdbId) setMetaHit(h); })
+            .catch(() => undefined);
+        }
+      })
       .catch(() => undefined);
-    return () => { alive = false; };
+    return () => { alive = false; metaUpgraded.current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail, fromListName]);
 

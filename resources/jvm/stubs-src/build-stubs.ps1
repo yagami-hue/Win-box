@@ -9,7 +9,9 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-$Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+# NOTE: this file must stay ASCII-only (PowerShell 5.1 reads .ps1 as ANSI and mis-parses CJK).
+# $MyInvocation.MyCommand.Path can be null in some hosts (Join-Path would then throw); prefer $PSScriptRoot.
+$Here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $Root = Split-Path -Parent $Here
 
 # Auto-derive Base/Out (stubs-src and stubs both live under resources/jvm)

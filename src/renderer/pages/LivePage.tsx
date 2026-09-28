@@ -147,7 +147,15 @@ export default function LivePage() {
                   ))}
                 </div>
               )}
-              {playUrl ? <VideoPlayer url={playUrl} /> : <div className="empty">无播放地址</div>}
+              {/* ★ 2026-09-27：播放器必须有「有高度」的 flex 宿主 —— `.vplayer` 的高度只来自 flex（flex:1），
+                  直接放进 block 容器 `.right` 会折成 0 高度（用户报「直播界面播放器消失」）。 */}
+              {playUrl ? (
+                <div className="live-player">
+                  <VideoPlayer url={playUrl} />
+                </div>
+              ) : (
+                <div className="empty">无播放地址</div>
+              )}
             </>
           ) : (
             <div className="empty">{groups.length ? '选择左侧分组' : '无直播（请先导入含 lives 的配置）'}</div>

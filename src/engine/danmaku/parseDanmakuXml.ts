@@ -1,6 +1,6 @@
 // src/engine/danmaku/parseDanmakuXml.ts
 // 纯 TS 弹幕解析：B 站格式弹幕 → DanmakuItem[]。
-// 弹弹play comment 接口实测返回「B 站新版 JSON 弹幕」（{ count, comments:[{ p, m }] }），
+// 聚合接口实测返回「B 站新版 JSON 弹幕」（{ count, comments:[{ p, m }] }），
 // 旧接口/部分镜像仍返回 XML（<d p="…">内容</d>），两者都支持、按首字符探测。
 // 不依赖 Electron/Node，可独立单测。
 
@@ -68,7 +68,7 @@ export function parseDanmakuXml(xml: string): DanmakuItem[] {
 }
 
 /**
- * 解析 B 站新版 JSON 弹幕（弹弹play comment 接口实测返回格式）：
+ * 解析 B 站新版 JSON 弹幕（聚合接口实测返回格式）：
  *   { "count": N, "comments": [ { "p": "时间,模式,颜色,弹幕id", "m": "内容" }, ... ] }
  * p 字段以逗号分隔：第 0 位时间（秒，可为小数）、第 1 位模式、第 2 位颜色（十进制 int），
  * 无字号字段（与 XML 的 p 属性不同），字号用默认 25，渲染统一按用户设置。

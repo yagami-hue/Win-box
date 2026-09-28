@@ -1,45 +1,77 @@
-# TVBox Win
+# Win-Box
 
-安卓 TVBox（CatVod 引擎）的 Windows 桌面移植 —— Electron + React + TypeScript + Vite。
-纯Vibe coding，本人0代码基础，包括开源至Github均由AI完成
+把安卓 TVBox（CatVod 引擎）移植为 **Windows 桌面应用** —— Electron + React + TypeScript + Vite。
 
-> 本项目是**个人学习/研究性质的复刻实现**，与安卓版及任何第三方站点无隶属关系。
+**硬验收标准**：导入源（站源 JSON + 直播 txt/m3u）的解析规则与安卓原版逐字段一致（含上游既定行为）。
+纯 Vibe coding 项目：本人 0 代码基础，包括开源与发布流程均由 AI 协助完成。
+
+> 本项目是**个人学习 / 研究性质的开源实现**，与安卓版及任何第三方站点、平台无隶属关系。
 > 仓库仅包含**核心源码**，不含任何第三方私有蜘蛛 jar、JVM 运行时、逆向壳或专有产物。
+
+**链接**：[GitHub 主页](https://github.com/yagami-hue/Win-box) · [爱发电 · 赞助](https://afdian.com/a/WinBox)（自愿，见文末说明）
+
+---
+
+## ⚠️ 免责声明（请务必阅读）
+
+1. **软件性质**：Win-Box 是开源学习项目，本质上只是一个**通用影片播放工具**（播放器外壳）；不含任何盈利行为，不提供服务、**不存储、不推送任何影视资源与内容**。
+2. **不提供内容**：本项目**不内置任何资源索引、不运营任何内容服务器**。你在使用中自行配置 / 导入的播放源、直播源、弹幕与字幕接口、网盘凭据与内容，全部来自**第三方**，与本软件及作者无关；软件内的本地代理（`127.0.0.1`）仅用于你自己设备上的本机播放转发。
+3. **无隶属关系**：与任何影视平台、内容站点、网盘服务、TVBox / CatVod 及其发行方**均无隶属、合作、代理或授权关系**；相关名称与商标归各自权利人所有。
+4. **使用者责任**：请确保你导入的第三方源与使用行为**符合所在地法律法规**，且不得用于传播、观看任何违法或侵权内容；因使用第三方来源引发的一切后果（含版权、侵权、内容合法性）由用户与第三方自行承担，作者免责。
+5. **权利通知**：本软件不对任何第三方内容主张权利，也未从第三方内容中获利。若权利人认为本项目某项行为可能侵权，请通过 [Issues](https://github.com/yagami-hue/Win-box/issues) 联系，作者将及时核实并配合处理（移除相关内容 / 停止分发）。
+6. **无担保**：软件按**「现状」**提供，不附带任何明示或默示担保；作者不对使用或无法使用本软件造成的任何直接或间接损失负责。不接受上述约定请立即停止使用并删除本软件。
+
+> 应用内「说明」页（侧栏最后一项）提供同一份声明的完整版。
 
 ## 特性
 
 - 导入 TVBox 站源 JSON + 直播 txt/m3u，解析规则与安卓原版逐字段对齐（含上游既定行为）
-- 内置 JVM 宿主，支持 `jar` 蜘蛛调用（`JarSpider`）与 `.py` 蜘蛛（Jython 宿主，Python 2.7 子集）
-- 独立播放器窗口 + Web 播放页双路径；自动下一集（播完 5 秒倒计时可取消）
-- 分类/筛选面板、extend 转义与回话级排序记忆、播放器音量百分比/悬停调节
+- 内置 JVM 宿主，支持 `jar` 蜘蛛调用（含加固壳 / ARM `.so` 的原生桥）与 `.py` 蜘蛛（嵌入式 CPython 3.11.6 宿主）
+- 独立播放器窗口 + 播放页双路径；进度条悬停显示时间、拖动/滚轮 1 秒级微调；自动下一集
+- 外挂弹幕（多接口可自选，含候选匹配与调参面板）与外挂字幕（assrt，token 自填）
+- 网盘播放（夸克 / UC / 百度 / 115）与源内绑定、`/play` 中继；TMDB 元数据与发现页
+- 四套 UI 皮肤（Netflix / 哔哩哔哩 / 深色 / 浅色）、小窗口模式、老板键
+
+## 快速开始
+
+```bash
+pnpm install              # 依赖（node_modules 不入库）
+pnpm test                 # Vitest 引擎单测
+pnpm run typecheck        # 双 tsc 类型检查
+pnpm run dev              # 开发（vite + esbuild watch + electron）
+pnpm run build            # 构建（主进程 + 渲染层）
+```
+
+运行时依赖（**不入库**，按需自行准备）：JDK / JRE、`stubs.jar` 桥、嵌入式 CPython、shell-shim、unidbg 运行时等；
+构建与维护细节见 [docs/开发历程与关键技术决策.md](docs/开发历程与关键技术决策.md) §7。
 
 ## 目录结构
 
 ```
 tvbox-win/
 ├── src/            # 四层：shared / engine / main / renderer
-├── tests/          # 引擎单测（Vitest，36 文件 440 用例）
-├── scripts/        # 构建脚本（build-main.mjs 等，esbuild + vite）
-├── resources/      # js-lib + jvm 宿主源码（*.java），运行时需自行准备
-├── docs/           # 源健康判定 / ext 配置等内部文档
-└── package.json
+├── tests/          # 引擎单测（Vitest）
+├── scripts/        # 构建与打包脚本
+├── resources/      # js-lib + jvm 宿主源码（*.java，含 native-bridge 原生桥）
+└── docs/           # 源健康判定 / ext 配置 / 空结果诊断 等内部文档
 ```
 
-## 本地开发
+## 文档
 
-```bash
-npm ci                # 安装依赖（node_modules，不入库）
-npm test              # Vitest 引擎单测
-npm run typecheck     # 双 tsc 类型检查
-npm run build:main    # esbuild 主进程
-npm run build:renderer# vite 渲染层
-```
+| 文档 | 内容 |
+|---|---|
+| [docs/README.md](docs/README.md) | 文档总索引（本仓仅含产品内部文档） |
+| `docs/source-health.md` · `docs/config-file.md` | 源健康判定 · ext / 配置约定 |
+| `docs/diagnose-empty.md` | 空结果诊断手册 |
 
-运行时依赖（**不入库**，按需自行准备）：JDK/JRE、`stubs.jar` 桥、`jython-standalone`、shell-shim 等，详见 `docs/`。
+## 赞助支持（完全自愿）
+
+如果你认可这个项目、愿意支持作者持续维护，欢迎通过 **[爱发电](https://afdian.com/a/WinBox)** 赞助。
+
+- 赞助**完全自愿**，仅用于支持作者在开发与维护上投入的时间与精力；
+- **不会获得任何额外功能、内容、权限或服务**，也不会改变软件的任何行为 —— 不赞助同样可以使用全部功能；
+- 本项目**不含任何付费内容、会员或解锁机制**；赞助与任何第三方内容、平台无关联，不构成对任何内容的购买或授权。
 
 ## 许可
 
 代码采用 MIT 许可证（见 [LICENSE](LICENSE)）。请遵守第三方软件（蜘蛛 jar、运行时、壳等）各自的版权与许可。
-
-## 赞赏
-如果你认可我的项目，欢迎在爱发电对我赞赏https://afdian.com/a/WinBox

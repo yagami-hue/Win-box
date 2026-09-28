@@ -1,7 +1,7 @@
 // src/main/spider/SpiderHost.ts — 引擎宿主：装配 EngineHost + 持有 SourceViewModel + 配置导入 + 直播加载 + 用户配置持久化
 import { HttpClient } from '../net/HttpClient';
 import { JsonStore } from '../store/JsonStore';
-import { UserConfigManager } from '../store/UserConfigManager';
+import { UserConfigManager, subscriptionStamp, type ConfigChangeKind } from '../store/UserConfigManager';
 import { DriveStore } from '../store/DriveStore';
 import { getAdapter } from '../net/qr';
 import { runDriveWebLogin } from '../net/webLogin';
@@ -29,12 +29,18 @@ import type {
 import type { EngineHost } from '../../engine/ports';
 import { userDataDir, cacheDir, resourcesDir, spiderCacheDir } from '../util/paths';
 import { safeStorageDriveCodec } from '../util/driveCodec';
-import { matchDriveCookieProvider, wrapPlayUrl, wrapPlayUrlWithHeaders } from '../../shared/driveProvider';
+import {
+  driveBindHintFromPlaySources,
+  looksLikeDriveBindFailure,
+  matchDriveCookieProvider,
+  wrapPlayUrl,
+  wrapPlayUrlWithHeaders,
+} from '../../shared/driveProvider';
 import { join, dirname } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { JarSpiderBridge, normalizeJarUrl } from '../../engine/spider/JarSpiderBridge';
 import { sourceTimeoutMs } from '../../engine/spider/SpiderFactory';
-import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSearch';
+import { mergeSearchResults, isSearchableSource, type AggSearchInput } from '../../engine/vod/aggSearch';
 import {
   newSourceStat,
   noteSourceOk,
@@ -52,9 +58,15 @@ import { assrtSearch, assrtFetch, assrtSearchMulti } from '../subtitle/assrtProv
 import { buildSearchQuery, normalizeTitle, normalizeSubtitleQuery, titleVariants } from '../../engine/subtitle/normalizeQuery';
 import type { SubtitleCandidate, SubtitleSettings, SubtitleFetchResult } from '../../shared/subtitle';
 import { DanmakuStore } from '../danmaku/DanmakuStore';
-import { dandanplaySearch, dandanplayBangumi, dandanplayComment } from '../danmaku/dandanplayProvider';
-import { getDanmakuCredentials } from '../danmaku/credentials';
-import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings, DanmakuSettingsView } from '../../shared/danmaku';
+import {
+  DanmakuEndpointHealth,
+  logvarBangumi,
+  logvarComment,
+  logvarSearchAnime,
+  mapLimit,
+} from '../danmaku/logvarProvider';
+import { endpointLabel, rankDanmakuAnimes } from '../../engine/danmaku/endpoints';
+import type { DanmakuAnime, DanmakuApiEndpoint, DanmakuCandidate, DanmakuSettings } from '../../shared/danmaku';
 import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../../shared/types';
 import type { MetaSettings, MetaSettingsView, MetaSuggestion, MetaSource } from '../../shared/meta';
 import { normalizeMetaSettings } from '../../shared/meta';
@@ -87,6 +99,15 @@ const DOUBAN_MAX_VARIANTS = 2;
  *  并发受限于池的同 key 并行度；10 个调度位让快源不必等好几批才轮到，首屏更快。
  *  子进程的实际并行度由 SpiderProcPool 的 PER_KEY_CAP/全局上限把关，不会失控。） */
 const SEARCH_ALL_WORKERS = 10;
+/**
+ * ★ 2026-09-25：调度并发上限（大配置适配）。
+ *   10 路是 30~40 源配置的口径；100+ 源的大配置（R18 / 摸鱼 / 9918 这类）在 40s 预算内
+ *   只跑得完 ~40 个源（每源上限 10s × 10 路 × 4 轮），其余一律标「总体搜索已超时…该源未执行」
+ *   —— 用户观感正是「大部分源也搜不出来」。这里按源数放大（每 5 源加 1 路），上限 24：
+ *   小配置行为不变（33 源 → 仍是 10 路），大配置一轮能覆盖到 ~95 源。
+ *   子进程的实际并行度仍由 SpiderProcPool 把关（同 key 3 进程 × 进程内 24 并发）。
+ */
+const SEARCH_ALL_WORKERS_MAX = 24;
 /** 聚合搜索总体预算：到点先返回已拿到的结果，未完成的源标注超时（不再无限等） */
 const SEARCH_ALL_BUDGET_MS = 40_000;
 /**
@@ -140,9 +161,12 @@ export class SpiderHost {
   private drives: DriveStore;
   private subtitles: SubtitleStore;
   private danmakuStore: DanmakuStore;
-  /** ★ 弹幕内容缓存（只缓存成功非空结果；上限 200 条防无限增长，满则淘汰最旧）——修复 D4 */
-  private danmakuCache = new Map<number, string>();
+  /** ★ 弹幕内容缓存（只缓存成功非空结果；上限 200 条防无限增长，满则淘汰最旧）——修复 D4
+   *  ★ 2026-09-26：键改为 `来源|剧集id`（外部接口的 id 各自独立，不能只按 id 缓存） */
+  private danmakuCache = new Map<string, string>();
   private static readonly DANMAKU_CACHE_MAX = 200;
+  /** ★ 外部弹幕接口健康表（会话级）：失败源冷却跳过，避免每次搜索都白等死链超时 */
+  private danmakuHealth = new DanmakuEndpointHealth();
   /** TMDB 元数据补全（配置+缓存；缺封面/缺简介时兜底查询） */
   private metaStore: MetaStore;
   /** ★ 元数据来源配置（TMDB 自填 Key / API 代理地址 / 图片镜像地址 / 来源策略） */
@@ -175,6 +199,9 @@ export class SpiderHost {
   private searchCache = new SearchCache<SearchAllReport>();
   /** 预热节流时间戳（配置应用/启动只冷启动有限的常驻蜘蛛进程） */
   private lastPrewarmAt = 0;
+  /** ★ 2026-09-27：运行期学到的「该源需要网盘绑定」源 key 集合 + 其持久化（见 markDriveBindNeeded） */
+  private driveBindKeys = new Set<string>();
+  private driveBindStore!: JsonStore;
   /**
    * ★ 聚合搜索逐源进度回调（IPC 层注入）：每完成一个源推一条给渲染层 → 结果边搜边出。
    * 无回调（单测/CLI）时退化为「只在结束时返回完整报告」。
@@ -202,7 +229,11 @@ export class SpiderHost {
         cacheDir: join(spiderCacheDir(), 'converted'),
         callTimeoutMs: 20000,
         // ★ 嵌入式 CPython 按需下载落盘（userData 可写；安装版不放 resources）
-        pyRuntimeDir: join(userDataDir(), 'cache', 'python'),
+        //   ★ 必须挂在 cacheDir() 下（而不是写死 `userData/cache`）：见 paths.APP_CACHE_DIR_NAME
+        //     —— `cache` 与 Chromium 的 `Cache` 是同一个物理目录，放那里会被 Chromium 启动时清掉。
+        pyRuntimeDir: join(cacheDir(), 'python'),
+        // ★ ARM 原生桥（unidbg）按需下载落盘：含 .so 的加固壳（摸鱼/fty 等）首次调用时下载
+        nativeRuntimeDir: join(cacheDir(), 'native'),
         // ★ 网络代理（用户设置）：JVM 参数 + Python/子进程环境变量；每次调用现取 → 改设置即时生效
         proxyProvider: () => {
           const s = getProxySettings();
@@ -229,10 +260,43 @@ export class SpiderHost {
         .filter((x) => x && typeof x.cookie === 'string' && typeof x.fid === 'string' && x.cookie && x.fid)
         .map((x) => ({ cookie: x.cookie as string, pdirFid: (x.pdirFid || '') as string, fid: x.fid as string, dirFid: x.dirFid || undefined, at: typeof x.at === 'number' ? x.at : Date.now() }));
     }
-    this.manager.setOnChange((snap) => this.onUserConfigChange(snap));
+    this.manager.setOnChange((snap, kind) => this.onUserConfigChange(snap, kind));
     if (this.manager.load()) {
       this.onUserConfigChange(this.manager.snapshot());
     }
+    // ★ 2026-09-27：「该源需要网盘绑定」的运行期学习结果（见 markDriveBindNeeded）
+    this.driveBindStore = new JsonStore(join(userDataDir(), 'drive-bind-learned.json'));
+    const learned = this.driveBindStore.getObject<unknown>('list', null);
+    if (Array.isArray(learned)) {
+      for (const k of learned) if (typeof k === 'string' && k) this.driveBindKeys.add(k);
+    }
+  }
+
+  /**
+   * ★ 2026-09-27（用户要求「确保每一个需要绑定网盘的都能有这段提示，不管换什么订阅什么源」）：
+   *   记下「该源需要网盘绑定」。
+   *
+   *   触发点 = `play()` 里 `matchDriveCookieProvider(url)` 命中（蜘蛛真实给出的播放地址是
+   *   夸克/UC/百度/115 这类**必须带 Cookie 才能取流**的网盘直链）—— 这是**不依赖类名清单**的铁证，
+   *   换任何订阅、任何新蜘蛛都成立。记住后源主页就会显示绑定入口（`needsDriveBind` 的第二判据）。
+   *
+   *   持久化在 `<userData>/drive-bind-learned.json`（与订阅无关，重导配置也保留该源 key 的判定）。
+   */
+  markDriveBindNeeded(key: string): void {
+    const k = (key || '').trim();
+    if (!k || this.driveBindKeys.has(k)) return;
+    this.driveBindKeys.add(k);
+    try {
+      this.driveBindStore.setObject('list', [...this.driveBindKeys]);
+      this.driveBindStore.flush();
+    } catch (e) {
+      this.logger.w(`drive-bind 学习结果落盘失败: ${(e as Error).message}`);
+    }
+  }
+
+  /** 已学到的「需要网盘绑定」源 key 列表（渲染层据此在源主页显示绑定入口） */
+  driveBindLearned(): string[] {
+    return [...this.driveBindKeys];
   }
 
   get host(): EngineHost {
@@ -381,11 +445,22 @@ export class SpiderHost {
 
   // ---- 网盘/资源站凭据（绑定后供对应 csp_ 源调用） ----
   driveList() { return this.drives.list(); }
+  /**
+   * ★ 2026-09-26：本地代理 `/proxy/<jvmPort>` 被访问 → 把该蜘蛛 JVM 钉住（播放期间不回收）。
+   *   壳/蜘蛛的 `<entry>?do=proxy&key=…` 播放地址靠它取流，JVM 一被回收就断流。
+   */
+  pinSpiderProxy(port: number): void {
+    this.bridge.pinSpiderProxy(port);
+  }
   driveSet(provider: string, token: string) {
     this.drives.set(provider, token);
     this.syncCloudDriveConfig(provider, token);
+    this.resetSpidersAfterDriveChange();
   }
-  driveRemove(provider: string) { this.drives.remove(provider); }
+  driveRemove(provider: string) {
+    this.drives.remove(provider);
+    this.resetSpidersAfterDriveChange();
+  }
 
   // ---- 外挂字幕（assrt token + 偏好在 SubtitleStore；检索/抓取见 assrtProvider） ----
   subtitleGetSettings(): SubtitleSettings {
@@ -438,66 +513,100 @@ export class SpiderHost {
     return assrtFetch(token, candidate);
   }
 
-  // ---- 弹幕（弹弹play 内置加密凭据；偏好见 DanmakuStore） ----
-  /** 内置弹弹play 凭据是否已启用（AppId/AppSecret 内置加密，用户不可见、不可配） */
-  private danmakuCreds(): { appId: string; appSecret: string } | null {
-    return getDanmakuCredentials();
+  // ---- 弹幕（★ 2026-09-26 外部接口清单；偏好见 DanmakuStore） ----
+  danmakuGetSettings(): DanmakuSettings {
+    return this.danmakuStore.settings;
   }
-  danmakuGetSettings(): DanmakuSettingsView {
-    const cred = this.danmakuCreds();
-    return { ...this.danmakuStore.settings, appSecretSet: !!(cred && cred.appId && cred.appSecret) };
+  danmakuSetSettings(patch: Partial<DanmakuSettings>): DanmakuSettings {
+    return this.danmakuStore.update(patch || {});
   }
-  danmakuSetSettings(patch: Partial<DanmakuSettings>): DanmakuSettingsView {
-    this.danmakuStore.update(patch || {});
-    const cred = this.danmakuCreds();
-    return { ...this.danmakuStore.settings, appSecretSet: !!(cred && cred.appId && cred.appSecret) };
+  /** 启用的外部接口（保序；面板可逐个开关） */
+  private danmakuEndpoints(): DanmakuApiEndpoint[] {
+    return (this.danmakuStore.settings.endpoints || []).filter((e) => e && e.enabled !== false && e.url);
   }
-  /** 按作品名搜索弹弹play 番剧候选；凭据未内置或失败 → []。 */
-  async danmakuSearch(keyword: string): Promise<DanmakuAnime[]> {
-    const cred = this.danmakuCreds();
-    if (!cred) return [];
+  /** 来源显示名：接口清单查名字，自定义/未知 → host 兜底 */
+  private danmakuEndpointName(url: string): string {
+    const hit = (this.danmakuStore.settings.endpoints || []).find((e) => e.url === url);
+    return (hit?.name || '').trim() || endpointLabel(url) || '外部接口';
+  }
+
+  /**
+   * 按作品名搜索候选：全部启用接口**并行**查询 → 按匹配度合并排序。
+   * `season` = 资源名里的季号（渲染层提取）：同季条目优先、不同季靠后（实测「绝命毒师」的
+   * 真季集被某聚合源的"花絮条目"压在列表第 14 位，只展开前几部会永远试不到）。
+   * 失败源记会话冷却（后续搜索直接跳过）；全部失败 → []。
+   */
+  async danmakuSearch(keyword: string, season?: number): Promise<DanmakuAnime[]> {
     const kw = (keyword || '').trim();
     if (!kw) return [];
-    try {
-      return (await dandanplaySearch(cred.appId, cred.appSecret, kw)) || [];
-    } catch (e) {
-      this.logger.e('danmaku:search/anime 失败', e);
-      return [];
-    }
-  }
-  /** 取某番剧的剧集列表（候选 episodeId 供 danmakuFetch 使用）；失败 → []。 */
-  async danmakuEpisodes(bangumiId: number, animeTitle?: string): Promise<DanmakuCandidate[]> {
-    const cred = this.danmakuCreds();
-    if (!cred || !bangumiId) return [];
-    try {
-      return (await dandanplayBangumi(cred.appId, cred.appSecret, Number(bangumiId), animeTitle)) || [];
-    } catch (e) {
-      this.logger.e('danmaku:bangumi 失败', e);
-      return [];
-    }
-  }
-  /** 按剧集 id 拉弹幕 XML（内存缓存防重复请求）；失败 → ''。 */
-  async danmakuFetch(episodeId: number): Promise<string> {
-    const cred = this.danmakuCreds();
-    if (!cred || !episodeId) return '';
-    // ★ D4：仅缓存非空成功结果（失败/空串不缓存 → 下次自动重试，不因一次网络抖动整会话空白）
-    const hit = this.danmakuCache.get(episodeId);
-    if (hit) return hit;
-    try {
-      const xml = await dandanplayComment(cred.appId, cred.appSecret, episodeId);
-      if (xml) {
-        // 缓存满 → 淘汰最旧（Map 迭代序 = 插入序，首个即最旧）
-        if (this.danmakuCache.size >= SpiderHost.DANMAKU_CACHE_MAX) {
-          const oldest = this.danmakuCache.keys().next().value;
-          if (oldest !== undefined) this.danmakuCache.delete(oldest);
-        }
-        this.danmakuCache.set(episodeId, xml);
+    const t0 = Date.now();
+    const all = this.danmakuEndpoints();
+    const live = all.filter((e) => !this.danmakuHealth.isCooling(e.url));
+    const external = await mapLimit(live, 10, async (e): Promise<DanmakuAnime[]> => {
+      try {
+        const list = await logvarSearchAnime(e.url, kw, e.name);
+        this.danmakuHealth.markOk(e.url);
+        return list;
+      } catch (err) {
+        this.danmakuHealth.markFail(e.url);
+        this.logger.w(`danmaku:接口失败「${e.name}」${(err as Error).message}`);
+        return [];
       }
-      return xml;
+    });
+    const merged = rankDanmakuAnimes(external.flat(), kw, season);
+    // ★ 每来源上限 15：避免单来源（常一次吐几十条平台变体）刷满全局上限，
+    //   把其它来源挤出去 —— 否则自动依次尝试永远轮不到别的源。
+    const perSource = new Map<string, number>();
+    const limited = merged.filter((a) => {
+      const k = a.source || '';
+      const n = perSource.get(k) || 0;
+      if (n >= 15) return false;
+      perSource.set(k, n + 1);
+      return true;
+    });
+    this.logger.i(
+      `弹幕搜索「${kw}」：外部${live.length}源（跳过冷却${all.length - live.length}）；命中${limited.length}部/来自${perSource.size}个来源；${Date.now() - t0}ms`,
+    );
+    return limited.slice(0, 60);
+  }
+  /** 取某番剧的剧集列表（候选 episodeId 供 danmakuFetch 使用）；source = 接口基础地址；失败 → []。 */
+  async danmakuEpisodes(bangumiId: number, animeTitle: string | undefined, source: string): Promise<DanmakuCandidate[]> {
+    if (!bangumiId || !source) return [];
+    try {
+      const list = await logvarBangumi(source, Number(bangumiId), this.danmakuEndpointName(source), animeTitle);
+      this.danmakuHealth.markOk(source);
+      return list;
     } catch (e) {
-      this.logger.e('danmaku:comment 失败', e);
+      this.danmakuHealth.markFail(source);
+      this.logger.w(`danmaku:剧集失败「${this.danmakuEndpointName(source)}」${(e as Error).message}`);
+      return [];
+    }
+  }
+  /** 按剧集 id 拉弹幕 XML（内存缓存防重复请求；缓存键含来源）；失败 → ''。 */
+  async danmakuFetch(episodeId: number, source: string): Promise<string> {
+    if (!episodeId || !source) return '';
+    const key = `${source}|${episodeId}`;
+    // ★ D4：仅缓存非空成功结果（失败/空串不缓存 → 下次自动重试，不因一次网络抖动整会话空白）
+    const hit = this.danmakuCache.get(key);
+    if (hit) return hit;
+    let xml = '';
+    try {
+      xml = await logvarComment(source, episodeId);
+      this.danmakuHealth.markOk(source);
+    } catch (e) {
+      this.danmakuHealth.markFail(source);
+      this.logger.w(`danmaku:弹幕失败「${this.danmakuEndpointName(source)}」${(e as Error).message}`);
       return '';
     }
+    if (xml) {
+      // 缓存满 → 淘汰最旧（Map 迭代序 = 插入序，首个即最旧）
+      if (this.danmakuCache.size >= SpiderHost.DANMAKU_CACHE_MAX) {
+        const oldest = this.danmakuCache.keys().next().value;
+        if (oldest !== undefined) this.danmakuCache.delete(oldest);
+      }
+      this.danmakuCache.set(key, xml);
+    }
+    return xml;
   }
 
   // ---- 元数据（封面/简介/演职员）来源：★ 2026-09-24 用户可在配置页选策略 ----
@@ -798,8 +907,9 @@ export class SpiderHost {
   }
 
   /** 导入配置：apiUrl（http）或本地 JSON 文本 → 解析成功即全量替换持久化配置。
-   *  opts.snapshot（默认 true）= 导入前先把旧订阅快照为新档案（新增订阅不丢旧订阅）；自动刷新传 false。 */
-  async importConfig(source: { url?: string; json?: string }, opts: { snapshot?: boolean } = {}): Promise<ParseResult> {
+   *  opts.snapshot（默认 true）= 导入前先把旧订阅快照为新档案（新增订阅不丢旧订阅）；自动刷新传 false。
+   *  source.name（★ 2026-09-27）= 用户在导入处自填的订阅名；空则由落库逻辑自动命名（「新订阅 xx」）。 */
+  async importConfig(source: { url?: string; json?: string; name?: string }, opts: { snapshot?: boolean } = {}): Promise<ParseResult> {
     const snapshot = opts.snapshot !== false;
     let text = source.json || '';
     if (source.url) {
@@ -808,27 +918,51 @@ export class SpiderHost {
     // ★ 多仓（{urls:[{url,name},...]}）导入：影视仓/多仓盒子订阅格式，逐个子仓取首个可用
     const multi = parseMultiRepo(text);
     if (multi) {
-      return this.importMultiRepo(multi, snapshot);
+      return this.importMultiRepo(multi, snapshot, source.name);
     }
     // ★ 从 URL 导入时传基准地址：配置内 `./xxx.jar` 等相对路径需按订阅目录展开
     //   （对齐上游 ApiConfig.fixContentPath）。粘贴 JSON（无 url）保持原样。
     const result = source.url ? parseSiteConfigWithBase(text, source.url) : parseSiteConfig(text);
+    /**
+     * ★ 2026-09-26（用户报「某份配置导入后一个源都没有、主页/搜索全废」）：
+     *   **解析出 0 源时不许静默替换**。此前会直接落库 → 把用户原有的源整个清空，
+     *   界面只剩「什么源都没有」，而导入却提示“成功”（R18 那份多仓订阅就踩过：见 multiRepo.ts 注释）。
+     *   这里直接抛错并**保持原配置不变**，让用户看到真正的原因。
+     */
+    if (!result.config.sites.length && !result.config.lives.length && !result.config.parses.length) {
+      throw new Error('该订阅里没有任何可用的源（可能是未识别的「多仓」格式，或订阅本身已失效）；已保留原配置不变');
+    }
     this.report = result.report;
     this.config = result.config;
     this.applyConfig(result.config);
+    this.applyImportedConfig(result.config, source.url || '', snapshot, source.name);
+    return result;
+  }
+
+  /**
+   * 导入落库（★ 2026-09-26 用户口径）：**新增订阅** = 旧订阅档案改名「旧订阅 xx」+ 新导入另存为
+   * 「新订阅 xx」并切换过去（不再让新内容顶掉旧档案的名字）；同地址刷新/空状态就地替换当前档案。
+   *
+   * ★ 2026-09-27（用户口径）：导入处可自填**订阅名**（`custom`）——填了就用它命名（新增订阅归档 /
+   *   首次导入建的档案 / 同地址刷新时改名），留空才退回既有自动命名「新订阅 xx」。
+   */
+  private applyImportedConfig(parsed: SiteConfig, apiUrl: string, snapshot: boolean, name = ''): void {
+    const custom = (name || '').trim();
     if (snapshot) {
-      // ★ 新增订阅：导入前把当前生效内容快照为新档案（保留旧订阅，可随时切回）；同地址刷新/空状态不建
       const snap = this.manager.snapshot();
       const hasOld = snap.sources.length > 0 || snap.lives.length > 0;
-      const sameRemote = !!source.url && snap.apiUrl === source.url;
+      const sameRemote = !!apiUrl && snap.apiUrl === apiUrl;
       if (hasOld && !sameRemote) {
-        const stamp = new Date().toISOString().slice(5, 16).replace('T', ' ');
-        this.manager.appendProfileSnapshot(`旧订阅 ${stamp}`);
+        const stamp = subscriptionStamp();
+        this.manager.renameActiveProfileAsOld(`旧订阅 ${stamp}`);
+        this.manager.saveAsProfile(custom || `新订阅 ${stamp}`, { parsed, apiUrl });
+        return;
       }
     }
-    // 导入 = 全量替换（apiUrl 记录订阅地址；粘贴 JSON 传空 = 手动管理）
-    this.manager.replaceFromImport(result.config, source.url || '');
-    return result;
+    this.manager.replaceFromImport(parsed, apiUrl);
+    // 首次导入（档案由 replaceFromImport 自动建）或同地址刷新 —— 用户自填了名字就落上
+    const id = custom ? this.manager.activeProfileId() : '';
+    if (id) this.manager.updateProfileName(id, custom);
   }
 
   /**
@@ -841,13 +975,17 @@ export class SpiderHost {
    * ★ 2026-09-25 追加第 3 次尝试（**DoH**）：域名被 DNS 污染时系统 DNS 会解到劫持 IP，
    *   响应是运营商反诈页之类（同样「不像订阅 JSON」，换 UA 也没用）→ 用 DoH 拿真实 IP 再试。
    *   三次都拿不到才放弃（并保留第 1 次的结果，让上游报出原始错误文案）。
+   *
+   * ★ 2026-09-26：`quick=true` = **多仓扫描用的快取模式** —— 2 次尝试（默认 UA → okhttp UA）、
+   *   每次 12s、不做 DoH。上千项的多仓若每项都走 90s 三连，导入永远跑不完（见 importMultiRepo）。
    */
-  private async fetchConfigText(url: string): Promise<string> {
+  private async fetchConfigText(url: string, quick = false): Promise<string> {
+    const timeoutMs = quick ? 12_000 : 30_000;
     const attempt = async (opts: { ua?: string; doh?: 0 | 1 }): Promise<string> => {
       const res = await this.http.request({
         url,
         method: 'get',
-        timeoutMs: 30000,
+        timeoutMs,
         ...(opts.ua ? { headers: { 'User-Agent': opts.ua } } : {}),
         ...(opts.doh ? { doh: opts.doh } : {}),
       });
@@ -861,7 +999,8 @@ export class SpiderHost {
     }
     if (looksLikeSubscribeJson(text)) return text;
     const okhttp = 'okhttp/3.12.0';
-    for (const label of ['okhttp UA', 'okhttp UA + DoH'] as const) {
+    const labels = quick ? (['okhttp UA'] as const) : (['okhttp UA', 'okhttp UA + DoH'] as const);
+    for (const label of labels) {
       try {
         const t = await attempt(label.includes('DoH') ? { ua: okhttp, doh: 1 } : { ua: okhttp });
         if (looksLikeSubscribeJson(t)) {
@@ -878,38 +1017,44 @@ export class SpiderHost {
   /**
    * ★ 多仓导入：对每个子仓按序拉取解析，取第一个可成功解析的作为当前配置落地；
    *   clan:// 等本地协议仓与失败仓跳过并在提示中说明（影视仓的本地目录仓桌面版无载体）。
+   *
+   * ★ 2026-09-26（用户报「R18 那份配置导进去什么都没有 / 一直转圈」）：
+   *   线上多仓动辄**上千个子仓**（实测 `18CR.json` = **1336 项**，全指向 `mirror.ghproxy.com`
+   *   这类镜像），逐个「默认 UA → okhttp UA → +DoH」三连尝试（每项最长 90s）会**永远跑不完**
+   *   —— 用户看到的就是「导入没反应 / 导进去 0 个源」。这里加两道闸：
+   *     ① 单项走**快取模式**（2 次尝试、每次 12s，不做 DoH 兜底）；
+   *     ② 整轮有**总预算 60s** 且最多试 12 项，超了就把「还有多少项没试」写进错误里。
    */
-  private async importMultiRepo(multi: MultiRepo, snapshot: boolean): Promise<ParseResult> {
+  private async importMultiRepo(multi: MultiRepo, snapshot: boolean, name = ''): Promise<ParseResult> {
     const skipped: string[] = [];
     const total = multi.items.length;
+    const started = Date.now();
+    let tried = 0;
     for (const item of multi.items) {
+      // 总预算/次数闸门（第 1 项总是允许尝试：正常多仓第一项就该成功）
+      if (tried >= SpiderHost.MULTI_REPO_MAX_TRY || (tried > 0 && Date.now() - started > SpiderHost.MULTI_REPO_BUDGET_MS)) {
+        skipped.push(`其余 ${total - tried} 项未尝试（多仓过大，已按 ${Math.round(SpiderHost.MULTI_REPO_BUDGET_MS / 1000)}s 预算截断）`);
+        break;
+      }
       const label = repoDisplayName(item.url, item.name);
       if (!isFetchedRepoUrl(item.url)) {
         const why = /^clan:/i.test(item.url) ? '本地目录仓（clan://）桌面版不可用' : '不支持的协议';
         skipped.push(`「${label}」${why}`);
         continue;
       }
+      tried += 1;
       try {
-        const text = await this.fetchConfigText(item.url);
+        const text = await this.fetchConfigText(item.url, true);
         const result = parseSiteConfigWithBase(text, item.url);
         if (!result.config.sites.length && !result.config.lives.length) {
           skipped.push(`「${label}」内容为空/非订阅配置`);
           continue;
         }
-        // 落地（与 importConfig 单仓路径一致：快照旧配置后替换）
+        // 落地（与 importConfig 单仓路径一致：新增订阅 → 旧档案「旧订阅 xx」+ 新档案「新订阅 xx」）
         this.report = result.report;
         this.config = result.config;
         this.applyConfig(result.config);
-        if (snapshot) {
-          const snap = this.manager.snapshot();
-          const hasOld = snap.sources.length > 0 || snap.lives.length > 0;
-          const sameRemote = snap.apiUrl === item.url;
-          if (hasOld && !sameRemote) {
-            const stamp = new Date().toISOString().slice(5, 16).replace('T', ' ');
-            this.manager.appendProfileSnapshot(`旧订阅 ${stamp}`);
-          }
-        }
-        this.manager.replaceFromImport(result.config, item.url);
+        this.applyImportedConfig(result.config, item.url, snapshot, name);
         const note = `多仓共 ${total} 项，已导入首个可用子仓「${label}」${total > 1 ? `；其余 ${total - 1} 项：${skipped.join('；') || '均可用（可另行单独导入）'}` : ''}`;
         this.logger.i('multi-repo: ' + note);
         return { ...result, warnings: [...(result.warnings || []), note] };
@@ -918,8 +1063,12 @@ export class SpiderHost {
         skipped.push(`「${label}」${msg}`);
       }
     }
-    throw new Error(`多仓订阅 ${total} 个子仓均不可用：${skipped.join('；') || '无有效子仓'}`);
+    throw new Error(`多仓订阅 ${total} 个子仓里没有可用的（已尝试 ${tried} 项）：${skipped.join('；') || '无有效子仓'}`);
   }
+
+  /** 多仓单轮预算与最多尝试项数（见 importMultiRepo 注释） */
+  private static readonly MULTI_REPO_BUDGET_MS = 60_000;
+  private static readonly MULTI_REPO_MAX_TRY = 12;
 
   /** ★ 启动时自动订阅刷新：当前订阅来自 URL 且距上次成功刷新 ≥7 天 → 重新拉取（不建档案、不打扰用户）。 */
   async maybeAutoRefreshSubscriptions(): Promise<boolean> {
@@ -977,7 +1126,18 @@ export class SpiderHost {
   detail(key: string, ids: string[]) {
     const b = this.getSource(key);
     if (!b) throw new Error(`源不存在: ${key}`);
-    return this.vm.detail(b, ids);
+    return this.vm.detail(b, ids).then((d) => {
+      // ★ 2026-09-27（缺口 B，别删）：详情里的**播放源名**带网盘字样（实测 wex 玩偶：`夸克原画$$$夸克最高急速…`）
+      //   ⇒ 该源播放必然要网盘 Cookie ⇒ 立刻学会它（进源即显示绑定入口）。
+      //   为什么要这一条：原先只在「播放**成功**产出网盘直链」时才学 —— 没绑定 Cookie 时播放必失败，
+      //   于是「学不到 → 不显示绑定入口 → 永远绑不上」死循环。详情数据在播放之前就能判定。
+      const hit = driveBindHintFromPlaySources(d?.flags, d ? Object.values(d.episodes || {}).flat().map((e) => e.url) : null);
+      if (hit) {
+        this.logger.i(`detect 详情播放源含网盘（${hit}）→ 记入绑定清单: ${key}`);
+        this.markDriveBindNeeded(key);
+      }
+      return d;
+    });
   }
   search(key: string, wd: string) {
     const b = this.getSource(key);
@@ -1101,7 +1261,7 @@ export class SpiderHost {
     }
     const total = active.length;
     let done = 0;
-    const workerCount = Math.min(SEARCH_ALL_WORKERS, total || 1);
+    const workerCount = Math.min(SEARCH_ALL_WORKERS_MAX, Math.max(SEARCH_ALL_WORKERS, Math.ceil(total / 5)));
     const deadline = Date.now() + SEARCH_ALL_BUDGET_MS;
     /**
      * ★ 派发顺序（源索引）：健康源（快者优先）→ 未知源 → 近期失败源（短预算）。
@@ -1253,14 +1413,12 @@ export class SpiderHost {
     return s;
   }
 
-  /** 可搜索源（searchable=1 且类型可用）：聚合搜索与预热共用同一集合 */
+  /** 可搜索源（非 `searchable: 0` 且类型可用）：聚合搜索与预热共用同一集合。
+   *  ★ 2026-09-25：口径由「searchable === 1」改为「非 0 即参与」（见 aggSearch.isSearchableSource）——
+   *   生态里 `searchable: 2` 的源（drpy 模板、R18/19.json 等大配置）此前被整体排除，
+   *   表现为「整份配置搜不出东西」。 */
   private searchableSites(): SourceBean[] {
-    return (this.config?.sites ?? []).filter((b) => {
-      if (Number(b.searchable) !== 1) return false;
-      if (b.type === 0 || b.type === 1) return true;
-      if (b.type === 3) return true; // jar / .js / .py 均已支持（py：嵌入式 CPython3 运行时）
-      return false;
-    });
+    return (this.config?.sites ?? []).filter((b) => isSearchableSource(b));
   }
 
   /**
@@ -1310,6 +1468,17 @@ export class SpiderHost {
    */
   resetSpidersForProxyChange(): void {
     this.vm.spiderFactory.clear();
+  }
+
+  /**
+   * ★ 2026-09-26：网盘凭据变更后调用 —— 必须让蜘蛛**重新 init**。
+   *   fty 系 Cloud_* 蜘蛛的 cookie 在 init 时从 `<userData>/tvfan/Cloud-drive.txt` 读取，
+   *   文件内容变了但常驻进程/实例的 key（类名 + ext）没变 → 旧 cookie 会一直生效
+   *   （表现为「刚绑定成功却仍然取不到流」）。这里同时清引擎实例缓存与常驻子进程。
+   */
+  resetSpidersAfterDriveChange(): void {
+    this.vm.spiderFactory.clear();
+    this.bridge.resetPool();
   }
 
   async play(key: string, flag: string, id: string): Promise<PlayResult> {
@@ -1367,13 +1536,38 @@ export class SpiderHost {
       // 2) 否则按网盘域名注入对应 provider 的绑定 Cookie
       const prov = matchDriveCookieProvider(r.url);
       if (prov) {
+        // ★ 2026-09-27：本源真实产出了网盘直链 ⇒ **确定需要网盘绑定** → 学会它。
+        //   这样源主页的「网盘绑定」入口不依赖蜘蛛类名清单（摸鱼/fty 类名写法不同、
+        //   同一只蜘蛛在不同订阅里 ext 也不同），换任何订阅、任何新蜘蛛都能覆盖。
+        this.markDriveBindNeeded(key);
         r.url = wrapPlayUrl(r.url, prov);
         // ★ 该「cookie 型」网盘未绑定 → 标记给渲染层，提示去配置页绑定（无 Cookie 取流必失败）
         const tokens = this.driveList() as Record<string, string>;
         if (!tokens[prov]) r.needDriveCookieBind = prov;
       }
       return r;
-    }).then((r) => this.resolveNeededParse(r));
+    }).then((r) => this.resolveNeededParse(r)).catch((e) => {
+      // ★ 2026-09-27（缺口 B，别删）：**未绑定网盘 Cookie 时的失败要翻译成「去绑定」**。
+      //   实测 wex 玩偶（夸克盘）：蜘蛛抛 `org.json.JSONException: JSONObject["data"] not found.`
+      //   —— 上游网盘接口无 Cookie 时回的是错误 JSON（没有 data 字段），蜘蛛没做兜底。
+      //   这里同时做两件事：① 记入绑定清单（学到的判据不依赖类名清单）；② 把失败变成一条**可执行的中文提示**
+      //   走既有上屏通道（`parse:1` + `message`，PlayerPage 会在播放器上方显示，并保底播原始地址）
+      //   —— 不能 `throw`：渲染层的 catch 只回退原始地址，用户看不到任何原因。
+      const msg = String((e as Error)?.message ?? e);
+      if (looksLikeDriveBindFailure(msg)) {
+        this.markDriveBindNeeded(key);
+        this.logger.w(`play 判定需要网盘 Cookie（已记入绑定清单）: ${key} — ${msg}`);
+        return {
+          url: '',
+          parse: 1,
+          playUrl: '',
+          flag,
+          jx: 0,
+          message: '该源播放需要网盘 Cookie：请在点播页点「网盘绑定」填写账号（夸克 / UC / 百度 / 115）后重新播放',
+        } as PlayResult;
+      }
+      throw e;
+    });
   }
 
   /**
@@ -1438,7 +1632,20 @@ export class SpiderHost {
   }
 
   /** 用户配置每次变更（含启动恢复/导入替换/增删改排序/选中源）后同步内存态 */
-  private onUserConfigChange(snap: UserConfig): void {
+  private onUserConfigChange(snap: UserConfig, kind: ConfigChangeKind = 'content'): void {
+    /**
+     * ★★ 2026-09-27（用户报「摸鱼切换源很慢、一直加载中；从搜索结果返回也很慢」）★★
+     *   「只换选中源 / 直播线路」不是配置变更 —— 此时 `sites/parses/lives/flags/spider` 一字未变，
+     *   下面这些重活**全部不该做**：
+     *     ① `applyConfig`：重放整份 SiteConfig（1000 源时是纯浪费）；
+     *     ② `vm.spiderFactory.clear()`：**丢弃全部已建好的蜘蛛实例** → 下次调用要重新加载类 + 重新 init(ext)
+     *        （壳/加固源尤其贵）；
+     *     ③ `searchCache.clear()`：**把全源搜索的 5 分钟缓存清掉** → 用户「搜索 → 换源 → 再搜同词」
+     *        会重新跑一遍 100 个源（这正是用户怀疑的「每次切换都重跑了一次所有的源」）；
+     *     ④ 后台预热 3 个**别的**源的 JVM/Python：与用户当次真正要加载的源抢 CPU 与进程。
+     *   实测观感：切一次源 = 界面长时间转圈。⇒ ui-only 变更直接返回（选中键持久化仍照常写盘）。
+     */
+    if (kind === 'ui') return;
     // ★ 已持久化的旧配置（导入时未做相对路径归一）在此补齐：
     //   以档案 apiUrl 为基准展开 `./xxx.jar`。已是绝对 URL 的值不受影响。
     const base = snap.apiUrl || '';

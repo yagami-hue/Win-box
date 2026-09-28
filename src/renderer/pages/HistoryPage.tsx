@@ -7,13 +7,17 @@
 // 单条移除后可**撤销**（无损还原，含原进度与时间），因为它是不可逆的数据丢失操作。
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { recentWatch, clearUiMemory, deleteWatch, restoreWatch, loadUiMemory, loadLatestWatch, type WatchHistory } from '../lib/uiMemory';
+import { recentWatch, clearUiMemory, deleteWatch, restoreWatch, loadUiMemory, loadLatestWatch, watchedEpisodeOf, latestEpisodeOf, type WatchHistory } from '../lib/uiMemory';
 import { client } from '../api/client';
 import { pickCover, preloadImage } from '../lib/coverPick';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 
 /** 单次补图最多查询多少个不同片名（与首页同口径，避免一次性打爆 TMDB 限流） */
 const MAX_UNIQUE_QUERY = 18;
+/** ★ 2026-09-26：单次「更新检测」最多查多少条（每条要打一次源的详情接口，必须限流） */
+const MAX_UPDATE_CHECK = 12;
+/** 更新检测并发（jar 源详情较慢，压低并发避免打爆主进程/源站） */
+const UPDATE_CONCURRENCY = 3;
 
 /** 记录名可能是「剧名 - 集/备注」→ 补图按剧名查（同首页/详情页口径） */
 function baseNameOf(name: string): string {
@@ -51,8 +55,67 @@ export default function HistoryPage() {
   const [wave, setWave] = useState(0);
   /** 最近一条被移除的记录：非空时显示"撤销"条。整条快照，撤销即无损还原。 */
   const [lastDeleted, setLastDeleted] = useState<WatchHistory | null>(null);
+  /** ★ 2026-09-26：源 key → 源名（左上角标「来自哪个源」，不再重复显示片名） */
+  const [srcNames, setSrcNames] = useState<Record<string, string>>({});
+  /** ★ 2026-09-26：检测到「有更新」的历史（键 = url） */
+  const [upd, setUpd] = useState<Record<string, boolean>>({});
+  const updQueriedRef = useRef<Set<string>>(new Set());
+  const updBusyRef = useRef(false);
+  /** 更新检测批次计数：一批查完 +1 → 触发下一批（历史条数可能 > 单批上限） */
+  const [updWave, setUpdWave] = useState(0);
 
   const refresh = () => setItems(recentWatch(100));
+
+  // 源名映射：源列表可能被配置页改动（导入/改名/切档案）→ 跟随刷新
+  useEffect(() => {
+    const load = (): void => {
+      void client
+        .cfgGet()
+        .then((c) => setSrcNames(Object.fromEntries(c.sources.map((s) => [s.key, s.name || s.key]))))
+        .catch(() => undefined);
+    };
+    load();
+    window.addEventListener('winbox:sources-changed', load);
+    return () => window.removeEventListener('winbox:sources-changed', load);
+  }, []);
+
+  /**
+   * ★ 2026-09-26：**更新检测** —— 历史里看过的资源若源内已更新（现在集数 > 已看到的那一集）→ 标「有更新」。
+   *   数据来源：按 sourceKey + vodId 重新拉一次源详情（限流：单波最多 12 条 / 并发 3 / 每条只查一次）。
+   */
+  useEffect(() => {
+    if (!items.length || updBusyRef.current) return;
+    const todo = items
+      .filter((it) => it.sourceKey && it.vodId && !updQueriedRef.current.has(it.url))
+      .slice(0, MAX_UPDATE_CHECK);
+    if (!todo.length) return;
+    for (const it of todo) updQueriedRef.current.add(it.url);
+    updBusyRef.current = true;
+    void (async () => {
+      const hits: string[] = [];
+      let next = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const i = next++;
+          if (i >= todo.length) return;
+          const it = todo[i];
+          const watched = watchedEpisodeOf(it);
+          if (!watched) continue; // 电影/无集号 → 无「更新」概念
+          try {
+            const d = await client.detail({ key: it.sourceKey!, ids: [it.vodId!] });
+            if (d && latestEpisodeOf(d) > watched) hits.push(it.url);
+          } catch {
+            /* 源不可用/超时：静默（不误报「有更新」） */
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(UPDATE_CONCURRENCY, todo.length) }, worker));
+      updBusyRef.current = false;
+      if (hits.length) setUpd((prev) => ({ ...prev, ...Object.fromEntries(hits.map((u) => [u, true])) }));
+      setUpdWave((w) => w + 1); // 还有未检测的历史（>MAX_UPDATE_CHECK）→ 再走一批
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, updWave]);
 
   /**
    * ★ 2026-09-24（用户反馈「历史页经常没有封面」）：
@@ -276,16 +339,28 @@ export default function HistoryPage() {
                           </svg>
                         </button>
                       </div>
-                      {/* 来源 chip（左上，与搜索结果一致） */}
-                      {it.sourceName && (
+                      {/* 来源 chip（左上）：显示**资源来自哪个源**（源名），不再重复片名 */}
+                      {it.sourceKey && srcNames[it.sourceKey] && (
                         <span
                           style={{
                             position: 'absolute', left: 6, top: 6, background: 'rgba(0,0,0,.62)', color: 'var(--accent)',
                             fontSize: 10, padding: '1px 7px', borderRadius: 999, maxWidth: '62%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                           }}
-                          title={it.sourceName}
+                          title={`来源：${srcNames[it.sourceKey]}`}
                         >
-                          {it.sourceName}
+                          {srcNames[it.sourceKey]}
+                        </span>
+                      )}
+                      {/* ★ 2026-09-26：源内已更新（现在集数 > 已看到的那一集） */}
+                      {upd[it.url] && (
+                        <span
+                          style={{
+                            position: 'absolute', left: 6, bottom: 6, background: 'var(--danger)', color: '#fff',
+                            fontSize: 10, fontWeight: 600, padding: '1px 7px', borderRadius: 999,
+                          }}
+                          title="该资源在源内已有新集"
+                        >
+                          有更新
                         </span>
                       )}
                     </div>
@@ -315,9 +390,6 @@ export default function HistoryPage() {
                 </div>
                 );
               })}
-            </div>
-            <div className="muted" style={{ fontSize: 11, marginTop: 14 }}>
-              单击卡片 = 继续播放（自动续播上次进度）；右上角 ✕ = 移除该条（可撤销）；悬停卡片下方按钮 = 打开详情 / 移除。
             </div>
           </>
         )}

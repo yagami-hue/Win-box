@@ -249,12 +249,14 @@
   display: flex; align-items: center; justify-content: center;
   transition: transform .18s ease, background .18s ease;
 }
-:root[data-theme='netflix'] .vp-big:hover { transform: scale(1.06); background: rgba(229, 9, 20, .85); border-color: transparent; }
+/* ★ hover 必须保留 translate(-50%,-50%)：少了它 transform 被整体替换，
+   按钮（left/top:50% 定位）会瞬间跳到右下半个身位 —— 用户报「鼠标挪到按钮上按钮会移动」 */
+:root[data-theme='netflix'] .vp-big:hover { transform: translate(-50%, -50%) scale(1.06); background: rgba(229, 9, 20, .85); border-color: transparent; }
 :root[data-theme='netflix'] .vplayer.vui .vp-big { opacity: 1; }
 :root[data-theme='netflix'] .vp-progress { height: 6px; background: rgba(255, 255, 255, .28); border-radius: 3px; }
 :root[data-theme='netflix'] .vp-buffer { background: rgba(255, 255, 255, .42); border-radius: 3px; }
 :root[data-theme='netflix'] .vp-played { background: var(--nf-red); border-radius: 3px; }
-:root[data-theme='netflix'] .vp-thumb { width: 14px; height: 14px; margin-top: -4px; background: var(--nf-red); box-shadow: 0 0 0 3px rgba(229, 9, 20, .35); }
+:root[data-theme='netflix'] .vp-thumb { width: 9px; height: 9px; background: var(--nf-red); box-shadow: 0 0 0 2px rgba(229, 9, 20, .35); }
 :root[data-theme='netflix'] .vp-ctl { color: #fff; }
 :root[data-theme='netflix'] .vp-ctl:hover { color: var(--nf-red); }
 :root[data-theme='netflix'] .vp-ctl:disabled { color: #6b6b6b; }

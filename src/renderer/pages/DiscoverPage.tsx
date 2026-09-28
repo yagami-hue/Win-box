@@ -41,8 +41,6 @@ export default function DiscoverPage() {
   const [sections, setSections] = useState<DiscoverSection[] | null>(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);
-  /** 有源时（侧边栏也能进发现页）顶栏文案/按钮自适应 */
-  const [hasSources, setHasSources] = useState(false);
   // ---- 分类（TMDB 类型清单 + 按类型翻页）----
   /**
    * ★ 2026-09-24（用户定稿）：**父分类（电影/剧集）未被点击前，不展示子分类（类型标签）**。
@@ -90,7 +88,6 @@ export default function DiscoverPage() {
   }, [loading, sections]);
   useEffect(() => {
     load();
-    client.cfgGet().then((cfg) => setHasSources(cfg.sources.length > 0)).catch(() => undefined);
     client.metaGenres().then(setGenres).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -173,12 +170,7 @@ export default function DiscoverPage() {
         onMouseLeave={() => { hoveringRef.current = false; }}
       >
         {/* ★ 2026-09-24（用户定稿）：原来那排「发现 ……… 【刷新】」整排删除（标题与刷新按钮都属冗余）；
-            仅在「一个源都没导入」时保留一个轻量提示入口（去配置页导入）。 */}
-        {!hasSources && (
-          <div className="banner" style={{ marginBottom: 12 }}>
-            还没有导入任何源 —— <button style={{ flex: '0 0 auto' }} onClick={() => nav('/config')}>去导入源</button>
-          </div>
-        )}
+            ★ 2026-09-26（用户指令）：无源时的「还没有导入任何源 —— 去导入源」提示条也整条删除。 */}
         {/* ---- Netflix Hero：**满屏**横版剧照轮播（保持比例完整显示 + 比例外模糊填充）---- */}
         {nf && hero && !gSel && (
           <div className="nf-hero">

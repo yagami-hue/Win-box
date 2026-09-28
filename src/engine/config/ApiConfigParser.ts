@@ -1,6 +1,6 @@
 // src/engine/config/ApiConfigParser.ts
 // ★ 站源 JSON 解析总入口。1:1 对齐 ApiConfig.java 的 trimJsonObject / parseApiCollection / parseJson。
-import { safeJsonString, safeJsonStringList, stripJsonComments } from '../util/json';
+import { safeJsonString, safeJsonStringList, parseJsonLenient } from '../util/json';
 import { parseSite } from './SiteParser';
 import { parseParses } from './ParseConfigParser';
 import { parseLives } from './LiveConfigParser';
@@ -76,7 +76,7 @@ export function parseApiCollection(jsonStr: string): MultiConfigEntry[] | null {
   try {
     const json = trimJsonObject(jsonStr);
     if (json.length === 0) return null;
-    const infoJson = JSON.parse(stripJsonComments(json)) as Record<string, unknown>;
+    const infoJson = parseJsonLenient(json) as Record<string, unknown>;
     // 上游：infoJson == null || has("sites") || !has("urls") || !urls.isArray() → 返回空
     if (
       infoJson == null ||
@@ -180,7 +180,8 @@ function parseSiteConfigInternal(jsonStr: string, apiUrl: string): ParseResult {
 
   let infoJson: Record<string, unknown>;
   try {
-    infoJson = JSON.parse(stripJsonComments(json)) as Record<string, unknown>;
+    // 宽容解析（注释 + 尾随逗号，对齐 org.json）——见 parseJsonLenient 注释
+    infoJson = parseJsonLenient(json) as Record<string, unknown>;
   } catch (e) {
     // 非 JSON（如直播 txt 以 .json 命名）—— 不在此处理，交给上层走 live 解析
     throw new Error(

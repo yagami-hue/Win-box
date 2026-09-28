@@ -3,7 +3,7 @@
 // 上游约定：site.api = "csp_Doll" → 类名 com.github.catvod.spider.Doll；
 //           site.jar = "URL" 或 "URL;md5;xxx"（分号分隔，取第一段）。
 import { Spider, type SpiderInit } from './Spider';
-import { normalizeJarUrl, type JarSpiderBridge } from './JarSpiderBridge';
+import { normalizeJarUrl, formatDuration, type JarSpiderBridge } from './JarSpiderBridge';
 import { SourceProblemError } from './errors';
 import { enrichExt } from './driveExt';
 
@@ -66,15 +66,25 @@ export class JarSpider extends Spider {
     } catch (e) {
       const msg = (e as Error).message || String(e);
       if (msg === '__PREPARING__') {
-        this.loadError = '首次使用该源：正在后台下载并转换蜘蛛运行时（jar，约 10~40 秒），稍候重新打开该源即可';
+        // ★ 2026-09-25：大 jar（10MB 级 dex）首次转换实测要**数分钟**（21 分钟前刚实测：摸鱼那只
+        //   11.3MB dex = 198 秒），文案不再只说「10~40 秒」，免得用户以为坏了。
+        // ★ 2026-09-27：带上**已等时长**（用户诉求「等待要有感知」）—— 首页每 20s 自动重试一次，
+        //   文案里的时间会跟着走，用户能看出「在动、没死」；接管后台转换时额外说明。
+        this.loadError = this.preparingMessage();
         this.host.logger.i(`jar-spider ${this.siteKey}: ${this.loadError}`);
         return false;
       }
-      // 把底层报错翻译成人话：配置路径问题 / 下载失败 / 转换失败
-      if (/Invalid URL|Failed to parse URL/i.test(msg)) {
+      // 把底层报错翻译成人话：配置路径问题 / 下载失败 / 转换失败 / 转换内存不足
+      if (/后台转换仍在进行|仍在进行/.test(msg)) {
+        // ★ 2026-09-27：后台转换还在跑（不是失败）—— 不让用户看到「加载失败」，而是「还要等」，
+        //   HomePage 的自动重试正则会继续等它（见该处的 /首次使用该源|正在后台/）。
+        this.loadError = this.preparingMessage();
+      } else if (/Invalid URL|Failed to parse URL/i.test(msg)) {
         this.loadError = 'jar 地址不合法（配置里的路径无法解析），可能需要重新导入配置';
       } else if (/jar 下载失败|status/i.test(msg)) {
         this.loadError = 'jar 下载失败，资源地址可能已失效或网络不通';
+      } else if (/转换内存不足|OutOfMemoryError/i.test(msg)) {
+        this.loadError = 'jar 转换内存不足（该 jar 体积偏大）：已按更大堆重试仍失败，请关闭其他占内存的程序后清理缓存再试';
       } else if (/转换产物为空|dex2jar/i.test(msg)) {
         this.loadError = 'jar 转换失败，下载到的可能不是有效的 jar 文件';
       } else if (/ENOENT/.test(msg)) {
@@ -85,6 +95,27 @@ export class JarSpider extends Spider {
       this.host.logger.w(`jar-spider ${this.siteKey}: ${this.loadError}（原始：${msg}）`);
       return false;
     }
+  }
+
+  /**
+   * 「正在准备」类文案 —— 带上进度，让等待有感知（★ 2026-09-27）。
+   *
+   * 为什么带时长：大 jar 的 dex2jar 实测要 3~4 分钟，首页每 20s 自动重试一次（HomePage 的
+   * `/首次使用该源|正在后台/` 分支），所以这段话术会被反复上屏 —— 每次重试都把「已等 X」刷新一遍，
+   * 用户能看出它在动。`attached` = 正在接管上次会话遗留的后台转换（关软件也没白等）。
+   */
+  private preparingMessage(): string {
+    let elapsed = 0;
+    let attached = false;
+    for (const u of this.jarUrls()) {
+      const p = this.bridge.conversionProgress(u);
+      if (!p) continue;
+      elapsed = Math.max(elapsed, p.elapsedMs);
+      attached = attached || p.attached;
+    }
+    const waited = elapsed >= 1000 ? `已 ${formatDuration(elapsed)}，` : '';
+    const hint = attached ? '正在接管上次没跑完的转换（关软件也继续转），' : '';
+    return `首次使用该源：正在后台编译蜘蛛运行时（${waited}${hint}大 jar 首次约需数分钟，完成后会自动加载）`;
   }
 
   private async call(method: string, args: string[] = [], timeoutMs?: number): Promise<string> {
