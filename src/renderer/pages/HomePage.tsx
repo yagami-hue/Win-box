@@ -599,6 +599,28 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ★ 2026-09-30（用户要求：换源弹层「左订阅 → 右源」跨订阅点选）：
+  //   档案切换后**即使源 key 与当前同名**（两个订阅里都有同名 key）也必须按新档案重取列表与主页 ——
+  //   只靠 source-changed 会被 chooseSource 的「同名即忽略」守卫挡掉，界面会停在旧档案的数据上。
+  useEffect(() => {
+    const onProfile = (e: Event): void => {
+      const k = (e as CustomEvent<string>).detail;
+      void client
+        .cfgGet()
+        .then((cfg) => {
+          setSites(cfg.sources);
+          const next = k && cfg.sources.some((x) => x.key === k) ? k : cfg.ui.activeSourceKey;
+          if (!next) return;
+          setKey(next);
+          void loadHome(next);
+        })
+        .catch(() => undefined);
+    };
+    window.addEventListener('winbox:profile-changed', onProfile);
+    return () => window.removeEventListener('winbox:profile-changed', onProfile);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ★ 2026-09-26：源列表本身变了（配置页导入/删源/切档案后广播 winbox:sources-changed）→ 重取源列表；
   //   当前源已不存在（导入换了一批源）时自动落到第一个可用源并加载，无需重启应用。
   //   ★ 注意：keyRef 为空时**不切源** —— 挂载瞬间还没选源，此时"自动落到第一个可用源"会把
@@ -897,6 +919,24 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    *   所以「摸鱼版立播（`csp_Libvio` + `ext={"site":[…]}`）之类清单漏网」也能在首次播放后被覆盖。
    */
   const driveSrc = needsDriveBind(curSite, learnedDriveKeys);
+  /**
+   * ★ 2026-09-29（用户要求）本地包「网页源」：该源带 `homePage`（包内 html 首页，靠 window.fm 桥拉数据）
+   *   → 点播页顶部给一条横幅 +「打开网页」入口，在独立窗口里打开（见 main/webbridge/WebHomeWindow.ts）。
+   */
+  const homePageUrl = (curSite?.homePage || '').trim();
+  const openWebHome = async (): Promise<void> => {
+    setErr('');
+    try {
+      const r = await client.webHomeOpen({
+        url: homePageUrl,
+        title: `${curSite?.name || '网页源'} · 网页`,
+        site: { key: curSite?.key, name: curSite?.name, api: curSite?.api, ext: curSite?.ext, homePage: homePageUrl },
+      });
+      if (!r.ok && r.error) setErr(r.error);
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  };
   const boundDriveNames = ['quark', 'uc', 'baidu', 'ali', '115', 'bili']
     .filter((p) => driveTokens[p])
     .map((p) => ({ quark: '夸克', uc: 'UC', baidu: '百度', ali: '阿里', '115': '115', bili: '哔哩' } as Record<string, string>)[p]);
@@ -998,6 +1038,16 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
               {boundDriveNames.length ? '' : '，绑定后本源才能列出/播放盘内资源'}。
             </span>
             <button className="primary" onClick={() => setBindOpen(true)}>网盘绑定</button>
+          </div>
+        )}
+        {/* ★ 2026-09-29（用户要求）本地包「网页源」：该源首页是一张自带 Web UI 的 html → 独立窗口打开 */}
+        {homePageUrl && !aggMode && (
+          <div
+            className="banner"
+            style={{ borderLeftColor: 'var(--accent-2)', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}
+          >
+            <span>该源是网页源（自带网页界面）：列取/登录等交互在网页窗口里完成，起播仍由本应用接管。</span>
+            <button className="primary" onClick={() => void openWebHome()}>打开网页</button>
           </div>
         )}
 

@@ -10,7 +10,7 @@ const invoke = <T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> =
   ipcRenderer.invoke(channel, ...args);
 
 const api = {
-  system: { ping: () => invoke<string>(IPC.SYSTEM_PING), icon: () => invoke<string>(IPC.APP_ICON), setTheme: (t: string) => invoke<void>(IPC.THEME_SET, t), quit: () => invoke<void>(IPC.APP_QUIT) },
+  system: { ping: () => invoke<string>(IPC.SYSTEM_PING), icon: () => invoke<string>(IPC.APP_ICON), setTheme: (t: string) => invoke<void>(IPC.THEME_SET, t), quit: () => invoke<void>(IPC.APP_QUIT), dataDir: () => invoke(IPC.SYSTEM_DATA_DIR) },
   config: {
     import: (args: { url?: string; json?: string }) => invoke(IPC.CONFIG_IMPORT, args),
     listSites: () => invoke(IPC.CONFIG_LIST_SITES),
@@ -33,11 +33,39 @@ const api = {
         result?: { config: SiteConfig; report: ImportReport; warnings: string[]; urls?: { name: string; url: string }[] };
       }>(IPC.CFG_IMPORT_JSON_LOCAL, name),
     importPyLocal: () => invoke<{ ok: boolean; key?: string; error?: string }>(IPC.CFG_IMPORT_PY_LOCAL),
+    /**
+     * ★ 2026-09-30（用户要求）：导入**本地 TXT / M3U 直播源**（配置页按钮）。
+     * 返回命中的线路名与下标；replaced = 同文件重复导入（更新名字，不新增线路）。
+     */
+    importLiveLocal: () =>
+      invoke<{ ok: boolean; name?: string; index?: number; replaced?: boolean; total?: number; error?: string }>(IPC.CFG_IMPORT_LIVE_LOCAL),
+    /**
+     * ★ 2026-09-29（用户要求）：导入**本地包**（含 影视.json 与 py/js/jar/html 等子目录的目录包）。
+     * 选目录 → 登记包根 → 包内相对引用展开 → 走正常订阅导入（档案 apiUrl 记 pkg://<i>/<rel>）。
+     */
+    importPackage: (name?: string) =>
+      invoke<{
+        ok: boolean;
+        root?: string;
+        rel?: string;
+        sites?: number;
+        name?: string;
+        error?: string;
+        warnings?: string[];
+        result?: { config: SiteConfig; report: ImportReport; warnings: string[]; urls?: { name: string; url: string }[] };
+      }>(IPC.CFG_IMPORT_PACKAGE, name),
+    /** ★ 2026-09-29 本地包「网页源」：在独立窗口打开 homePage html（fm 桥注入 window.fm） */
+    webHomeOpen: (init: { url: string; title?: string; site?: Record<string, string | undefined> }) =>
+      invoke<{ ok: boolean; error?: string }>(IPC.WEBHOME_OPEN, init),
     saveAsProfile: (name: string) => invoke<UserProfile>(IPC.CFG_PROFILE_SAVE, name),
     activateProfile: (id: string) => invoke<void>(IPC.CFG_PROFILE_ACTIVATE, id),
     deleteProfile: (id: string) => invoke<void>(IPC.CFG_PROFILE_DELETE, id),
     updateProfileName: (a: { id: string; name: string }) => invoke<void>(IPC.CFG_PROFILE_UPDATE_NAME, a),
     cfgProfiles: () => invoke(IPC.CFG_PROFILES),
+    /** ★ 2026-09-30（用户要求）：换源弹层「左订阅 / 右源」——每份档案的源 key/name 清单 */
+    profileSites: () => invoke(IPC.CFG_PROFILE_SITES),
+    /** ★ 2026-09-30（用户要求）：一步完成「切换档案 + 选中该档案下的源」 */
+    switchProfileSource: (a: { profileId: string; key: string }) => invoke<void>(IPC.CFG_SWITCH_PROFILE_SOURCE, a),
     vodDebug: (key: string) => invoke(IPC.VOD_DEBUG, key),
     audit: () => invoke(IPC.VOD_AUDIT),
     cacheClear: () => invoke<{ freedBytes: number; cleared: string[]; failed: string[] }>(IPC.CACHE_CLEAR),

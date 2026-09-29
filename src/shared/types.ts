@@ -43,6 +43,12 @@ export interface SourceBean {
   timeout: number; // 秒；0 → 默认 15；有效值 clamp [5,60]
   click: string; // "host;selector"
   style: string;
+  /**
+   * ★ 2026-09-29（用户要求）本地包「网页源」：该源的网页首页（`homePage` 字段）。
+   * 上游形态：html 页自带 UI，靠宿主 `window.fm` 桥拉数据（见 shared/webbridge.ts）。
+   * 空 = 普通源（走常规分类网格）。
+   */
+  homePage?: string;
 }
 
 /** 分类筛选：单个可选值（onesource type_flag 联动，v 为空时回退 n） */
@@ -416,6 +422,36 @@ export interface UserProfile {
   json: string; // 归一化订阅 JSON（{spider,flags,sites,lives}，可再经 parseSiteConfig 解析）
   sourceCount: number; // 该档案含源数（展示用，归一化时重算）
   importedAt: string; // ISO 时间
+}
+
+/**
+ * ★ 2026-09-30（用户要求）：换源弹层的「左订阅 / 右源」视图。
+ * 每份档案给出源 key/name 清单：当前生效档案取**运行期真实源列表**（含手动增删改），
+ * 其余档案解析其存档 JSON（解析失败给空清单，不阻塞弹层）。
+ */
+export interface ProfileSitesView {
+  activeId: string;
+  profiles: Array<{
+    id: string;
+    name: string;
+    sites: Array<{ key: string; name: string }>;
+  }>;
+}
+
+/** ★ 2026-09-30：数据目录信息（安装目录/data；老用户迁移结果与回退原因） */
+export interface DataDirInfo {
+  path: string;
+  mode: 'dev' | 'activated' | 'fallback';
+  planned: string;
+  reason?: string;
+  migration?: {
+    status: 'no-legacy' | 'moved' | 'copied' | 'already' | 'failed';
+    files: number;
+    bytes: number;
+    skipped: number;
+    cleanedLegacy: boolean;
+    error?: string;
+  };
 }
 
 /** 单源实时诊断报告（vod:debug） */

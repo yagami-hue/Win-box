@@ -5,6 +5,11 @@ export const IPC = {
   APP_ICON: 'app:icon',
   APP_QUIT: 'app:quit',
   THEME_SET: 'theme:set',
+  /**
+   * ★ 2026-09-30（用户要求）：数据目录信息（安装目录/data；含老用户迁移结果/回退原因）。
+   * 用于配置页展示与排障（「为什么还在 C 盘」这类问题看这条）。
+   */
+  SYSTEM_DATA_DIR: 'system:dataDir',
   // 外挂字幕
   SUBTITLE_GET: 'subtitle:get',
   SUBTITLE_SET: 'subtitle:set',
@@ -53,8 +58,27 @@ export const IPC = {
   // ★ 2026-09-27（用户要求）：本地 .json 订阅文件导入（文件选择器；档案名默认取原始文件名）
   CFG_IMPORT_JSON_LOCAL: 'cfg:importJsonLocal',
   CFG_IMPORT_PY_LOCAL: 'cfg:importPyLocal',
+  /**
+   * ★ 2026-09-29（用户要求）：导入**本地包**（影视壳/影视仓 目录包：影视.json + py/js/jar/html/xbpq）。
+   * 选目录 → 登记包根 → 相对引用展开（/pkg 路由 + py 就地 file://）→ 走正常订阅导入。
+   */
+  CFG_IMPORT_PACKAGE: 'cfg:importPackage',
+  /**
+   * ★ 2026-09-30（用户要求）：导入**本地 TXT / M3U 直播源**（配置页按钮）。
+   * 选文件 → 校验形态 → 落 <userData>/local-live/<文件名> → 追加/更新 lives 线路（/file 路由供直播页加载）。
+   */
+  CFG_IMPORT_LIVE_LOCAL: 'cfg:importLiveLocal',
   CFG_PROFILE_SAVE: 'cfg:profileSave',
   CFG_PROFILE_ACTIVATE: 'cfg:profileActivate',
+  /**
+   * ★ 2026-09-30（用户要求）：换源弹层的「左订阅 / 右源」视图 —— 每份档案的源 key/name 清单。
+   */
+  CFG_PROFILE_SITES: 'cfg:profileSites',
+  /**
+   * ★ 2026-09-30（用户要求）：一步完成「切换档案 + 选中该档案下的某个源」（换源弹层跨订阅选择）。
+   * 单次 apply（避免两次内容变更触发两轮宿主重活）。
+   */
+  CFG_SWITCH_PROFILE_SOURCE: 'cfg:switchProfileSource',
   CFG_PROFILE_DELETE: 'cfg:profileDelete',
   CFG_PROFILE_UPDATE_NAME: 'cfg:profileUpdateName',
   CFG_PROFILES: 'cfg:profiles',
@@ -130,4 +154,12 @@ export const IPC = {
   UPDATE_INSTALL: 'update:install',
   /** 主进程 → 渲染层：下载进度（bytes / 百分比 / 速度） */
   UPDATE_PROGRESS: 'update:progress',
+  /**
+   * ★ 2026-09-29（用户要求）本地包「网页源」：在独立窗口打开 homePage html（fm 桥，见 WebHomeWindow）。
+   * 下面三条 `fm:*` 是**网页窗口 preload → 主进程**的桥通道（渲染层不直接调用）。
+   */
+  WEBHOME_OPEN: 'webhome:open',
+  WEBHOME_FM_REQ: 'fm:req',
+  WEBHOME_FM_PLAY: 'fm:play',
+  WEBHOME_FM_COOKIE: 'fm:cookie',
 } as const;

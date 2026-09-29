@@ -19,15 +19,18 @@ const opts = {
   logLevel: 'info',
 };
 
+// `out` = 产物名（不带扩展名）：outdir 模式（watch）与 outfile 模式共用同一份清单，避免两条路径产物名不一致
 const entries = [
-  { entry: resolve(src, 'src/main/index.ts'), outfile: resolve(src, 'dist/main.cjs') },
-  { entry: resolve(src, 'src/main/preload.ts'), outfile: resolve(src, 'dist/preload.cjs') },
+  { in: resolve(src, 'src/main/index.ts'), out: 'main' },
+  { in: resolve(src, 'src/main/preload.ts'), out: 'preload' },
+  // ★ 2026-09-29（用户要求）本地包网页源窗口的 preload（注入 window.fm 桥）
+  { in: resolve(src, 'src/main/webbridge/webhomePreload.ts'), out: 'webhome-preload' },
 ];
 
 if (watch) {
   const ctx = await context({
     ...opts,
-    entryPoints: entries.map((e) => e.entry),
+    entryPoints: entries.map((e) => ({ in: e.in, out: e.out })),
     outdir: resolve(src, 'dist'),
     outExtension: { '.js': '.cjs' },
   });
@@ -35,7 +38,7 @@ if (watch) {
   console.log('[main] watching...');
 } else {
   for (const e of entries) {
-    await build({ ...opts, entryPoints: [e.entry], outfile: e.outfile });
+    await build({ ...opts, entryPoints: [e.in], outfile: resolve(src, `dist/${e.out}.cjs`) });
   }
   console.log('[main] build done');
 }

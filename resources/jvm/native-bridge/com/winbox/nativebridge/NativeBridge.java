@@ -406,7 +406,25 @@ public final class NativeBridge {
             }
             DvmClass c = CLASSES.get(className);
             if (c == null) throw new IllegalStateException("原生桥未就绪或未登记类: " + className);
-            return call(className, c, emulator, method, desc, args, vm);
+            Object r = call(className, c, emulator, method, desc, args, vm);
+            warnNullGuardResult(className, method, r);
+            return r;
+        }
+    }
+
+    /**
+     * ★★ 2026-09-29（设备实证「切换部分源 NPE」）：壳的守卫链只有两步 ——
+     * `DexNative.getLoader` → DexClassLoader、`DexNative.getSpider` → 真实蜘蛛实例。
+     * 任一**静默返回 null**，`BaseSpiderGuard` 的字段就留空，随后第一个 `init()` 必抛
+     * `NullPointerException: Cannot invoke "…Spider.init(android.content.Context, String)"`。
+     * 此前这两处 null 完全没有日志（设备上只能看到下游 NPE），这里把根因显式打出来。
+     */
+    private static void warnNullGuardResult(String className, String method, Object r) {
+        if (r != null) return;
+        if ("getLoader".equals(method) || "getSpider".equals(method)) {
+            System.err.println("[native-bridge] 警告: " + className + "#" + method
+                    + " 返回 null —— 壳的守卫内层蜘蛛将为空（后续首个 init() 必 NPE）；"
+                    + "解密 dex / 加载器链路未走通（看上面是否有保存/解密/转换失败日志）");
         }
     }
 
@@ -425,6 +443,7 @@ public final class NativeBridge {
             synchronized (PAYLOAD_LOCK) {
                 if (hasNative(payloadVm, payloadEmulator, className, method, desc)) {
                     Object r = call(className, payloadVm.resolveClass(className), payloadEmulator, method, desc, args, payloadVm);
+                    warnNullGuardResult(className, method, r);
                     payloadTrace(className, method, r);
                     return r;
                 }

@@ -12,8 +12,10 @@ import { parseSite } from '../../engine/config/SiteParser';
 import { parseSiteConfig } from '../../engine/config/ApiConfigParser';
 import { parseLives } from '../../engine/config/LiveConfigParser';
 import type {
+  LiveBean,
   Logger,
   ParseBean,
+  ProfileSitesView,
   SiteConfig,
   SourceBean,
   SourceMoveDirection,
@@ -270,8 +272,12 @@ export class UserConfigManager {
     return { ...p };
   }
 
-  /** 切换档案：解析其 json 全量恢复 sources/lives/global。json 为空/解析失败抛中文错。 */
-  activateProfile(id: string): void {
+  /**
+   * 切换档案：解析其 json 全量恢复 sources/lives/global。json 为空/解析失败抛中文错。
+   * ★ 2026-09-30（用户要求）：`pickKey` 非空时在**同一次 apply 内**把选中源落到该档案下的这个 key
+   *   （换源弹层「左订阅 → 右源」一步点选完成；两次调用会触发两轮内容变更与宿主重活）。
+   */
+  activateProfile(id: string, pickKey = ''): void {
     const p = this.snap.profiles.find((x) => x.id === id);
     if (!p) throw new Error(`档案不存在：${id}`);
     if (!p.json) throw new Error(`档案「${p.name}」没有可恢复的内容（json 为空）`);
@@ -290,7 +296,8 @@ export class UserConfigManager {
       lives: parsed.lives.map((l) => ({ ...l })),
       parses: realParses(parsed.parses),
     };
-    if (!next.sources.some((s) => s.key === next.ui.activeSourceKey)) next.ui.activeSourceKey = '';
+    if (pickKey && next.sources.some((s) => s.key === pickKey)) next.ui.activeSourceKey = pickKey;
+    else if (!next.sources.some((s) => s.key === next.ui.activeSourceKey)) next.ui.activeSourceKey = '';
     next.ui.activeLiveIndex = clampIndex(next.ui.activeLiveIndex, next.lives.length);
     this.apply(next);
   }
@@ -331,6 +338,33 @@ export class UserConfigManager {
   /** 档案元信息（不含 json 体，避免 IPC 载荷过大） */
   profiles(): Array<{ id: string; name: string; apiUrl: string; sourceCount: number; importedAt: string }> {
     return this.snap.profiles.map(({ json: _j, ...meta }) => meta);
+  }
+
+  /**
+   * ★ 2026-09-30（用户要求）：换源弹层的「左订阅 / 右源」视图。
+   * 当前生效档案取**运行期真实源列表**（含手动增删改/排序）；其余档案解析其存档 JSON。
+   * 解析失败给空清单（弹层照常显示该订阅，只是没有源）——不因单份坏档整体失败。
+   */
+  profileSitesView(): ProfileSitesView {
+    const activeId = this.snap.activeProfileId;
+    const pick = (s: SourceBean): { key: string; name: string } => ({ key: s.key, name: s.name || s.key });
+    return {
+      activeId,
+      profiles: this.snap.profiles.map((p) => {
+        if (p.id === activeId) {
+          return { id: p.id, name: p.name, sites: this.snap.sources.map(pick) };
+        }
+        let sites: Array<{ key: string; name: string }> = [];
+        if (p.json) {
+          try {
+            sites = parseSiteConfig(p.json).config.sites.map(pick);
+          } catch {
+            sites = [];
+          }
+        }
+        return { id: p.id, name: p.name, sites };
+      }),
+    };
   }
 
   /** 完整档案（含 json 体），供合并导出等主进程内部使用 */
@@ -430,6 +464,28 @@ export class UserConfigManager {
     if (clamped === this.snap.ui.activeLiveIndex) return;
     // ★ 'ui'：同上
     this.apply({ ...this.snap, ui: { ...this.snap.ui, activeLiveIndex: clamped } }, 'ui');
+  }
+
+  /**
+   * ★ 2026-09-30（用户要求）：追加/更新一条**本地导入的直播源**（TXT / M3U）。
+   * 同 url（= 同一个本地文件）视为同一条：只更新 name，不产生重复线路；
+   * 返回该线路下标与是否命中已有条目（UI 提示用）。
+   */
+  addLive(bean: LiveBean): { index: number; replaced: boolean } {
+    const url = String(bean?.url || '').trim();
+    if (!url) throw new Error('直播源地址为空');
+    const name = String(bean?.name || '').trim() || '直播源';
+    const lives = [...this.snap.lives];
+    const idx = lives.findIndex((l) => String(l.url || '').trim() === url);
+    let replaced = false;
+    if (idx >= 0) {
+      lives[idx] = { ...lives[idx], name };
+      replaced = true;
+    } else {
+      lives.push({ ...bean, name });
+    }
+    this.apply({ ...this.snap, lives });
+    return { index: replaced ? idx : lives.length - 1, replaced };
   }
 
   // ---------------------------------------------------------------

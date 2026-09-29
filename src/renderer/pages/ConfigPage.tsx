@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { client } from '../api/client';
 import type { ImportReturn } from '../api/client';
-import type { ImportReport, SourceBean, UserConfig, BossKeySettings } from '../../shared/types';
+import type { ImportReport, SourceBean, UserConfig, BossKeySettings, DataDirInfo } from '../../shared/types';
 import type { SubtitleProviderView } from '../../shared/subtitle';
 import { sourceAvailability } from '../../engine/vod/sourceAvailability';
 import { EXT_TEMPLATES, validateExtJson } from '../../engine/config/extHelper';
@@ -94,6 +94,8 @@ export default function ConfigPage() {
   // 清理缓存
   const [cacheMsg, setCacheMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
   const [cacheBusy, setCacheBusy] = useState(false);
+  // ★ 2026-09-30（用户要求）：数据目录（安装目录/data；老用户迁移结果 / 回退原因）——排障展示
+  const [dataDir, setDataDir] = useState<DataDirInfo | null>(null);
   useEffect(() => {
     client.subtitleGet().then((s) => { setSubToken(s.assrtToken || ''); setSubTokenSaved(!!s.assrtToken); }).catch(() => undefined);
     refreshSubProviders();
@@ -335,6 +337,56 @@ export default function ConfigPage() {
       }
       // r.ok=false 且无 error = 用户取消文件选择，静默
       else if (r.error) setErr(r.error);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * ★ 2026-09-29（用户要求）：从本地选择**包目录**导入（影视壳/影视仓 目录包：
+   * 影视.json + py/js/jar/html/xbpq 等）——包内相对引用由主进程展开（/pkg 路由 + py 就地 file://）。
+   */
+  async function doImportPackage() {
+    setBusy(true);
+    setErr('');
+    setLastOk('');
+    try {
+      const r = await client.cfgImportPackage(subName.trim() || undefined);
+      if (r.ok) {
+        if (r.result) applyImportResult(r.result);
+        setLastOk(
+          `已导入本地包：${r.name || ''}（订阅 ${r.rel || ''}，${r.sites ?? 0} 个源）` +
+            (r.warnings && r.warnings.length ? `｜提示：${r.warnings.join('；')}` : ''),
+        );
+        setSubName('');
+        await refresh();
+      } else if (r.error) setErr(r.error);
+      // r.ok=false 且无 error = 用户取消目录选择，静默
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * ★ 2026-09-30（用户要求）：导入本地 TXT / M3U 直播源（文件选择器）。
+   * 主进程落盘到 <userData>/local-live/ 并追加/更新一条直播线路；导入后「直播」页顶部线路下拉即可选到。
+   */
+  async function doImportLiveLocal() {
+    setBusy(true);
+    setErr('');
+    setLastOk('');
+    try {
+      const r = await client.cfgImportLiveLocal();
+      if (r.ok) {
+        setLastOk(
+          `已导入直播源：${r.name || ''}${r.replaced ? '（同一文件已更新）' : `（直播页线路第 ${(r.index ?? 0) + 1} 条，共 ${r.total ?? 0} 条）`}`,
+        );
+      } else if (r.error) setErr(r.error);
+      // r.ok=false 且无 error = 用户取消文件选择，静默
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -660,6 +712,8 @@ export default function ConfigPage() {
   // ★ 2026-09-29：切到「存储」tab 时拉取 WebDAV 服务器列表（放在 tab 声明之后，避免 TDZ）
   useEffect(() => {
     if (tab === 'storage') void loadDav();
+    // ★ 2026-09-30：切到「源健康与维护」时拉数据目录信息（展示 + 排障）
+    if (tab === 'health') client.dataDir().then(setDataDir).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -724,6 +778,14 @@ export default function ConfigPage() {
           </button>
           <button disabled={busy} onClick={doImportPyLocal}>
             导入本地 .py 文件
+          </button>
+          {/* ★ 2026-09-29（用户要求）：本地包（影视.json + py/js/jar/html/xbpq 目录） */}
+          <button disabled={busy} onClick={doImportPackage}>
+            导入本地包
+          </button>
+          {/* ★ 2026-09-30（用户要求）：本地 TXT / M3U 直播源（导入后直播页线路下拉可见） */}
+          <button disabled={busy} onClick={doImportLiveLocal} title="选择本地 .txt / .m3u / .m3u8 直播源文件；导入后到「直播」页顶部线路下拉切换">
+            导入直播源（TXT / M3U）
           </button>
         </div>
         {lastOk && <div className="status" style={{ marginBottom: 8 }}>✅ {lastOk}</div>}
@@ -1106,6 +1168,16 @@ export default function ConfigPage() {
           </button>
         </div>
         {cacheMsg && <div className="muted" style={{ fontSize: 11, marginTop: 4, color: cacheMsg.kind === 'ok' ? 'var(--accent-2)' : 'var(--warn)' }}>{cacheMsg.text}</div>}
+        {/* ★ 2026-09-30（用户要求）：数据目录 = 安装目录/data（老用户首次启动自动迁移并清理旧目录） */}
+        {dataDir && (
+          <div className="muted" style={{ fontSize: 11, marginTop: 6 }} title={`计划目录：${dataDir.planned}`}>
+            数据目录：{dataDir.path}
+            {dataDir.mode === 'activated' && dataDir.migration?.cleanedLegacy ? '（已迁移，旧目录已清理）' : ''}
+            {dataDir.mode === 'activated' && !dataDir.migration?.cleanedLegacy ? '（安装目录/data）' : ''}
+            {dataDir.mode === 'fallback' ? `（${dataDir.reason || '沿用系统默认位置'}）` : ''}
+            {dataDir.mode === 'dev' ? '（开发态：系统默认位置）' : ''}
+          </div>
+        )}
       </div>
 
       

@@ -3,6 +3,8 @@ import { HttpClient } from '../net/HttpClient';
 import { JsonStore } from '../store/JsonStore';
 import { UserConfigManager, subscriptionStamp, type ConfigChangeKind } from '../store/UserConfigManager';
 import { DriveStore } from '../store/DriveStore';
+import type { LocalPkgAccess } from '../store/LocalPkgStore';
+import { parsePkgUrl } from '../../engine/config/localPkg';
 import { getAdapter } from '../net/qr';
 import { runDriveWebLogin } from '../net/webLogin';
 import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid, extractEpisodeName } from '../net/quarkTransfer';
@@ -21,6 +23,7 @@ import type {
   VodDetail,
   PlayResult,
   LiveGroup,
+  LiveBean,
   ImportReport,
   HttpClient as IHttpClient,
   KVStore,
@@ -47,6 +50,7 @@ import {
 import { join, dirname } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { JarSpiderBridge, normalizeJarUrl } from '../../engine/spider/JarSpiderBridge';
+import { removePizazzCookieFile, syncPizazzCookieFiles } from './driveCookieFiles';
 import { sourceTimeoutMs } from '../../engine/spider/SpiderFactory';
 import { mergeSearchResults, isSearchableSource, type AggSearchInput } from '../../engine/vod/aggSearch';
 import {
@@ -59,7 +63,7 @@ import {
 } from '../../engine/vod/searchScheduler';
 import { SearchCache } from '../../engine/vod/searchCache';
 import { classifyHealth } from '../../engine/vod/sourceHealth';
-import { mergeSubscriptions, type MergeInput } from '../../engine/config/mergeSubscriptions';
+import { buildMergedSubscription, type MergeInput } from '../../engine/config/mergeSubscriptions';
 import type { AuditItem, SearchAllReport, SearchAllProgressEvent } from '../../shared/types';
 import {
   describeFailures,
@@ -260,6 +264,12 @@ export class SpiderHost {
    * 类型只取 `open`：宿主只关心「给我一个能播的地址 / 已交外部播放器 / 播不了的原因」。
    */
   torrentPlay?: Pick<TorrentPlay, 'open'>;
+  /**
+   * ★ 2026-09-29（用户要求）本地包：登记表访问面（main/index.ts 注入 LocalPkgStore）。
+   * 用途：`pkg://<i>/<rel>` 形态的订阅地址（导入本地包时落库的 apiUrl）→ 读包内订阅文本
+   * （相对路径已由 LocalPkgStore.readSubscription 展开）。未注入 = pkg:// 一律报「未登记」。
+   */
+  localPkgs?: LocalPkgAccess;
 
   constructor() {
     const store = new JsonStore(join(cacheDir(), 'spider-local.json'));
@@ -380,6 +390,9 @@ export class SpiderHost {
       }
       this.resetSpidersAfterDriveChange();
     }
+    // ★ 2026-09-29：还原凭据后立即重写「jar 系期望的 cookie 文件」（fty Cloud-drive + Pizazz TVBox/*.txt），
+    //   否则「还原了备份却仍然取不到资源」——jar 读的是文件而不是 DriveStore。
+    this.syncDriveFiles();
     if (s.subtitle) this.subtitles.settings = s.subtitle;
     if (s.metaSettings) {
       this.metaSettings.settings = s.metaSettings;
@@ -432,6 +445,18 @@ export class SpiderHost {
 
   cfgProfiles() {
     return this.manager.profiles();
+  }
+  /** ★ 2026-09-30（用户要求）：换源弹层「左订阅 / 右源」视图（每份档案的源 key/name 清单） */
+  cfgProfileSites() {
+    return this.manager.profileSitesView();
+  }
+  /** ★ 2026-09-30（用户要求）：一步完成「切换档案 + 选中该档案下的源」（单次 apply） */
+  cfgSwitchProfileSource(id: string, key: string): void {
+    this.manager.activateProfile(id, key);
+  }
+  /** ★ 2026-09-30（用户要求）：追加/更新一条本地导入的直播源（TXT / M3U） */
+  cfgAddLive(bean: LiveBean) {
+    return this.manager.addLive(bean);
   }
   cfgActiveProfileId(): string {
     return this.manager.activeProfileId();
@@ -501,35 +526,25 @@ export class SpiderHost {
     return out;
   }
 
-  /** 把若干配置档案的订阅合并为一（去重、保留原结构），返回可导出的订阅 JSON 文本与统计 */
+  /**
+   * 把若干配置档案的订阅合并为一（去重、保留原结构），返回可导出的订阅 JSON 文本与统计。
+   * ★ 2026-09-29：改为「自包含导出」——顶层带 spider/flags/parses；多档案 jar 不同时按源回填 site.jar。
+   *   旧实现把 `spider: ''`/`flags: []` 硬编码、`parses` 直接丢弃，合并导出再导入后所有 csp_ 源
+   *   都拿不到 jar（「无法加载」），是用户「导出的 json 用不了」的直接原因。
+   */
   mergeProfilesExport(ids: string[]): { content: string; summary: MergeInput[] } {
     const pick = new Set(ids || []);
-    const inputs: MergeInput[] = [];
-    for (const p of this.manager.rawProfiles()) {
-      if (!pick.has(p.id)) continue;
-      if (!p.json) {
-        inputs.push({ name: p.name + '（迁移档案，无原始数据，已跳过）', sites: [], lives: [] });
-        continue;
-      }
-      const parsed = parseSiteConfig(p.json).config;
-      inputs.push({ name: p.name, sites: parsed.sites, lives: parsed.lives });
-    }
-    if (inputs.length === 0) throw new Error('请先勾选要合并的配置档案');
-    const merged = mergeSubscriptions(inputs);
-    const content = JSON.stringify(
-      {
-        version: 1,
-        spider: '',
-        flags: [],
-        // 兼容多份订阅里各自 lives 的合并
-        sites: merged.sites,
-        lives: merged.lives,
-        note: '由 TVBox Win 多配置合并导出（源字段与原始订阅一致）',
-      },
-      null,
-      2,
+    const chosen = this.manager
+      .rawProfiles()
+      .filter((p) => pick.has(p.id))
+      .map((p) => ({ name: p.name, json: p.json || '' }));
+    const out = buildMergedSubscription(chosen);
+    this.logger.i(
+      `合并导出：档案 ${out.summary.length} 份 / 源 ${out.summary.reduce((n, s) => n + s.sites.length, 0)} 条；` +
+        `spider ${out.spiders.length ? out.spiders.length + ' 只（多 jar 源已按源回填）' : '无'}；` +
+        `flags ${out.flags.length}；parses ${out.parseCount}`,
     );
-    return { content, summary: inputs };
+    return { content: out.content, summary: out.summary };
   }
 
   // ---- 网盘/资源站凭据（绑定后供对应 csp_ 源调用） ----
@@ -543,11 +558,13 @@ export class SpiderHost {
   }
   driveSet(provider: string, token: string) {
     this.drives.set(provider, token);
-    this.syncCloudDriveConfig(provider, token);
+    this.syncDriveFiles();
     this.resetSpidersAfterDriveChange();
   }
   driveRemove(provider: string) {
     this.drives.remove(provider);
+    // ★ 解绑 → 清掉 Pizazz 系 cookie 文件（jar 侧「文件存在且非空」即视为已配置，必须一并清）
+    removePizazzCookieFile(provider);
     this.resetSpidersAfterDriveChange();
   }
 
@@ -908,7 +925,24 @@ export class SpiderHost {
       throw new Error(`${p}: 已检测到登录，但未抓到 Cookie，请重试`);
     }
     this.drives.set(p, r.cookie);
-    this.syncCloudDriveConfig(p, r.cookie);
+    this.syncDriveFiles();
+    // 与 driveSet 同口径：cookie 文件变了，常驻蜘蛛必须重新 init 才会读到新值
+    this.resetSpidersAfterDriveChange();
+  }
+
+  /**
+   * ★ 2026-09-29 通解：把 DriveStore 里的网盘凭据**全量**落成「各系 jar 期望的 cookie 文件」。
+   *   · fty 系（Cloud_*Guard）：ext["Cloud-drive"] 指向的 JSON（quarkCookie/ucCookie/…）——syncCloudDriveConfig；
+   *   · Pizazz / 太太太硬了 系（玩偶 csp_Wogg、木偶 csp_PanWebShare、豆瓣 csp_Douban 同族）：
+   *     `<外部存储>/TVBox/<盘>.txt`（桌面桩 = `%TEMP%\tvbox-ext\TVBox\`），内容 `{"cookie":"..."}`——
+   *     详情组装播放列表前会按链接域名逐个检查这些文件，缺失即把该网盘链接降级丢弃
+   *     （用户侧现象：源能进能搜、详情里却没有可播资源）。
+   *   调用点：绑定（driveSet / 网页登录）、解绑（删文件）、还原设置、启动（%TEMP% 可能被系统清理）。 */
+  syncDriveFiles(): void {
+    const tokens = this.drives.list();
+    for (const [p, v] of Object.entries(tokens)) this.syncCloudDriveConfig(p, v);
+    const written = syncPizazzCookieFiles(tokens);
+    if (written.length) this.logger.i(`已同步 Pizazz 系网盘 cookie 文件：${written.join(', ')}`);
   }
 
   // fty 系网盘 jar 从 Cloud-drive 配置文件读的键名（Cloud_quark→quarkCookie / Cloud_uc→ucCookie）
@@ -1066,6 +1100,23 @@ export class SpiderHost {
    * 失败时把**分档诊断**记进 `lastConfigFetchHint`，由 importConfig 上屏「为什么导入不了」。
    */
   private async fetchConfigText(url: string, quick = false): Promise<string> {
+    // ★ 2026-09-29（用户要求）本地包：`pkg://<i>/<rel>` —— 不联网，直接读包内订阅文本。
+    //   文本已由 LocalPkgStore.readSubscription 用 rewritePkgPaths 展开相对路径（"/pkg" 或 file://），
+    //   因此后续 parseSiteConfigWithBase 不需要（也不应）再做 http 相对展开。
+    //   包被移动/删除时给出可执行提示（重新导入该包）。
+    const pkgRef = parsePkgUrl(url);
+    if (pkgRef) {
+      this.lastConfigFetchHint = '';
+      const got = this.localPkgs?.readSubscription(pkgRef.index, pkgRef.rel);
+      if (!got) {
+        this.lastConfigFetchHint =
+          '本地包未登记或包内订阅文件已不存在（包目录被移动/删除？）—— 请在配置页重新「导入本地包」。';
+        return '';
+      }
+      for (const w of got.warnings) this.logger.w(`本地包：${w}`);
+      this.logger.i(`本地包订阅读取：${url} → ${got.text.length}B`);
+      return got.text;
+    }
     const timeoutMs = quick ? 12_000 : 30_000;
     this.lastConfigFetchHint = '';
     const isSubJson = (b: Buffer): boolean => looksLikeSubscribeJson(b.toString('utf-8'));

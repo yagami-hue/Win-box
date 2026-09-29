@@ -178,14 +178,28 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .srcpick-label { color: var(--text-dim); font-size: 11px; }
 .srcpick-pop {
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 60; min-width: 200px; max-width: 320px;
-  max-height: 340px; overflow: auto; padding: 6px;
+  max-height: 360px; display: flex; flex-direction: column; overflow: hidden; padding: 6px;
   background: var(--bg-glass, rgba(18,20,26,.94)); border: 1px solid var(--border); border-radius: 10px;
   box-shadow: 0 12px 40px rgba(0,0,0,.5); backdrop-filter: blur(8px);
 }
 .srcpick-pop-tip { color: var(--text-dim); font-size: 10px; padding: 4px 8px 6px; border-bottom: 1px solid var(--border-soft); margin-bottom: 4px; }
-.srcpick-item { padding: 7px 10px; border-radius: 6px; font-size: 13px; cursor: default; }
+/* ★ 2026-09-30（用户要求）：弹层加宽为「左订阅 / 右源」双栏；右侧空间不足时右锚（由组件量测后加类） */
+.srcpick-pop-wide { min-width: 380px; max-width: 440px; }
+.srcpick-pop-right { left: auto; right: 0; }
+/* 源名实时检索：随输入过滤当前订阅下的源 */
+.srcpick-search { width: 100%; height: 28px; font-size: 12px; padding: 0 8px; margin-bottom: 6px; box-sizing: border-box; }
+.srcpick-cols { display: flex; gap: 0; flex: 1 1 auto; min-height: 0; max-height: 296px; }
+.srcpick-col-sub {
+  flex: 0 0 112px; max-width: 112px; overflow-y: auto; padding-right: 4px; margin-right: 4px;
+  border-right: 1px solid var(--border-soft);
+}
+.srcpick-col-src { flex: 1 1 auto; min-width: 0; overflow-y: auto; }
+.srcpick-item { padding: 7px 10px; border-radius: 6px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srcpick-item:hover { background: var(--accent-soft, rgba(120,170,255,.12)); }
 .srcpick-item.active { color: var(--accent); font-weight: 650; }
+/* 左栏订阅项：当前生效订阅加圆点标记（悬停 title 里带源数；行内 ::before，保证 ellipsis 作用在整行） */
+.srcpick-sub.cur::before { content: '● '; color: var(--accent-2); font-size: 8px; vertical-align: 2px; }
+.srcpick-sub.active { background: var(--accent-soft, rgba(120,170,255,.12)); font-weight: 600; }
 /* 顶栏搜索按钮与面板 */
 .sp-btn { cursor: default; }
 .sp-panel {

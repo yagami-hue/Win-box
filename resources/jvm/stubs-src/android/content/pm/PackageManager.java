@@ -48,7 +48,14 @@ public class PackageManager {
 
     public String getInstallerPackageName(String packageName) { return null; }
 
-    public CharSequence getApplicationLabel(ApplicationInfo info) { return ""; }
+    /**
+     * ★ 2026-09-29 通解：Pizazz / 太太太硬了 系 jar（sun.json 等）在 `Init.init(Context)` 里做宿主身份自校验——
+     *   `b(Context)` 用内置（加密的）App 名白名单做 `,<label>,` 包含判定；返回空名会被判「疑似二次打包」并
+     *   **提前 return**，连带 `saveConfig()`（写默认 `Pizazz/config.json`，豆瓣首页依赖它）一起被跳过 →
+     *   表现为「豆瓣显示没法加载 / 该族功能整体降级」。
+     *   名单（解密实证）含 `TVBox`（与本桩包名 com.github.tvbox.osc 配套），返回它即可放行整套初始化。
+     */
+    public CharSequence getApplicationLabel(ApplicationInfo info) { return "TVBox"; }
 
     public ComponentName getLaunchIntentForPackage(String packageName) { return null; }
 

@@ -1,4 +1,8 @@
 // src/main/index.ts — Electron 主进程入口
+// ★★ 第一条 import（import 即执行，勿挪位置）：把数据目录切到**安装目录/data**，
+//   并在老用户首次启动时自动迁移 %APPDATA%\win-box（见 dataDirBootstrap.ts 头注释）。
+//   必须早于 logger / 各 Store 的模块求值，否则它们会把路径解析到旧位置。
+import { dataDirReport } from './util/dataDirBootstrap';
 import { app, BrowserWindow, nativeTheme, shell } from 'electron';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -17,6 +21,8 @@ import { DlnaService } from './dlna/DlnaService';
 import { UpdateService } from './update/UpdateService';
 import { DavStore } from './store/DavStore';
 import { JsonStore } from './store/JsonStore';
+import { LocalPkgStore } from './store/LocalPkgStore';
+import { LOCAL_PROXY_BASE } from '../shared/constants';
 import { userDataDir } from './util/paths';
 import { safeStorageDriveCodec } from './util/driveCodec';
 
@@ -46,6 +52,11 @@ const dlna = new DlnaService(fileLogger);
  *   查 `api.github.com`（失败不锁死）→ 代理加速下载 Setup → 拉起安装程序并退出本程序。
  */
 const updater = new UpdateService(fileLogger);
+/**
+ * ★ 2026-09-29（用户要求）本地包（影视壳/影视仓 目录包）：登记表 + `/pkg` 资源路由 + py 就地运行。
+ *   包根**就地引用**（不复制进 userData）：包是用户自己维护的，改 py/js/html 立即生效。
+ */
+const localPkgs = new LocalPkgStore(new JsonStore(join(userDataDir(), 'local-pkgs.json')), LOCAL_PROXY_BASE);
 const proxy = new LocalProxyServer(
   fileLogger,
   () => host.driveList(),
@@ -58,6 +69,9 @@ const proxy = new LocalProxyServer(
   // ★ 2026-09-29 WebDAV 取流认证（凭据只在主进程加密存储里）
   (id) => dav.authHeader(id),
 );
+// ★ 2026-09-29（用户要求）本地包：包内资源路由（/pkg/<i>/<rel>）+ 订阅 pkg:// 读取
+proxy.pkgRoot = (i) => localPkgs.rootOf(i);
+host.localPkgs = localPkgs;
 // ★ 把 /play 中继的真实转发字节速率推给渲染层（播放器「缓存中」实时网速）
 const pushSpeed = (kbs: number): void => {
   for (const w of BrowserWindow.getAllWindows()) {
@@ -148,6 +162,23 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
+  // ★ 2026-09-30 数据目录（安装目录/data；老用户自动迁移 + 清理旧 C 盘目录）——排障第一现场
+  try {
+    const m = dataDirReport.migration;
+    const migDesc = m
+      ? `迁移=${m.status}${m.files ? `（${m.files} 文件 / ${(m.bytes / 1024 / 1024).toFixed(1)}MB）` : ''}${m.skipped ? `，跳过可重建缓存 ${m.skipped} 项` : ''}${m.status === 'moved' ? '（整目录移动）' : ''}${m.cleanedLegacy ? '，旧目录已清理' : ''}${m.error ? `，注意：${m.error}` : ''}`
+      : '迁移=无旧数据';
+    if (dataDirReport.mode === 'fallback') {
+      fileLogger.w(
+        `数据目录: ${dataDirReport.target}（回退，计划目录 ${dataDirReport.planned}）：${dataDirReport.reason || ''}`,
+      );
+    } else {
+      fileLogger.i(`数据目录: ${dataDirReport.target}（模式 ${dataDirReport.mode}；${migDesc}）`);
+    }
+  } catch {
+    /* ignore */
+  }
+
   // 启动即记录资源根定位结果：打包后（尤其 portable 的 7z-out 解压布局）
   // 若再出现「JRE 缺失」，日志首行就能看出真实路径命中情况。
   try {
@@ -186,7 +217,7 @@ app.whenReady().then(async () => {
   } catch (e) {
     fileLogger.w('播放诊断初始化失败：' + (e as Error).message);
   }
-  registerIpc(host, dav, dlna, updater);
+  registerIpc(host, dav, dlna, updater, localPkgs);
   // 老板键：注入窗口提供者（主窗口 + 播放器窗口）并按上次设置注册全局快捷键
   bossKey.start(() => {
     const ws: BrowserWindow[] = [];
@@ -205,6 +236,9 @@ app.whenReady().then(async () => {
   createWindow();
   // ★ 启动时自动订阅刷新（≥7 天一次，静默后台执行，失败仅记日志）
   void host.maybeAutoRefreshSubscriptions();
+  // ★ 启动时把已绑定网盘凭据同步为 jar 系期望的 cookie 文件（%TEMP% 可能被系统清理；
+  //   缺失会让 Pizazz 系源的详情播放列表被降级为空 / fty 系取流失败）
+  try { host.syncDriveFiles(); } catch { /* 同步失败不影响启动 */ }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

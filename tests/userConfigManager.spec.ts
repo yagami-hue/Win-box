@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { JsonStore } from '../src/main/store/JsonStore';
 import { UserConfigManager, USER_CONFIG_KEY } from '../src/main/store/UserConfigManager';
 import { NullLogger } from '../src/engine/util/logger';
-import type { SiteConfig, SourceBean, SourceUpdatePatch } from '../src/shared/types';
+import type { SiteConfig, SourceBean, SourceUpdatePatch, LiveBean } from '../src/shared/types';
 
 const dirs: string[] = [];
 function tmpDir(): string {
@@ -396,5 +396,53 @@ describe('UserConfigManager v2 — 多配置档案（profiles）', () => {
       expect(m.profiles()[1].name).toBe('旧订阅 09-26 13:00');
       expect(m.profiles()[0].name).toBe('我的主力订阅');
     });
+  });
+});
+
+describe('UserConfigManager — ★ 2026-09-30 换源弹层数据与本地直播源导入', () => {
+  /** 构造一条本地导入的直播源 bean（字段口径同 ipc 侧 parseLive 产物） */
+  function liveBean(name: string, url: string): LiveBean {
+    return { name, url, api: '', type: '0', jar: '', ext: '', epg: '', playerType: '', timeout: 15 };
+  }
+
+  it('profileSitesView：当前档案取运行期真实源（含手动加的源）；其它档案取存档 JSON', () => {
+    const dir = tmpDir();
+    const m = newManager(dir);
+    m.replaceFromImport(fullConfig([bean('a1'), bean('a2')]), 'https://host/a.json'); // 建档：json = a1/a2
+    const aId = m.activeProfileId();
+    m.addSource(bean('a3')); // 手动加源（只进运行期，不回写 A 的存档 json）
+    const pb = m.saveAsProfile('配置B'); // 快照当前（a1/a2/a3）为新档案并切换过去
+
+    const view = m.profileSitesView();
+    expect(view.activeId).toBe(pb.id);
+    expect(view.profiles.find((p) => p.id === pb.id)!.sites.map((s) => s.key)).toEqual(['a1', 'a2', 'a3']);
+    // 非当前档案：来自其存档 JSON（没有手动加的 a3）——弹层切到该订阅时如实展示
+    expect(view.profiles.find((p) => p.id === aId)!.sites.map((s) => s.key)).toEqual(['a1', 'a2']);
+  });
+
+  it('activateProfile(id, pickKey)：一步切换档案 + 选中源；非法 pickKey 不硬塞', () => {
+    const dir = tmpDir();
+    const m = newManager(dir);
+    m.replaceFromImport(fullConfig([bean('a1'), bean('a2')]), 'https://h/a.json');
+    const aId = m.activeProfileId();
+    const pb = m.saveAsProfile('B'); // active 移到 B（内容同为 a1/a2）
+    m.activateProfile(aId, 'a2');
+    expect(m.activeProfileId()).toBe(aId);
+    expect(m.activeSourceKey()).toBe('a2');
+    m.activateProfile(pb.id, 'nope');
+    expect(m.activeProfileId()).toBe(pb.id);
+    expect(m.activeSourceKey()).not.toBe('nope'); // 不存在于该档案的 key 不被选中
+  });
+
+  it('addLive：同 url 视为同一条（只更新名字）；空地址抛中文错', () => {
+    const dir = tmpDir();
+    const m = newManager(dir);
+    const url = 'http://127.0.0.1:9978/file/local-live/x.txt';
+    expect(m.addLive(liveBean('X', url))).toEqual({ index: 0, replaced: false });
+    expect(m.snapshot().lives.length).toBe(1);
+    expect(m.addLive(liveBean('X2', url))).toEqual({ index: 0, replaced: true });
+    expect(m.snapshot().lives.length).toBe(1);
+    expect(m.snapshot().lives[0].name).toBe('X2');
+    expect(() => m.addLive(liveBean('bad', ''))).toThrow(/地址为空/);
   });
 });

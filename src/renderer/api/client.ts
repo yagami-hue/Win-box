@@ -18,6 +18,8 @@ import type {
   SearchAllProgressEvent,
   SourceDebugReport,
   UserProfile,
+  ProfileSitesView,
+  DataDirInfo,
   AuditItem,
   FilterGroup,
   BossKeySettings,
@@ -59,7 +61,7 @@ interface ImportReturn {
 declare global {
   interface Window {
     api: {
-      system: { ping: () => Promise<IpcResult<string>>; icon: () => Promise<IpcResult<string>>; setTheme: (t: string) => Promise<IpcResult<void>>; quit: () => Promise<IpcResult<void>> };
+      system: { ping: () => Promise<IpcResult<string>>; icon: () => Promise<IpcResult<string>>; setTheme: (t: string) => Promise<IpcResult<void>>; quit: () => Promise<IpcResult<void>>; dataDir: () => Promise<IpcResult<DataDirInfo>> };
       config: {
         import: (a: { url?: string; json?: string }) => Promise<IpcResult<ImportReturn>>;
         listSites: () => Promise<IpcResult<SourceBean[]>>;
@@ -76,11 +78,24 @@ declare global {
         importJsonLocal: (name?: string) =>
           Promise<IpcResult<{ ok: boolean; file?: string; name?: string; error?: string; result?: ImportReturn }>>;
         importPyLocal: () => Promise<IpcResult<{ ok: boolean; key?: string; error?: string }>>;
+        /** ★ 2026-09-30（用户要求）：导入本地 TXT / M3U 直播源 */
+        importLiveLocal: () =>
+          Promise<IpcResult<{ ok: boolean; name?: string; index?: number; replaced?: boolean; total?: number; error?: string }>>;
+        /** ★ 2026-09-29：导入本地包（目录包：影视.json + py/js/jar/html/xbpq） */
+        importPackage: (name?: string) =>
+          Promise<IpcResult<{ ok: boolean; root?: string; rel?: string; sites?: number; name?: string; error?: string; warnings?: string[]; result?: ImportReturn }>>;
+        /** ★ 2026-09-29 本地包「网页源」：独立窗口打开 homePage html（fm 桥） */
+        webHomeOpen: (init: { url: string; title?: string; site?: Record<string, string | undefined> }) =>
+          Promise<IpcResult<{ ok: boolean; error?: string }>>;
         saveAsProfile: (name: string) => Promise<IpcResult<UserProfile>>;
         activateProfile: (id: string) => Promise<IpcResult<void>>;
         deleteProfile: (id: string) => Promise<IpcResult<void>>;
         updateProfileName: (a: { id: string; name: string }) => Promise<IpcResult<void>>;
         cfgProfiles: () => Promise<IpcResult<Omit<UserProfile, 'json'>[]>>;
+        /** ★ 2026-09-30（用户要求）：换源弹层「左订阅 / 右源」视图 */
+        profileSites: () => Promise<IpcResult<ProfileSitesView>>;
+        /** ★ 2026-09-30（用户要求）：一步完成「切换档案 + 选中该档案下的源」 */
+        switchProfileSource: (a: { profileId: string; key: string }) => Promise<IpcResult<void>>;
         vodDebug: (key: string) => Promise<IpcResult<SourceDebugReport>>;
         audit: () => Promise<IpcResult<AuditItem[]>>;
         cacheClear: () => Promise<IpcResult<{ freedBytes: number; cleared: string[]; failed: string[] }>>;
@@ -246,11 +261,25 @@ export const client = {
   cfgImportUrl: (url: string, name?: string) => unwrap(window.api.config.importUrl(url, name)),
   cfgImportJsonLocal: (name?: string) => unwrap(window.api.config.importJsonLocal(name)),
   cfgImportPyLocal: () => unwrap(window.api.config.importPyLocal()),
+  /** ★ 2026-09-29：导入本地包（目录包）—— 返回包根/命中订阅/源数，用于结果提示 */
+  cfgImportPackage: (name?: string) => unwrap(window.api.config.importPackage(name)),
+  /** ★ 2026-09-29 本地包「网页源」：独立窗口打开 homePage html（fm 桥） */
+  webHomeOpen: (init: { url: string; title?: string; site?: Record<string, string | undefined> }) =>
+    unwrap(window.api.config.webHomeOpen(init)),
   cfgSaveAsProfile: (name: string) => unwrap(window.api.config.saveAsProfile(name)),
   cfgActivateProfile: (id: string) => unwrap(window.api.config.activateProfile(id)),
   cfgDeleteProfile: (id: string) => unwrap(window.api.config.deleteProfile(id)),
   cfgUpdateProfileName: (a: { id: string; name: string }) => unwrap(window.api.config.updateProfileName(a)),
   cfgProfiles: () => unwrap(window.api.config.cfgProfiles()),
+  /** ★ 2026-09-30（用户要求）：换源弹层「左订阅 / 右源」视图（每份档案的源 key/name 清单） */
+  cfgProfileSites: () => unwrap(window.api.config.profileSites()),
+  /** ★ 2026-09-30（用户要求）：一步完成「切换档案 + 选中该档案下的源」 */
+  cfgSwitchProfileSource: (profileId: string, key: string) =>
+    unwrap(window.api.config.switchProfileSource({ profileId, key })),
+  /** ★ 2026-09-30（用户要求）：导入本地 TXT / M3U 直播源（配置页按钮） */
+  cfgImportLiveLocal: () => unwrap(window.api.config.importLiveLocal()),
+  /** ★ 2026-09-30：数据目录信息（安装目录/data；迁移结果与回退原因） */
+  dataDir: () => unwrap(window.api.system.dataDir()),
   vodDebug: (key: string) => unwrap(window.api.config.vodDebug(key)),
   audit: () => unwrap(window.api.config.audit()),
   cacheClear: () => unwrap(window.api.config.cacheClear()),

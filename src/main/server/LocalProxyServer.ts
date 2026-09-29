@@ -21,6 +21,7 @@ import { dispatchChain } from '../net/proxy';
 import { mergeSetCookies, setCookieList, cookiePairOf } from '../net/cookieMerge';
 import { purifyVodM3u8 } from '../../engine/util/m3u8Purify';
 import { parseBtRoute } from '../../engine/torrent/magnet';
+import { resolvePkgFile } from '../../engine/config/localPkg';
 
 const agent = new Agent({ connect: { timeout: 30000 } });
 /** 出图中继专用（TMDB 图床经 DoH 可达；渲染层直连可能被 DNS 污染 → 图裂） */
@@ -72,6 +73,13 @@ export class LocalProxyServer {
   onSpiderProxy?: (port: number) => void;
   /** ★ 2026-09-29：BT 取流口（磁力 B；main/index.ts 注入 TorrentPlay；未注入 = /bt 一律 404） */
   bt?: BtStreamAccess;
+  /**
+   * ★ 2026-09-29 本地包：包下标 → 包根绝对路径（main/index.ts 注入 LocalPkgStore.rootOf）。
+   * `/pkg/<i>/<rel>` 供三处使用：① 订阅里展开出的相对引用（jar 的 OkHttp、drpy 的相对 require、
+   * spider 的 ext 配置）；② py 之外的一切包内资源；③ 网页源（html）与它的相对资源。
+   * 未注入 = /pkg 一律 404（旧行为）。
+   */
+  pkgRoot?: (index: number) => string | null;
   /**
    * ★ 2026-09-26：网盘播放会话 Cookie jar（provider → 上游下发的 `k=v` 键值行）。
    *   上游直链/清单响应会刷新 `__puus` 等会话 cookie，必须与账号 cookie 一起用；
@@ -202,6 +210,10 @@ export class LocalProxyServer {
       if (u.pathname.startsWith('/file/')) {
         return this.fileProxy(u, res);
       }
+      // ★ 2026-09-29 本地包：包内资源（订阅相对引用 / 网页源 html 及其相对资源 / jar / xbpq 配置）
+      if (u.pathname.startsWith('/pkg/')) {
+        return this.pkgProxy(u, res);
+      }
       if (u.pathname.startsWith('/bt/')) {
         return this.btProxy(u, req, res);
       }
@@ -300,12 +312,53 @@ private imgProxy(u: URL, res: ServerResponse): void {
       res.end('not found');
       return;
     }
+    this.sendLocalFile(abs, res);
+  }
+
+  /**
+   * `/pkg/<i>/<rel>` —— ★ 2026-09-29（用户要求）本地包：按登记的包根提供包内文件。
+   *
+   * 与 `/file/` 的区别：`/pkg` 的根是**用户导入的本地包目录**（就地引用，见 LocalPkgStore），
+   * 且路径可含中文/emoji/空格（订阅里的相对引用由 rewritePkgPaths 逐段百分号转义）。
+   * 安全：穿越校验在 resolvePkgFile（纯函数，已单测）——`../` 越出包根一律 404。
+   *
+   * ★ 一律 `Cache-Control: no-cache`：包是用户随时会改的（改 py/js/html 应即时生效）。
+   */
+  private pkgProxy(u: URL, res: ServerResponse): void {
+    const m = /^\/pkg\/(\d+)\/(.+)$/.exec(u.pathname);
+    if (!m) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('not found');
+      return;
+    }
+    let rel = m[2];
+    try {
+      rel = decodeURIComponent(rel);
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('bad request');
+      return;
+    }
+    const root = this.pkgRoot ? this.pkgRoot(Number(m[1])) : null;
+    const abs = root ? resolvePkgFile(root, rel) : null;
+    if (!abs || !existsSync(abs)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('not found');
+      return;
+    }
+    this.sendLocalFile(abs, res, true);
+  }
+
+  /** 本地文件响应（两个本地路由共用）：Content-Type 按扩展名 + 可选 no-cache */
+  private sendLocalFile(abs: string, res: ServerResponse, noCache = false): void {
     try {
       const body = readFileSync(abs);
-      res.writeHead(200, { 'Content-Type': guessContentType(abs) });
+      const headers: Record<string, string> = { 'Content-Type': guessContentType(abs) };
+      if (noCache) headers['Cache-Control'] = 'no-cache';
+      res.writeHead(200, headers);
       res.end(body);
     } catch (e) {
-      this.logger.e(`proxy /file/ 读取失败: ${abs}`, e);
+      this.logger.e(`proxy 本地文件读取失败: ${abs}`, e);
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('not found');
     }
@@ -1032,6 +1085,9 @@ function guessContentType(path: string): string {
   if (p.endsWith('.json')) return 'application/json; charset=utf-8';
   if (p.endsWith('.txt') || p.endsWith('.m3u') || p.endsWith('.m3u8')) return 'text/plain; charset=utf-8';
   if (p.endsWith('.js')) return 'application/javascript; charset=utf-8';
+  // ★ 2026-09-29 本地包：网页源/蜘蛛会取包内的 py 与 css（/pkg 路由），给对类型
+  if (p.endsWith('.py')) return 'text/plain; charset=utf-8';
+  if (p.endsWith('.css')) return 'text/css; charset=utf-8';
   if (p.endsWith('.html') || p.endsWith('.htm')) return 'text/html; charset=utf-8';
   if (p.endsWith('.xml')) return 'application/xml; charset=utf-8';
   if (p.endsWith('.png')) return 'image/png';

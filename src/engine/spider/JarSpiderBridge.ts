@@ -259,6 +259,8 @@ export class JarSpiderBridge {
   private serveLogTotal = 0;
   /** 已上屏过的原生桥消息（stderr 跨请求累积，去重防刷屏；见 noteBridgeLog） */
   private bridgeNotesSeen = new Set<string>();
+  /** ★ 2026-09-29：已切到 shell-shim 真实实现路线的壳 jar（守卫空 NPE 兜底后记住，后续调用/预热同口径） */
+  private readonly shimPreferred = new Set<string>();
   /** 当前存活的 JVM 子进程（退出时统一终止，防止残留） */
   private activeChildren = new Set<import('node:child_process').ChildProcess>();
   /** ★ 本地代理端口 → 池 key（/proxy/<port> 被访问时据此钉住对应 JVM，见 spiderProxyPort） */
@@ -1069,11 +1071,13 @@ export class JarSpiderBridge {
     //   而池按 key 长期复用它（用户侧就是「装完第一次进源，每个源都提示蜘蛛返回空结果」）。
     //   现在：与 callJar **同口径**拼 argv（原生 jar + native props），且**运行时未就绪就不预热**
     //   —— 预热绝不生产「没有桥」的僵尸进程。
-    const needsNative = this.nativeNeeded(jarPaths);
-    const nativeJars = needsNative ? (this.nativeRuntimeJars ?? []) : [];
-    if (needsNative && nativeJars.length === 0) return 0;
     const shimClasses = this.shimWithFoni(className, this.shellShimClassesPath() || this.autoShellShim(jarPaths));
     const shimJar = this.shellShimJarPath();
+    // ★ 2026-09-29（守卫空 NPE 兜底）：已切 shell-shim 路线的 jar 预热同样不启用原生桥（见 callImpl 注释）
+    const preferShim = shimClasses !== '' && this.shimPreferred.has(jarPaths.join(';'));
+    const needsNative = !preferShim && this.nativeNeeded(jarPaths);
+    const nativeJars = needsNative ? (this.nativeRuntimeJars ?? []) : [];
+    if (needsNative && nativeJars.length === 0) return 0;
     // ★ 与 callJar 同口径：-cp 只放运行时（stubs/libs/桥/unidbg），蜘蛛 jar/shim jar 只走加载器参数 ——
     //   否则父加载器抢占原始类，native 改写产物（子加载器最前）不生效。
     const runtimeCp = [this.classpathJars(), ...nativeJars].join(';');
@@ -1229,6 +1233,28 @@ export class JarSpiderBridge {
   ): Promise<string> {
     this.lastSpiderReason = '';
     const out = await this.callImpl(jarPaths, className, method, args, timeoutMs);
+    // ★★ 2026-09-29（设备实证「切换部分源 NPE」的兜底，勿删）★★
+    //   现象：加固壳的守卫类（csp_DouDouGuard / csp_T4Guard …）报
+    //   `NullPointerException: Cannot invoke "com.github.catvod.crawler.Spider.init(android.content.Context, String)"`
+    //   —— 根因是 `BaseSpiderGuard.<init>` 里 `Init.getSpider(类名)` 没拿到真实蜘蛛（原生解密这一环
+    //   没产出加载器 / 运行时 dex 产物异常），字段留 null，随后首个 init() 必崩。
+    //   兜底：只要这只壳 jar 有内置真实实现（`shell-shim/real/<guard>.jar`），改用 **shell-shim 路线**
+    //   重试一次，并记住该 jar（后续 home/detail/play 与预热都走同一条路线，见 callImpl/prewarmJar 的 preferShim）。
+    //   为什么可行：shell-shim 影子 DexNative 用真实实现 jar 直接回答 getLoader/getSpider，完全不依赖
+    //   ARM 模拟/运行时 dex 转换（探针实测：DouDouGuard home 1.9s 拿到 10658B 数据）。
+    if (isGuardInnerSpiderNull(this.lastSpiderReason)) {
+      const jarKey = jarPaths.join(';');
+      const shim = this.shellShimClassesPath() || this.autoShellShim(jarPaths);
+      // 影子 jar 不在就白试（callImpl 会打「未找到 shell-shim.jar」警告）→ 直接按原失败返回
+      if (shim && existsSync(this.shellShimJarPath()) && !this.shimPreferred.has(jarKey)) {
+        this.shimPreferred.add(jarKey);
+        this.host?.logger.w(
+          `jvm-bridge ${className}: 守卫内层蜘蛛为空（原生解密未产出加载器）→ 改用 shell-shim 真实实现重试：${shim}`,
+        );
+        this.lastSpiderReason = '';
+        return this.callImpl(jarPaths, className, method, args, timeoutMs);
+      }
+    }
     if (!isSpiderClassMissing(this.lastSpiderReason)) return out;
     const extra = this.otherConvertedJars(jarPaths);
     if (extra.length === 0) return out;
@@ -1257,10 +1283,16 @@ export class JarSpiderBridge {
     // ★ AppSx/AppTT/AppSK 系追加完整构建 foni-spider.jar（优先加载，见 shimWithFoni 注释）
     const shimClasses = this.shimWithFoni(className, shimClasses0);
     const shimJar = this.shellShimJarPath();
+    // ★★ 2026-09-29（守卫空 NPE 兜底，见 call()）：本 jar 已切到 shell-shim 路线后**不再启用原生桥** ——
+    //   只要原生桥被启用，SpiderRunner 会把「改写产物目录」排在子加载器**最前**（实测 -verbose:class：
+    //   DexNative 来自 *.jar.patched/），shell-shim.jar 里的影子 DexNative 永远抢不到 → 「有真实实现
+    //   却仍走原生解密」。跳过原生桥（不传 -Dtvbox.native.*）后加载顺序回到 [shell-shim.jar, 蜘蛛 jar]，
+    //   影子生效、无需 ARM 模拟，启动更快也更稳。
+    const preferShim = shimClasses !== '' && this.shimPreferred.has(jarPaths.join(';'));
     // ★ 2026-09-26 原生桥（ARM .so）：jar 内含 .so 时按需准备 unidbg 运行时，
     //   并把桥 jar + 运行时 jar 拼进 classpath；工作/改写目录经 -Dtvbox.native.* 透传给运行器。
     //   普通源 nativeJars 为空 → classpath/argv 与历史完全一致。
-    const nativeJars = this.nativeNeeded(jarPaths) ? await this.ensureNativeRuntime() : [];
+    const nativeJars = !preferShim && this.nativeNeeded(jarPaths) ? await this.ensureNativeRuntime() : [];
     // ★★ 2026-09-26 修复（壳「守卫握手 / 加密路径」总闸，勿回退）★★
     //   此前 `cpParts = [stubs+libs, ...jarPaths, …]` 被**同时**喂给 `-cp`（父加载器 = 应用加载器）
     //   和 SpiderRunner 的加载器参数。父加载器先于子加载器解析 → jar 里的**原始类**永远赢，
@@ -2121,9 +2153,29 @@ export function translateSpiderLog(log: string): string {
       '蜘蛛依赖的接口在桌面版缺失（属兼容性问题，请反馈）'],
     [/ExceptionInInitializerError/i,
       '蜘蛛静态初始化失败（内部依赖在桌面版缺失，请反馈此源）'],
+    // ★ 2026-09-29：加固壳「守卫内层蜘蛛为空」（`BaseSpiderGuard.<init>` → `Init.getSpider` 拿到 null）
+    //   的原始报错是 `NullPointerException: Cannot invoke "…Spider.init(Context, String)"`，
+    //   必须**排在通用规则之后**才不抢别人的匹配，但排在原样兜底之前 —— 否则用户只看到一句截断的英文 NPE。
+    [/crawler\.Spider\.init\(android\.content\.Context|守卫内层蜘蛛为空|加固壳内部蜘蛛未就绪/,
+      '加固壳内部蜘蛛未就绪（原生解密未产出加载器）—— 已自动改用内置真实实现；仍失败请重进该源或反馈'],
   ];
   for (const [re, human] of rules) if (re.test(s)) return human;
   return s.slice(0, 120);
+}
+
+/**
+ * ★★ 2026-09-29（设备实证）：判断失败原因是不是「守卫壳的内层蜘蛛为空」。
+ *
+ * 加固壳的 `BaseSpiderGuard.<init>` 会调 `Init.getSpider(this.getClass().getName())`，把返回的真实
+ * 蜘蛛存进字段；任何一环没接上（原生桥 `DexNative.getLoader` 没返回加载器 / 运行时 dex 产物异常 /
+ * shell-shim 真实实现缺失）字段就是 null，随后第一个 `init()` 抛
+ * `NullPointerException: Cannot invoke "com.github.catvod.crawler.Spider.init(android.content.Context, String)"`。
+ * 注意：上屏前的原因会按 120 字符截断（截到 `because "…"` 附近），所以判据只取方法签名部分。
+ */
+export function isGuardInnerSpiderNull(reason: string): boolean {
+  const s = reason || '';
+  return /crawler\.Spider\.init\(android\.content\.Context/.test(s)
+    || /加固壳内部蜘蛛未就绪|守卫内层蜘蛛为空/.test(s);
 }
 
 /** 转义正则特殊字符（文件名用于 RegExp 构造时防误解析） */
@@ -2237,6 +2289,9 @@ export function extractBridgeNotes(stderr: string): string[] {
     //   注：`[SpiderRunner.ERROR]` 不在此列（一次性路径已单独提取上屏，池路径由 extractSpiderReason 兜），
     //   避免同一条错误重复上屏。
     else if (t.startsWith('[runtime-dex]') || t.startsWith('[dexjar-repair]') || t.startsWith('[Init]')) out.push(t);
+    // ★ 2026-09-29：shell-shim 影子 DexNative 的说话行（真实实现加载失败/命中与否）——此前只在
+    //   -Dtvbox.shellShim.debug=true 时才打印，设备上「守卫内层蜘蛛为空」时拿不到任何线索，一并上屏。
+    else if (t.startsWith('[ShellShim]')) out.push(t);
     else if (t.startsWith('[SpiderRunner] 警告')) out.push(t);
   }
   return out;

@@ -157,6 +157,7 @@ public class DexNative {
         //   （对齐 PlayHub 的 buildClassNameCandidates：`XxxGuard` → `Xxx`）。
         //   真实实现存在于 shimClasses 时这一步就命中，桥就是通的；
         //   全都不命中说明 shimClasses 没提供实现（见错因日志）。
+        java.util.List<String> fails = new java.util.ArrayList<>();
         for (String candidate : candidates(dotted)) {
             try {
                 Class<?> c = Class.forName(candidate, true, l);
@@ -172,11 +173,18 @@ public class DexNative {
                 return spider;
             } catch (Throwable t) {
                 log("getSpider 候选 " + candidate + " 未命中: " + t);
+                fails.add(candidate + " → " + t);
             }
         }
 
-        log("getSpider(" + dotted + ") 无真实实现可加载 → 返回 null"
-                + "（需要 -Dtvbox.shellShimClasses 指向含真实 Spider 的 jar）");
+        // ★★ 2026-09-29：**这一行必须无条件打印**（`[ShellShim]` 前缀会被 App 的
+        //   `extractBridgeNotes` 收集上屏）。此前它只在 -Dtvbox.shellShim.debug=true 时打印，
+        //   于是设备上「守卫内层蜘蛛为空 → BaseSpiderGuard NPE」时日志里没有任何线索。
+        StringBuilder sb = new StringBuilder("getSpider(").append(dotted)
+                .append(") 无真实实现可加载 → 返回 null（壳侧守卫字段将留空 → 首个 init() 必 NPE）")
+                .append("；shimClasses=").append(System.getProperty("tvbox.shellShimClasses", ""));
+        for (String f : fails) sb.append("；候选 ").append(f);
+        System.err.println("[ShellShim] " + sb);
         return null;
     }
 
@@ -252,6 +260,9 @@ public class DexNative {
             }
         } catch (Throwable t) {
             log("构建 loader 失败: " + t);
+            // ★ 2026-09-29：加载器建不起来 → 真实蜘蛛一个都拿不到 → 守卫字段留空 → NPE。
+            //   这条无条件上屏（`[ShellShim]` 前缀会被 App 收集），避免设备侧再次「静默空」。
+            System.err.println("[ShellShim] 构建真实实现加载器失败（Guard 内层蜘蛛将不可用）: " + t);
             return new URLClassLoader(new URL[0], DexNative.class.getClassLoader());
         }
     }

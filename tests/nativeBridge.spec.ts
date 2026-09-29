@@ -2,14 +2,15 @@
 //   ① 未配置 nativeRuntimeDir → 不注入任何原生桥参数（普通源 argv 与历史完全一致）；
 //   ② 配置了目录 + jar 内含 .so + 运行时齐备 → classpath 拼上 [native-bridge.jar, ...运行时 jar]
 //      并透传 -Dtvbox.native.work / -Dtvbox.native.patch；
-//   ③ 配置了目录但 jar 内无 .so → 不启用（不做任何下载/注入）。
+//   ③ 配置了目录但 jar 内无 .so → 不启用（不做任何下载/注入）；
+//   ④ ★ 2026-09-29：守卫壳「内层蜘蛛为空」NPE → 自动改走 shell-shim 真实实现重试（第二次 argv 不带原生桥）。
 // 只 mock child_process.spawn（不触网、不跑真 JVM），断言 argv/classpath 形状。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { JarSpiderBridge, extractBridgeNotes } from '../src/engine/spider/JarSpiderBridge';
+import { JarSpiderBridge, extractBridgeNotes, isGuardInnerSpiderNull } from '../src/engine/spider/JarSpiderBridge';
 import { NullLogger } from '../src/engine/util/logger';
 import { buildZip } from '../src/engine/util/syncZip';
 
@@ -142,6 +143,95 @@ describe('JarSpiderBridge.call — ARM 原生桥接入', () => {
   });
 });
 
+// ── ★ 2026-09-29 守卫空 NPE 兜底：原生路线失败 → 自动改走 shell-shim 真实实现 ──
+describe('JarSpiderBridge.call — 守卫内层蜘蛛为空 → shell-shim 兜底', () => {
+  let dirs: string[] = [];
+
+  beforeEach(() => {
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => fakeChild());
+  });
+  afterEach(() => {
+    for (const d of dirs) {
+      try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    dirs = [];
+  });
+
+  /** 轮询等第 n 次 spawn 发生（原生桥/重试路径含 await，spawn 不在同一微任务里） */
+  async function waitSpawn(n: number): Promise<void> {
+    for (let i = 0; i < 200 && spawnMock.mock.results.length < n; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(spawnMock.mock.results.length).toBeGreaterThanOrEqual(n);
+  }
+
+  it('原生路线报「Spider.init(…, String) … is null」→ 用 shell-shim 路线重试一次（argv 不再带原生桥）', async () => {
+    const rt = join(tmpdir(), `tvm-native-rt3-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
+    mkdirSync(rt, { recursive: true });
+    dirs.push(rt);
+    seedNativeRuntime(rt);
+    const { bridge, dir } = makeBridge({ nativeRuntimeDir: rt });
+    dirs.push(dir);
+    writeFileSync(join(dir, 'stubs', 'shell-shim.jar'), 'stub-shim');
+    // 壳 jar：含 .so（触发原生桥）+ assets/ftyshinidie.guard（触发 shell-shim 自动适配）
+    const jar = join(dir, 'guard.jar');
+    writeFileSync(jar, buildZip([
+      { name: 'assets/FishGuard-v8.so', bytes: Buffer.from([0x7f, 0x45, 0x4c, 0x46]) },
+      { name: 'assets/ftyshinidie.guard', bytes: Buffer.from('x') },
+    ]));
+    const realJar = join(dir, 'shell-shim', 'real', 'ftyshinidie.jar');
+    mkdirSync(join(dir, 'shell-shim', 'real'), { recursive: true });
+    writeFileSync(realJar, 'stub-real');
+
+    const p = bridge.call([jar], 'com.github.catvod.spider.DouDouGuard', 'homeContent', ['']);
+    await waitSpawn(1);
+    const argv1 = spawnMock.mock.calls[0][1] as string[];
+    // 第一次：原生路线（带 native props）+ 已透传 shell-shim 真实实现
+    expect(argv1.some((a) => a.startsWith('-Dtvbox.native.work='))).toBe(true);
+    expect(argv1).toContain(`-Dtvbox.shellShimClasses=${realJar}`);
+
+    // 设备同款失败：守卫字段为 null（真实报错会截断，这里给完整形态）
+    const c1 = spawnMock.mock.results[0].value as ReturnType<typeof fakeChild>;
+    c1.stderr.emit('data', Buffer.from(
+      '[android.Log.D] SpiderLog: java.lang.NullPointerException: Cannot invoke "com.github.catvod.crawler.Spider.init(android.content.Context, String)" because "this.oOoOoOoOoOoOoO0o" is null\n',
+    ));
+    c1.emit('close', 0);
+
+    // 第二次：shell-shim 路线 —— 不带 -Dtvbox.native.*（改写产物目录不再抢在 shell-shim.jar 之前）
+    await waitSpawn(2);
+    const argv2 = spawnMock.mock.calls[1][1] as string[];
+    expect(argv2.some((a) => a.startsWith('-Dtvbox.native.'))).toBe(false);
+    expect(argv2).toContain(`-Dtvbox.shellShimClasses=${realJar}`);
+    const i = argv2.indexOf('SpiderRunner');
+    expect(argv2[i + 1].split(';')[0]).toBe(join(dir, 'stubs', 'shell-shim.jar'));
+
+    const c2 = spawnMock.mock.results[1].value as ReturnType<typeof fakeChild>;
+    c2.stdout.emit('data', Buffer.from('{"list":[1]}'));
+    c2.emit('close', 0);
+    expect(await p).toContain('{"list":[1]}');
+  });
+
+  it('该 jar 无内置真实实现 → 不做兜底重试（只 spawn 一次）', async () => {
+    const { bridge, dir } = makeBridge({});
+    dirs.push(dir);
+    const jar = join(dir, 'noshell.jar');
+    writeFileSync(jar, buildZip([{ name: 'classes.dex', bytes: Buffer.from('x') }]));
+
+    const p = bridge.call([jar], 'com.github.catvod.spider.DouDouGuard', 'homeContent', ['']);
+    await waitSpawn(1);
+    const c1 = spawnMock.mock.results[0].value as ReturnType<typeof fakeChild>;
+    c1.stderr.emit('data', Buffer.from(
+      '[android.Log.D] SpiderLog: java.lang.NullPointerException: Cannot invoke "com.github.catvod.crawler.Spider.init(android.content.Context, String)" because "this.oOoOoOoOoOoOoO0o" is null\n',
+    ));
+    c1.emit('close', 0);
+    await p;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(spawnMock.mock.results.length).toBe(1);
+    expect(isGuardInnerSpiderNull(bridge.lastReason)).toBe(true);
+  });
+});
+
 // ── 桥消息可见化（extractBridgeNotes）：桥的成败只在子进程 stderr 上，需上屏才能排障 ──
 describe('extractBridgeNotes — 原生桥消息抽取', () => {
   it('抽出桥自身与运行器转发的桥行（其余噪声丢弃）', () => {
@@ -168,5 +258,30 @@ describe('extractBridgeNotes — 原生桥消息抽取', () => {
     expect(notes).toHaveLength(1);
     expect(/失败|降级|不可用/.test(notes[0])).toBe(false);
     expect(/失败|降级|不可用/.test(extractBridgeNotes('[native-bridge] 准备失败，按无原生桥降级: x')[0])).toBe(true);
+  });
+
+  // ★ 2026-09-29：shell-shim 影子类的说话行要能上屏（此前只在 debug 开关下打印，设备侧「守卫空 NPE」零线索）
+  it('抽出 shell-shim 影子行（getSpider 无真实实现可加载 → 返回 null）', () => {
+    const notes = extractBridgeNotes('[ShellShim] getSpider(com.github.catvod.spider.DouDouGuard) 无真实实现可加载 → 返回 null');
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain('无真实实现可加载');
+  });
+});
+
+// ── ★ 2026-09-29：守卫空 NPE 判据（原因上屏会截断到 120 字符，判据只取方法签名） ──
+describe('isGuardInnerSpiderNull — 失败原因判据', () => {
+  it('命中：原始 NPE 与截断后的 120 字符文本、以及翻译后的中文原因', () => {
+    const raw = 'java.lang.NullPointerException: Cannot invoke "com.github.catvod.crawler.Spider.init(android.content.Context, String)" because "this.oOoOoOoOoOoOoO0o" is null';
+    expect(isGuardInnerSpiderNull(raw)).toBe(true);
+    expect(isGuardInnerSpiderNull(raw.slice(0, 120))).toBe(true);
+    expect(isGuardInnerSpiderNull('蜘蛛运行器异常：' + raw.slice(0, 120))).toBe(true);
+    expect(isGuardInnerSpiderNull('加固壳内部蜘蛛未就绪（原生解密未产出加载器）—— 已自动改用内置真实实现')).toBe(true);
+  });
+
+  it('不命中：其它 NPE / 普通失败原因（不误触发兜底重试）', () => {
+    expect(isGuardInnerSpiderNull('')).toBe(false);
+    expect(isGuardInnerSpiderNull('java.lang.NullPointerException: Cannot invoke "String.length()" because "<parameter1>" is null')).toBe(false);
+    expect(isGuardInnerSpiderNull('蜘蛛调用超时（>10s），源站可能无响应')).toBe(false);
+    expect(isGuardInnerSpiderNull('ClassNotFoundException: com.github.catvod.spider.Xxx')).toBe(false);
   });
 });

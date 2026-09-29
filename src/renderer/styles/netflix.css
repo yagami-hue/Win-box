@@ -77,9 +77,16 @@
 /* 顶部导航：logo 左、导航项横排；滚动前是渐变、贴顶后实底 */
 .nf-nav {
   display: flex; align-items: center; gap: 20px; flex: none;
-  padding: 10px 26px 14px; z-index: 30;
+  padding: 10px 26px 14px; z-index: 40;
   background: linear-gradient(180deg, rgba(20, 20, 20, .98), rgba(20, 20, 20, .72) 60%, transparent);
 }
+/* ★ 2026-09-29 缺陷修复（用户报「Netflix / B 站主题下，历史页与搜索结果页的搜索输入框被挡住无法点击」）：
+   真因 = 层序打平。页面自己的 `.topbar` 也是 `position: relative; z-index: 30`（见 global.css，
+   为修「换源列表被封面遮挡」而设），而 `.nf-nav` 此前同为 30 —— 同为 30 时按 DOM 顺序靠后者胜出，
+   页面在导航之后 ⇒ 页面顶栏稳定压在导航整棵子树之上；搜索面板（.sp-panel，向下展开 520px）
+   的第一行输入框恰好落进页面顶栏的区域 → 看得见却点不到（点击都被页面顶栏接管）。
+   修：导航层提到 40（与 Apple 皮肤工具栏同值，同一先例），整棵子树（含搜索面板）稳定压在页面
+   顶栏之上；页面内的弹层（.srcpick-pop 等）自身被顶栏 30 的层包住，不会反向盖住导航。 */
 .nf-logo { color: var(--nf-red); font-weight: 900; font-size: 21px; letter-spacing: 2.5px; flex: 0 0 auto; }
 .nf-link { color: #e5e5e5; font-size: 14px; font-weight: 500; padding: 2px 0; transition: color .15s; }
 .nf-link:hover { color: #fff; }
