@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import BackButton from '../components/BackButton';
 import { client } from '../api/client';
-import type { LiveGroup, LiveBean } from '../../shared/types';
+import type { LiveGroup, LiveBean, LiveEpgEntry, EpgChannelRef } from '../../shared/types';
 import VideoPlayer from '../components/VideoPlayer';
 import { splitLine } from '../../engine/live/LiveUtils';
 
@@ -29,6 +29,9 @@ export default function LivePage() {
   const [playUrl, setPlayUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
+  /** ★ 2026-09-29 EPG：键（tvg-id / tvg-name / 频道名）→ 当前 / 下一档 */
+  const [epg, setEpg] = useState<Record<string, LiveEpgEntry>>({});
+  const epgTimer = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,7 +110,47 @@ export default function LivePage() {
 
   const curGroup = groups.find((g) => g.group === groupName);
   const curChannel = curGroup?.channels.find((c) => c.name === channelName);
+  const curEpg = curChannel ? (epg[curChannel['tvg-id']] || epg[curChannel['tvg-name']] || epg[curChannel.name]) : undefined;
   const lines = curChannel ? curChannel.urls.map((u, i) => splitLine(u, i + 1)) : [];
+
+  // ★ 2026-09-29 EPG：换线路 / 分组变化后拉一次节目单（主进程负责 XMLTV 拉取、缓存与频道匹配）
+  async function refreshEpg(index: number, gs: LiveGroup[]) {
+    const refs: EpgChannelRef[] = gs
+      .flatMap((g) => g.channels)
+      .map((c) => ({ tvgId: c['tvg-id'], tvgName: c['tvg-name'], name: c.name, epg: c.epg }))
+      .filter((r) => !!(r.tvgId || r.tvgName || r.name));
+    if (!refs.length) { setEpg({}); return; }
+    try {
+      const r = await client.liveEpg(index, refs);
+      setEpg(r.byKey);
+    } catch {
+      setEpg({}); // EPG 是增强项：失败只当作没有节目单，不影响直播播放
+    }
+  }
+
+  useEffect(() => {
+    if (!groups.length) return;
+    void refreshEpg(liveIdx, groups);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveIdx, groups]);
+
+  /**
+   * ★ 2026-09-29 EPG：只在「当前节目结束 / 下一档开始」的时刻再拉一次（不做轮询）。
+   * 到点后重新计算，就能无缝从「当前」滑到「下一档」。
+   */
+  useEffect(() => {
+    if (epgTimer.current != null) { window.clearTimeout(epgTimer.current); epgTimer.current = null; }
+    if (!curChannel) return;
+    const e = epg[curChannel['tvg-id']] || epg[curChannel['tvg-name']] || epg[curChannel.name];
+    const at = e?.current?.endTime ?? e?.next?.startTime;
+    if (!at) return;
+    const delay = Math.max(1000, Math.min(at - Date.now() + 1000, 6 * 3600 * 1000));
+    epgTimer.current = window.setTimeout(() => { void refreshEpg(liveIdx, groups); }, delay);
+    return () => {
+      if (epgTimer.current != null) { window.clearTimeout(epgTimer.current); epgTimer.current = null; }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [epg, groupName, channelName, liveIdx]);
 
   return (
     <>
@@ -145,6 +188,21 @@ export default function LivePage() {
                       {l.name}
                     </span>
                   ))}
+                </div>
+              )}
+              {/* ★ 2026-09-29 EPG：当前 / 下一档（仅有节目单时才显示，避免占位空格） */}
+              {curEpg && (curEpg.current || curEpg.next) && (
+                <div className="live-epg">
+                  {curEpg.current && (
+                    <span className="live-epg-now">
+                      <b>正在播</b> {curEpg.current.start}~{curEpg.current.end} {curEpg.current.title || '（无标题）'}
+                    </span>
+                  )}
+                  {curEpg.next && (
+                    <span className="muted">
+                      <b>下一档</b> {curEpg.next.start} {curEpg.next.title || '（无标题）'}
+                    </span>
+                  )}
                 </div>
               )}
               {/* ★ 2026-09-27：播放器必须有「有高度」的 flex 宿主 —— `.vplayer` 的高度只来自 flex（flex:1），

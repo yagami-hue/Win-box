@@ -249,6 +249,23 @@ describe('parseEndpointAnimeList / parseEndpointEpisodes（宽松解析）', () 
       { episodeId: 23505605, title: '某剧', episodeTitle: '第1话', source: 'https://h/t', sourceName: 'LogVar' },
     ]);
   });
+
+  it('★ 2026-09-29：集号字段 episodeNumber（数字/数字串）解析为 episodeNumber；非数字忽略', () => {
+    const r = parseEndpointEpisodes(
+      {
+        bangumi: {
+          episodes: [
+            { episodeId: 1, episodeTitle: '【qq】 第1集 菜头萧萧', episodeNumber: '1' },
+            { episodeId: 2, episodeTitle: '正片', episodeNumber: 2 },
+            { episodeId: 3, episodeTitle: '花絮', episodeNumber: 'SP' },
+          ],
+        },
+      },
+      's',
+      'n',
+    );
+    expect(r?.map((x) => x.episodeNumber)).toEqual(['1', '2', undefined]);
+  });
 });
 
 describe('DanmakuEndpointHealth（会话级冷却）', () => {
@@ -304,5 +321,15 @@ describe('sortCandidatesByEp（候选列表按集号排序）', () => {
     const out = sortCandidatesByEp([c('第1集', 'x'), c('第1集', 'y')]);
     expect(out.map((x) => x.source)).toEqual(['x', 'y']);
     expect(sortCandidatesByEp([])).toEqual([]);
+  });
+
+  it('★ 2026-09-29：只有 episodeNumber（标题提不出集号）也能排序 —— 修 tencent 条目看不到集号', () => {
+    const list = [
+      { episodeId: 1, episodeTitle: '【qq】 正片', episodeNumber: '3', source: 'a', sourceName: 'a' },
+      { episodeId: 2, episodeTitle: undefined, episodeNumber: '1', source: 'b', sourceName: 'b' },
+      { episodeId: 3, episodeTitle: '花絮', source: 'c', sourceName: 'c' },
+      { episodeId: 4, episodeTitle: undefined, episodeNumber: '2', source: 'd', sourceName: 'd' },
+    ];
+    expect(sortCandidatesByEp(list).map((x) => x.source)).toEqual(['b', 'd', 'a', 'c']);
   });
 });

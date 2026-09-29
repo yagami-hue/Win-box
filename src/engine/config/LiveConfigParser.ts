@@ -62,6 +62,8 @@ export function parseLive(o: unknown, index: number): LiveBean {
     ext: parseLiveExt(obj),
     epg: safeJsonString(obj, 'epg', ''),
     playerType: safeJsonString(obj, 'playerType', ''),
+    // ★ 2026-09-29 EPG 时区（IANA，如 Asia/Shanghai）；对齐 FongMi `Live.timeZone` → `getZoneId()`
+    timeZone: safeJsonString(obj, 'timeZone', ''),
     timeout: clampLiveTimeout(Number(safeJsonString(obj, 'timeout', '0')) || 0),
     header: obj.header && typeof obj.header === 'object' ? (obj.header as Record<string, string>) : undefined,
     ua: safeJsonString(obj, 'ua', ''),

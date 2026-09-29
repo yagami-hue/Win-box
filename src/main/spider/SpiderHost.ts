@@ -5,12 +5,15 @@ import { UserConfigManager, subscriptionStamp, type ConfigChangeKind } from '../
 import { DriveStore } from '../store/DriveStore';
 import { getAdapter } from '../net/qr';
 import { runDriveWebLogin } from '../net/webLogin';
-import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid } from '../net/quarkTransfer';
+import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid, extractEpisodeName } from '../net/quarkTransfer';
 import { fileLogger } from '../util/logger';
 import { parseSiteConfig, parseSiteConfigWithBase, looksLikeSubscribeJson, type ParseResult } from '../../engine/config/ApiConfigParser';
-import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName, type MultiRepo } from '../../engine/config/multiRepo';
+import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName, pickRepoLine, splitRepoLine, type MultiRepo } from '../../engine/config/multiRepo';
 import { SourceViewModel } from '../../engine/vod/SourceViewModel';
 import { parseToJsonArray, toLiveGroups } from '../../engine/live/TxtSubscribe';
+import { parseXmltv, buildEpgMap, pickCurrentNext, type ParsedXmltv } from '../../engine/live/epg';
+import { EpgStore } from '../live/EpgStore';
+import type { BackupSettingsState } from '../../shared/backup';
 import type {
   SourceBean,
   SiteConfig,
@@ -25,6 +28,9 @@ import type {
   UserConfig,
   SourceUpdatePatch,
   SourceMoveDirection,
+  EpgChannelRef,
+  LiveEpgEntry,
+  LiveEpgResult,
 } from '../../shared/types';
 import type { EngineHost } from '../../engine/ports';
 import { userDataDir, cacheDir, resourcesDir, spiderCacheDir } from '../util/paths';
@@ -64,6 +70,9 @@ import {
   sniffBody,
 } from '../../engine/util/fetchWithDisguise';
 import { tryDecryptConfig } from '../net/configDecrypt';
+import { extractStegoConfig, looksLikeImage } from '../../engine/util/imageStego';
+import { classifyPlayLink } from '../../engine/vod/playLink';
+import type { TorrentPlay } from '../torrent/torrentPlay';
 import { SubtitleStore } from '../subtitle/SubtitleStore';
 import { diagTimer, logPlayDiag, shortHash } from '../util/playDiag';
 import { fetchSubtitle, providerSettingsView, searchSubtitles } from '../subtitle';
@@ -169,6 +178,25 @@ export interface LiveLoadResult {
   liveName: string;
 }
 
+/**
+ * ★ 2026-09-29 EPG：收集本线路要用的 XMLTV 地址。
+ * 线路级 `epg`（`,` 分隔）为主；频道级 `epg`（m3u 头部 `tvg-url` 等）作兜底补充。
+ * 与上游 `Live.getEpgXml()` 同口径：含 `{` 的模板/接口型地址、以及不含 xml/gz 的条目一律跳过。
+ */
+function collectEpgUrls(liveEpg: string | undefined, refs: EpgChannelRef[]): string[] {
+  const out: string[] = [];
+  const push = (raw: string): void => {
+    const t = (raw || '').trim();
+    if (!t || t.includes('{') || !/^https?:\/\//i.test(t)) return;
+    const low = t.toLowerCase();
+    if (!low.includes('xml') && !low.includes('gz')) return;
+    if (!out.includes(t)) out.push(t);
+  };
+  for (const u of (liveEpg || '').split(',')) push(u);
+  for (const r of refs) push(r.epg || '');
+  return out;
+}
+
 export class SpiderHost {
   private http: IHttpClient;
   private kv: KVStore;
@@ -200,6 +228,8 @@ export class SpiderHost {
   private report: ImportReport | null = null;
   private sourceMap = new Map<string, SourceBean>();
   private lastSpiderJar = '';
+  /** ★ 2026-09-29 EPG：XMLTV 拉取/磁盘缓存（懒创建；<userData>/winbox-cache/epg） */
+  private epgStore: EpgStore | null = null;
   /**
    * ★ 源健康表（全源搜索调度用，见 engine/vod/searchScheduler）：key → 成功/失败/平均耗时。
    * 本会话内存态（跨重启重置）：重启后按配置顺序从 0 开始学习，避免把「昨天的死源」永久降权。
@@ -225,6 +255,11 @@ export class SpiderHost {
    * 无回调（单测/CLI）时退化为「只在结束时返回完整报告」。
    */
   onSearchAllProgress?: (ev: SearchAllProgressEvent) => void;
+  /**
+   * ★ 2026-09-29：磁力播放引擎（main/index.ts 注入 `TorrentPlay`；未注入 = 磁力走 A 的「复制链接」兜底）。
+   * 类型只取 `open`：宿主只关心「给我一个能播的地址 / 已交外部播放器 / 播不了的原因」。
+   */
+  torrentPlay?: Pick<TorrentPlay, 'open'>;
 
   constructor() {
     const store = new JsonStore(join(cacheDir(), 'spider-local.json'));
@@ -315,6 +350,42 @@ export class SpiderHost {
   /** 已学到的「需要网盘绑定」源 key 列表（渲染层据此在源主页显示绑定入口） */
   driveBindLearned(): string[] {
     return [...this.driveBindKeys];
+  }
+
+  /**
+   * ★ 2026-09-29 设置备份：导出宿主持有的设置与凭据（凭据为**明文**，口径见 shared/backup.ts）。
+   * 播放偏好 / 代理 / 老板键不在宿主内，由 ipc 侧补齐后再组装成完整备份文件。
+   */
+  settingsSnapshot(): Pick<BackupSettingsState, 'userConfig' | 'driveTokens' | 'subtitle' | 'metaSettings' | 'danmaku'> {
+    return {
+      userConfig: this.cfgSnapshot(),
+      driveTokens: this.drives.list(),
+      subtitle: this.subtitles.settings,
+      metaSettings: this.metaSettings.settings,
+      danmaku: this.danmakuStore.settings,
+    };
+  }
+
+  /**
+   * ★ 2026-09-29 设置备份还原：整份覆盖（各 store 自身负责校验/归一化）。
+   * 网盘凭据按「备份为准」对齐（备份里没有的 provider 会被清掉）；调用方随后应提示重启应用。
+   */
+  restoreSettings(s: Partial<BackupSettingsState>): void {
+    if (s.userConfig) this.manager.restore(s.userConfig);
+    if (s.driveTokens && typeof s.driveTokens === 'object') {
+      const want = s.driveTokens;
+      for (const p of Object.keys(this.drives.list())) if (!(p in want)) this.drives.remove(p);
+      for (const [p, t] of Object.entries(want)) {
+        if (p && typeof t === 'string' && t.trim()) this.drives.set(p, t);
+      }
+      this.resetSpidersAfterDriveChange();
+    }
+    if (s.subtitle) this.subtitles.settings = s.subtitle;
+    if (s.metaSettings) {
+      this.metaSettings.settings = s.metaSettings;
+      this.applyMetaRuntime();
+    }
+    if (s.danmaku) this.danmakuStore.settings = s.danmaku;
   }
 
   get host(): EngineHost {
@@ -917,21 +988,26 @@ export class SpiderHost {
     const snapshot = opts.snapshot !== false;
     let text = source.json || '';
     this.lastConfigFetchHint = ''; // 粘贴导入不涉及拉取，无分档诊断
+    // ★ 2026-09-29：订阅地址尾部可带 `#line=N`（多仓选第几条线，对位 CatClaw `SplitLine`）——
+    //   拉取前剥掉（否则可能 404 / 拉回整份），线路下标转给多仓导入；**落库仍存带 #line 的原串**，
+    //   这样后续自动刷新/重新导入都锁定用户选的那条线。
+    const sub = splitRepoLine(source.url || '');
+    const fetchUrl = sub.url;
     if (source.url) {
-      text = await this.fetchConfigText(source.url);
+      text = await this.fetchConfigText(fetchUrl);
     }
     /** ★ 2026-09-29：导入失败时把「为什么拉不到」一并上屏（HTML 拦截页 / 疑似加密 / 逐档特征） */
     const hint = (): string => (this.lastConfigFetchHint ? `｜诊断：${this.lastConfigFetchHint}` : '');
     // ★ 多仓（{urls:[{url,name},...]}）导入：影视仓/多仓盒子订阅格式，逐个子仓取首个可用
     const multi = parseMultiRepo(text);
     if (multi) {
-      return this.importMultiRepo(multi, snapshot, source.name);
+      return this.importMultiRepo(multi, snapshot, source.name, sub.line);
     }
     // ★ 从 URL 导入时传基准地址：配置内 `./xxx.jar` 等相对路径需按订阅目录展开
     //   （对齐上游 ApiConfig.fixContentPath）。粘贴 JSON（无 url）保持原样。
     let result: ParseResult;
     try {
-      result = source.url ? parseSiteConfigWithBase(text, source.url) : parseSiteConfig(text);
+      result = source.url ? parseSiteConfigWithBase(text, fetchUrl) : parseSiteConfig(text);
     } catch (e) {
       throw new Error(`${(e as Error).message}${hint()}`);
     }
@@ -1009,14 +1085,23 @@ export class SpiderHost {
       if (res.altUrl) this.logger.i(`订阅换协议后取到内容（${res.altUrl}）：${url}`);
       return res.buf.toString('utf-8');
     }
+    // ★ 2026-09-29：图片尾部隐写（饭太硬防直连；参照 CatClawVideo TvBoxSubscriptionManager.cs:548）。
+    //   必须拿**原始字节**试 —— 先转 utf-8 字符串会把二进制毁成替换字符，载荷就找不回来了。
+    const stego = res.last ? extractStegoConfig(res.last) : null;
+    if (stego) {
+      this.logger.i(`订阅图片尾部隐写：已提取配置（${stego.kind}，尾段 ${stego.offset} 起，${stego.text.length}B）：${url}`);
+      return stego.text;
+    }
     const raw = res.last ? res.last.toString('utf-8') : '';
     // ★ 解密兜底：本地编码优先，其次第三方解密服务（仅此处、且仅在所有伪装手段失败后）
     const dec = await tryDecryptConfig(this.http, url, raw, this.logger);
     if (dec) return dec.text;
     const encrypted = res.last ? looksEncrypted(res.last) : false;
+    const image = res.last ? looksLikeImage(res.last) : false;
     const sn = res.last ? sniffBody(res.last) : null;
     this.lastConfigFetchHint =
       (encrypted ? '该地址返回的内容疑似**加密配置**（普通客户端无法直接使用）。' : '') +
+      (image ? '该地址返回的是**图片**（疑似图片尾部隐写，但未从中提取到配置）。' : '') +
       (sn ? `最后响应为 ${sn.kind}（${sn.size}B）${sn.head ? `，开头是「${sn.head.slice(0, 60)}」` : ''}。` : '所有尝试都没有拿到响应体。') +
       `已尝试：${describeFailures(res.tries)}`;
     return raw;
@@ -1032,10 +1117,39 @@ export class SpiderHost {
    *   —— 用户看到的就是「导入没反应 / 导进去 0 个源」。这里加两道闸：
    *     ① 单项走**快取模式**（2 次尝试、每次 12s，不做 DoH 兜底）；
    *     ② 整轮有**总预算 60s** 且最多试 12 项，超了就把「还有多少项没试」写进错误里。
+   *
+   * ★ 2026-09-29：`preferLine ≥ 0`（订阅地址带 `#line=N`）→ **只取第 N 条**，不走上面的逐条试；
+   *   越界按上游 `Math.Clamp` 口径收敛到末条，失败时把「第几条 + 名称 + 原因」一次说清。
    */
-  private async importMultiRepo(multi: MultiRepo, snapshot: boolean, name = ''): Promise<ParseResult> {
+  private async importMultiRepo(multi: MultiRepo, snapshot: boolean, name = '', preferLine = -1): Promise<ParseResult> {
     const skipped: string[] = [];
     const total = multi.items.length;
+    // ★ 2026-09-29：`#line=N` 指定线路 → **只取那一条**（不做逐条试到可用；越界按上游口径收敛到末条）
+    if (preferLine >= 0) {
+      const picked = pickRepoLine(multi.items, preferLine)!;
+      const label = repoDisplayName(picked.item.url, picked.item.name);
+      const lineNo = picked.index + 1;
+      const clampedNote = picked.index !== preferLine ? `（#line=${preferLine} 超出范围，共 ${total} 条，已取末条）` : '';
+      if (!isFetchedRepoUrl(picked.item.url)) {
+        const why = /^clan:/i.test(picked.item.url) ? '本地目录仓（clan://）桌面版不可用' : '不支持的协议';
+        throw new Error(`多仓第 ${lineNo} 条线路「${label}」不可用：${why}${clampedNote}`);
+      }
+      try {
+        const text = await this.fetchConfigText(picked.item.url);
+        const result = parseSiteConfigWithBase(text, picked.item.url);
+        if (!result.config.sites.length && !result.config.lives.length) throw new Error('内容为空/非订阅配置');
+        this.report = result.report;
+        this.config = result.config;
+        this.applyConfig(result.config);
+        this.applyImportedConfig(result.config, picked.item.url, snapshot, name);
+        const note = `已按地址指定的 #line=${preferLine} 导入多仓第 ${lineNo}/${total} 条线路「${label}」${clampedNote}${this.lastConfigFetchHint ? `｜诊断：${this.lastConfigFetchHint}` : ''}`;
+        this.logger.i('multi-repo(line): ' + note);
+        return { ...result, warnings: [...(result.warnings || []), note] };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`多仓第 ${lineNo} 条线路（#line=${preferLine}）「${label}」导入失败：${msg}`);
+      }
+    }
     const started = Date.now();
     let tried = 0;
     for (const item of multi.items) {
@@ -1063,7 +1177,7 @@ export class SpiderHost {
         this.config = result.config;
         this.applyConfig(result.config);
         this.applyImportedConfig(result.config, item.url, snapshot, name);
-        const note = `多仓共 ${total} 项，已导入首个可用子仓「${label}」${total > 1 ? `；其余 ${total - 1} 项：${skipped.join('；') || '均可用（可另行单独导入）'}` : ''}`;
+        const note = `多仓共 ${total} 项，已导入首个可用子仓「${label}」${total > 1 ? `；其余 ${total - 1} 项：${skipped.join('；') || '均可用（可另行单独导入）'}；如需指定线路，在订阅地址尾加 #line=N（N 从 0 起）` : ''}`;
         this.logger.i('multi-repo: ' + note);
         return { ...result, warnings: [...(result.warnings || []), note] };
       } catch (e) {
@@ -1134,6 +1248,11 @@ export class SpiderHost {
   detail(key: string, ids: string[]) {
     const b = this.getSource(key);
     if (!b) throw new Error(`源不存在: ${key}`);
+    // ★ 2026-09-29（用户报「sun.json 有分类/封面，点进去无详情」）：
+    //   隔离探针（.tmp/probe-detail.cjs，sun.json 全局 jar）实测：盘搜/网盘搜索族
+    //   （`MiPan` / `Baiku` / `KuLe`）连 homeContent 都抛 StackOverflowError，stderr 先打
+    //   「App名称不匹配，疑似二次打包」—— 蜘蛛在类加载期自校验宿主 App 名（源侧 jar 行为）。
+    //   桌面侧通用兜底 = 详情为空时引导走「全源聚合搜索」（渲染层 DetailPage）。
     return this.vm.detail(b, ids).then((d) => {
       // ★ 2026-09-27（缺口 B，别删）：详情里的**播放源名**带网盘字样（实测 wex 玩偶：`夸克原画$$$夸克最高急速…`）
       //   ⇒ 该源播放必然要网盘 Cookie ⇒ 立刻学会它（进源即显示绑定入口）。
@@ -1531,6 +1650,10 @@ export class SpiderHost {
   private async playInner(key: string, flag: string, id: string): Promise<PlayResult> {
     const b = this.getSource(key);
     if (!b) throw new Error(`源不存在: ${key}`);
+    // ★ 2026-09-29（用户报「部分资源夸克网盘播放还是存在播放失败」）：
+    //   转存失败原来只写日志（`quarkTransfer 未成功(reason)，回退蜘蛛`）→ 用户看到黑屏没有原因。
+    //   这里记下原因，蜘蛛也拿不到地址时**翻译成可执行的中文提示上屏**（走既有 parse:1 + message 通道）。
+    let quarkFail = '';
     // ★ 夸克分享型播放（episode 是 pan.quark.cn/s/ 链接或含 sId 的 JSON）且已绑定夸克 →
     //   用原生 quarkTransfer 复刻「分享→转存→直链」，绕开超时的 fty jar 与被 pin 的主机。
     if (isQuarkSharePlay(id)) {
@@ -1542,7 +1665,12 @@ export class SpiderHost {
           try {
             // ★ 修复「点第6集落盘第29集」：fid 提取兼容 fid/vfid/file_id/URL 参数（旧正则只认 "fid"）
             const innerFid = extractEpisodeFid(id);
-            const t = await quarkTransfer(pwdId, quarkCookie, { innerFid, logger: fileLogger });
+            // ★ 2026-09-29：集名一并传入 —— fid 在分享内匹配不到时按「集名/集号唯一匹配」兜底
+            const t = await quarkTransfer(pwdId, quarkCookie, {
+              innerFid,
+              innerName: extractEpisodeName(id),
+              logger: fileLogger,
+            });
             if (t.ok && t.url) {
               fileLogger.i(`quarkTransfer 直链 ok: ${t.url.slice(0, 90)}...`);
               // ★ 记录待清理：关闭播放窗口/播放页时删除本次落盘文件（进度留在本地历史）
@@ -1564,14 +1692,33 @@ export class SpiderHost {
                 jx: 0,
               };
             }
-            fileLogger.w(`quarkTransfer 未成功(${t.reason})，回退蜘蛛`);
+            quarkFail = t.reason || '未知原因';
+            fileLogger.w(`quarkTransfer 未成功(${quarkFail})，回退蜘蛛`);
           } catch (e) {
-            fileLogger.w(`quarkTransfer 异常回退: ${(e as Error).message}`);
+            quarkFail = (e as Error).message;
+            fileLogger.w(`quarkTransfer 异常回退: ${quarkFail}`);
           }
         }
+      } else {
+        quarkFail = '未绑定夸克账号（Cookie 缺失）';
       }
     }
     return this.vm.play(b, flag, id, this.vipFlags).then((r) => {
+      // ★ 2026-09-29：协议识别（用户选定「先做 A：协议解析 + 链路识别」）
+      //   · thunder:// → 解出内层 http(s) 直链，替换后用既有链路播（此前原样交给 <video> ⇒ 黑屏）；
+      //   · magnet/ed2k/ftp → 无载体：{url:'', parse:1, message} 上屏原因 + externalLink（IPC 层复制剪贴板）。
+      const link = classifyPlayLink(r.url || '');
+      if (link.unsupported) {
+        // ★ 2026-09-29（磁力 B）：磁力不再直接判死 —— 先交内置 BT 引擎（aria2c）起播；
+        //   引擎缺失/冷门无做种/无外部播放器才回到 A 的「人话提示 + 复制链接」兜底。
+        if (link.kind === 'magnet') return this.tryMagnetPlay(link.externalLink || r.url || '', link.unsupported, r);
+        this.logger.w(`play: 链接无桌面载体（${link.kind}）→ 上屏引导: ${key}`);
+        return { ...r, parse: 1, url: '', playUrl: '', message: link.unsupported, externalLink: link.externalLink };
+      }
+      if (link.url && link.url !== r.url) {
+        this.logger.i(`play: thunder 链接解出内层地址（${link.url.slice(0, 60)}…）: ${key}`);
+        r = { ...r, url: link.url };
+      }
       // ★ 2026-09-28（诊断实测发现，用户第 6 项的一类）：蜘蛛把「未登录网盘」当成
       //   **空地址 + 一句提示**返回（`parse:0`），而渲染层只认 `parse:1` 才上屏原因 →
       //   表现为「点了播放没反应/黑屏」，用户不知道要绑网盘。
@@ -1592,7 +1739,36 @@ export class SpiderHost {
       }
       // 仅对单个 http(s) 且非多段（# 连接）的播放地址做中继包装
       const single = /^https?:\/\//i.test(r.url || '') && !(r.url || '').includes('#');
-      if (!single || !r.url) return r;
+      if (!single || !r.url) {
+        // ★ 2026-09-29：蜘蛛连地址都没给（`url:''`）但**集地址本身就是磁力/电驴**（部分源把磁力写在
+        //   vod_play_url 里，播放方法直接返回空）→ 按 id 再识别一次，给出同一套上屏引导。
+        if (!r.url) {
+          const byId = classifyPlayLink(id);
+          if (byId.unsupported) {
+            if (byId.kind === 'magnet') return this.tryMagnetPlay(byId.externalLink || id, byId.unsupported, r);
+            this.logger.w(`play: 集地址无桌面载体（${byId.kind}）→ 上屏引导: ${key}`);
+            return { ...r, parse: 1, url: '', playUrl: '', message: byId.unsupported, externalLink: byId.externalLink };
+          }
+        }
+        // ★ 2026-09-29：夸克转存失败 + 蜘蛛也没给出地址（或给的地址不可用）→ 把原因上屏，
+        //   不让用户对着黑屏猜（原来原因只写在日志里）。
+        if (!r.url && quarkFail) {
+          const needLogin = /401|403|未登录|登录已|login/i.test(quarkFail);
+          if (needLogin) this.markDriveBindNeeded(key);
+          this.logger.w(`play: 夸克转存失败且蜘蛛无地址 → 上屏原因: ${key} — ${quarkFail}`);
+          return {
+            ...r,
+            parse: 1,
+            url: '',
+            playUrl: '',
+            ...(needLogin ? { needDriveCookieBind: 'quark' } : {}),
+            message: needLogin
+              ? `夸克登录已失效：请重新登录「夸克」后再播（转存失败原因：${quarkFail.slice(0, 80)}）`
+              : `夸克转存失败：${quarkFail}（分享可能已失效/更新，或该集文件已不在分享内 —— 建议换线路或换源）`,
+          };
+        }
+        return r;
+      }
       // 1) 蜘蛛显式返回播放 header（Cookie/UA/Referer）→ 优先通过 /play 注入（网盘源关键）
       if (r.header && Object.keys(r.header).length > 0) {
         r.url = wrapPlayUrlWithHeaders(r.url, r.header);
@@ -1654,6 +1830,50 @@ export class SpiderHost {
   }
 
   /**
+   * ★ 2026-09-29（磁力 B，用户选定方案）：磁力 → 内置 BT 引擎（aria2c sidecar）起播。
+   *
+   * 三种出口（见 TorrentPlay.open）：
+   *   · inline   —— mp4/webm：给本机中继地址 `/bt/<hash>/<idx>`，`<video>` 直接播（Range + piece 门控）；
+   *   · external —— mkv/hevc：已用外部播放器（PotPlayer/VLC…）打开，**不回地址**（回地址渲染层会再开一个空播放器窗口）；
+   *   · unsupported —— 引擎缺失 / 无做种 / 无外部播放器：回到 A 的「人话原因 + 剪贴板兜底」。
+   */
+  private async tryMagnetPlay(magnet: string, reason: string, r: PlayResult): Promise<PlayResult> {
+    const engine = this.torrentPlay;
+    const fallback = (why: string): PlayResult => {
+      this.logger.w(`play: 磁力未能起播（${why}）→ 复制链接兜底`);
+      return {
+        ...r,
+        parse: 1,
+        url: '',
+        playUrl: '',
+        message: `${why}。磁力链接已复制到剪贴板，可用 qBittorrent / 迅雷 / Motrix 等工具下载播放`,
+        externalLink: magnet,
+      };
+    };
+    if (!engine) return fallback(reason);
+    try {
+      const out = await engine.open(magnet);
+      if (out.kind === 'inline') {
+        this.logger.i(`play: 磁力起播（BT 内联）「${out.title}」→ ${out.url}`);
+        return { ...r, parse: 0, url: out.url, playUrl: '', header: undefined };
+      }
+      if (out.kind === 'external') {
+        this.logger.i(`play: 磁力起播（外部播放器「${out.player}」）「${out.title}」`);
+        return {
+          ...r,
+          parse: 1,
+          url: '',
+          playUrl: '',
+          message: `已用「${out.player}」打开播放（该格式浏览器不支持，交给外部播放器边下边播）`,
+        };
+      }
+      return fallback(out.reason);
+    } catch (e) {
+      return fallback(`BT 引擎异常（${(e as Error).message.slice(0, 60)}）`);
+    }
+  }
+
+  /**
    * ★ 2026-09-24：`parse===1`（需网页解析/嗅探）的地址 → 走解析接口链拿可直连地址。
    *   成功：parse 置 0，url 换成解析/嗅探结果（带 Referer/UA/Cookie 经 /play 注入）；
    *   失败：保留 parse=1 并附 `message`，渲染层据它提示（替代原「桌面版暂不支持」的笼统说法）。
@@ -1690,6 +1910,37 @@ export class SpiderHost {
   }
   get lives() {
     return this.config?.lives ?? [];
+  }
+
+  /**
+   * ★ 2026-09-29 EPG：拉取当前直播线路的 XMLTV（磁盘缓存：缺失/非当天/>6h 才回源）→ 解析 → 匹配频道 →
+   * 返回每个频道的「当前 / 下一档」。频道引用由渲染层传入（它已持有 loadLive 的分组，免再拉一次直播源）。
+   * 匹配与时间解析语义对齐 FongMi/TV `EpgParser`。
+   */
+  async loadLiveEpg(index: number, refs: EpgChannelRef[]): Promise<LiveEpgResult> {
+    const lives = this.config?.lives ?? [];
+    const live = lives[Math.min(Math.max(index, 0), Math.max(lives.length - 1, 0))];
+    const list = Array.isArray(refs) ? refs : [];
+    const urls = collectEpgUrls(live?.epg, list);
+    if (!urls.length || !list.length) return { byKey: {} };
+    if (!this.epgStore) {
+      this.epgStore = new EpgStore({ http: this.http, logger: this.logger, dir: join(cacheDir(), 'epg') });
+    }
+    const docs: ParsedXmltv[] = [];
+    for (const u of urls) {
+      try {
+        docs.push(parseXmltv(await this.epgStore.load(u)));
+      } catch (e) {
+        this.logger.w(`EPG 跳过（${u}）：${(e as Error).message}`);
+      }
+    }
+    if (!docs.length) return { byKey: {} };
+    const byPrograms = buildEpgMap(docs, list, live?.timeZone || '');
+    const now = Date.now();
+    const byKey: Record<string, LiveEpgEntry> = {};
+    for (const [k, programs] of Object.entries(byPrograms)) byKey[k] = pickCurrentNext(programs, now);
+    this.logger.i(`EPG：${urls.length} 个地址 / ${Object.keys(byKey).length} 个键命中（线路「${live?.name || index}」）`);
+    return { byKey };
   }
 
   // ---------------------------- 内部 ----------------------------

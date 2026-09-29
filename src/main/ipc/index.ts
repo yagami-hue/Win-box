@@ -1,5 +1,5 @@
 // src/main/ipc/index.ts — 注册所有 IPC handler
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { registerHandler } from '../util/ipcGuard';
 import { fileLogger } from '../util/logger';
@@ -10,22 +10,33 @@ import { nameFromLocalFile } from '../util/importNaming';
 import { join, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IPC } from '../../shared/ipc-channels';
-import { proxySettingsView, setProxySettings, type ProxySettings } from '../net/proxy';
+import { proxySettingsView, setProxySettings, getProxySettings, type ProxySettings } from '../net/proxy';
+import { buildBackupFile, parseBackupFile } from '../settings/backup';
+import type { BackupExportResult, BackupImportResult, BackupSettingsState } from '../../shared/backup';
+import type { DavServer } from '../../shared/webdav';
+import type { DavService } from '../webdav/DavService';
+import type { DlnaCastTarget, DlnaDevice } from '../../shared/dlna';
+import type { DlnaService } from '../dlna/DlnaService';
+import type { UpdateProgress } from '../../shared/update';
+import type { UpdateService } from '../update/UpdateService';
 import { md5Hex } from '../../engine/util/md5';
 // 独立播放器窗口
 import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow } from '../player/PlayerWindow';
 // 老板键
 import { bossKey, BOSS_DEFAULT_ACCEL } from '../bossKey';
+import { playerSettings } from '../player/playerSettings';
+import { detectPlayers, launchPlayer } from '../torrent/externalPlayer';
 import { ok } from '../../shared/ipc-result';
 import type { IpcMainInvokeEvent } from 'electron';
-import type { BossKeySettings, ImportReport, MultiConfigEntry, SiteConfig, SourceBean, SourceMoveDirection, SourceUpdatePatch } from '../../shared/types';
+import type { BossKeySettings, EpgChannelRef, ImportReport, MultiConfigEntry, SiteConfig, SourceBean, SourceMoveDirection, SourceUpdatePatch } from '../../shared/types';
 import type { MetaSettings } from '../../shared/meta';
+import type { PlayerSettings } from '../../shared/player';
 
 function winOf(e: IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(e.sender);
 }
 
-export function registerIpc(host: SpiderHost): void {
+export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService, updater: UpdateService): void {
   const log = fileLogger;
 
   // 自定义无边框窗口控制
@@ -150,6 +161,68 @@ export function registerIpc(host: SpiderHost): void {
     writeFileSync(r.filePath, a.content, 'utf-8'); // 只写新文件，绝不改动任何原始文件
     return { saved: true, path: r.filePath };
   }, log);
+  /**
+   * ★ 2026-09-29 设置备份（导出）：宿主设置与凭据 + 播放偏好 + 代理 + 老板键 + 渲染层 localStorage → 单个 JSON。
+   * ★ 凭据为**明文**（口径见 shared/backup.ts）：换机/重装后也能还原；文件由用户自行保管。
+   */
+  registerHandler(IPC.BACKUP_EXPORT, async (_e: any, renderer: Record<string, string>): Promise<BackupExportResult> => {
+    const w = winOf(_e as IpcMainInvokeEvent);
+    const settings: BackupSettingsState = {
+      ...host.settingsSnapshot(),
+      player: playerSettings.settings,
+      proxy: getProxySettings(),
+      bossKey: bossKey.settings,
+    };
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const file = buildBackupFile(settings, renderer || {}, {
+      exportedAt: new Date().toISOString(),
+      appVersion: app.getVersion(),
+    });
+    const r = await dialog.showSaveDialog(w ?? undefined!, {
+      title: '导出设置备份',
+      defaultPath: `win-box-backup-${stamp}.json`,
+      filters: [{ name: 'Win-Box 备份', extensions: ['json'] }],
+    });
+    if (r.canceled || !r.filePath) return { saved: false, path: '' };
+    writeFileSync(r.filePath, JSON.stringify(file, null, 2), 'utf-8');
+    log.i(`设置备份：已导出（源 ${settings.userConfig.sources.length} / 网盘凭据 ${Object.keys(settings.driveTokens).length} / localStorage ${Object.keys(file.renderer).length} 项）→ ${r.filePath}`);
+    return { saved: true, path: r.filePath };
+  }, log);
+  /** ★ 2026-09-29 设置备份（导入）：校验 → 覆盖各 store → 返回 localStorage 给渲染层写回并刷新 */
+  registerHandler(IPC.BACKUP_IMPORT, async (_e: any): Promise<BackupImportResult> => {
+    const w = winOf(_e as IpcMainInvokeEvent);
+    const picked = await dialog.showOpenDialog(w ?? undefined!, {
+      title: '导入设置备份',
+      properties: ['openFile'],
+      filters: [{ name: 'Win-Box 备份', extensions: ['json'] }],
+    });
+    if (picked.canceled || !picked.filePaths?.[0]) return { ok: false, canceled: true };
+    const path = picked.filePaths[0];
+    let text = '';
+    try {
+      text = readFileSync(path, 'utf-8');
+    } catch (e) {
+      return { ok: false, error: `读取文件失败：${(e as Error).message}` };
+    }
+    const parsed = parseBackupFile(text);
+    if (!parsed.ok) {
+      log.w(`设置备份：导入失败 — ${parsed.error}`);
+      return { ok: false, error: parsed.error };
+    }
+    const s = parsed.file.settings;
+    host.restoreSettings(s);
+    if (s.player) playerSettings.settings = s.player;
+    if (s.proxy) {
+      setProxySettings(s.proxy);
+      host.resetSpidersForProxyChange();
+    }
+    if (s.bossKey) {
+      bossKey.settings = s.bossKey;
+      bossKey.apply();
+    }
+    log.i(`设置备份：已还原（源 ${s.userConfig?.sources?.length ?? 0} / 网盘凭据 ${Object.keys(s.driveTokens || {}).length} / localStorage ${Object.keys(parsed.file.renderer).length} 项）← ${path}`);
+    return { ok: true, path, renderer: parsed.file.renderer };
+  }, log);
   // ★ 播放网盘资源未绑定 cookie → 从任意窗口请求主窗口跳到「点播页」
   //   （网盘绑定入口已统一到源内：点播页 → 该源 → 「网盘绑定」按钮；配置页不再放网盘配置）
   registerHandler(IPC.UI_GOTO_DRIVE_BIND, () => {
@@ -245,8 +318,15 @@ export function registerIpc(host: SpiderHost): void {
     }
   }, log);
   // ★ 2026-09-24：vipFlags 由主进程按订阅顶层 flags 自行决定（渲染层不再传）
-  registerHandler(IPC.VOD_PLAY, (_e: any, a: { key: string; flag: string; id: string }) =>
-    host.play(a.key, a.flag, a.id), log);
+  // ★ 2026-09-29：磁力/电驴这类「桌面版无载体」的播放链接 → 顺手复制到剪贴板，
+  //   用户看到上屏提示后可直接粘进 qBittorrent / 迅雷等工具（见 engine/vod/playLink.ts）。
+  registerHandler(IPC.VOD_PLAY, async (_e: any, a: { key: string; flag: string; id: string }) => {
+    const r = await host.play(a.key, a.flag, a.id);
+    if (r.externalLink) {
+      try { clipboard.writeText(r.externalLink); } catch { /* 剪贴板不可用不影响播放结果 */ }
+    }
+    return r;
+  }, log);
 
   // ---- 独立播放器窗口 ----
   registerHandler(IPC.PLAYER_OPEN, (_e: any, init: any) => {
@@ -295,6 +375,70 @@ export function registerIpc(host: SpiderHost): void {
     return next;
   }, log);
 
+  // ---- ★ 播放偏好（m3u8 去广告开关；本地中继 /play 每轮读一次 → 改后即时生效）----
+  registerHandler(IPC.PLAYER_PREFS_GET, () => playerSettings.settings, log);
+  registerHandler(IPC.PLAYER_PREFS_SET, (_e: any, patch: Partial<PlayerSettings>) => playerSettings.update(patch || {}), log);
+  // ---- ★ 2026-09-29 磁力外部播放器探测（MKV/HEVC 接力用；只列本机已安装的，不启动）----
+  registerHandler(
+    IPC.BT_DETECT_PLAYERS,
+    () => detectPlayers(playerSettings.settings.btExternalPlayer).map((p) => ({ id: p.id, name: p.name, path: p.path })),
+    log,
+  );
+
+  // ★ 2026-09-29 WebDAV 存储（只读）：服务器管理 + 目录浏览；取流走 `/play?dav=<id>`（中继注入 Authorization）
+  registerHandler(IPC.DAV_LIST, () => dav.list(), log);
+  registerHandler(IPC.DAV_SET, (_e: any, s: DavServer) => dav.set(s || ({} as DavServer)), log);
+  registerHandler(IPC.DAV_REMOVE, (_e: any, id: string) => {
+    dav.remove(String(id || ''));
+  }, log);
+  registerHandler(
+    IPC.DAV_BROWSE,
+    (_e: any, a: { id: string; path?: string }) => dav.browse(String(a?.id || ''), a?.path || '/'),
+    log,
+  );
+  /** WebDAV 文件用本机外部播放器接力（mkv/HEVC 等 Chromium 播不了的形态；复用磁力的播放器设置） */
+  registerHandler(IPC.DAV_OPEN_EXTERNAL, (_e: any, url: string) => {
+    const u = String(url || '').trim();
+    if (!u) return { ok: false, error: '地址为空' };
+    const players = detectPlayers(playerSettings.settings.btExternalPlayer);
+    if (!players.length) return { ok: false, error: '未检测到本机播放器（可在配置页「播放」中填写播放器路径）' };
+    const p = players[0];
+    const started = launchPlayer(p.path, u);
+    log.i(`webdav: 外部播放器接力「${p.name}」→ ${u.slice(0, 120)}`);
+    return started ? { ok: true, player: p.name } : { ok: false, error: `无法启动「${p.name}」` };
+  }, log);
+
+  // ★ 2026-09-29 DLNA 投屏：SSDP 发现局域网 MediaRenderer + AVTransport 三动作投屏
+  registerHandler(IPC.DLNA_DISCOVER, () => dlna.discover(), log);
+  registerHandler(IPC.DLNA_CAST, (_e: any, a: { device: DlnaDevice; target: DlnaCastTarget }) =>
+    dlna.cast(a?.device, a?.target || ({ url: '', name: '', positionMs: 0 } as DlnaCastTarget)), log);
+
+  // ★ 2026-09-29 启动强制更新：检查（失败不锁死）→ 代理加速下载 Setup（进度推送）→ 拉起安装程序
+  registerHandler(IPC.UPDATE_CHECK, () => updater.check(), log);
+  registerHandler(IPC.UPDATE_DOWNLOAD, async () => {
+    const push = (p: UpdateProgress): void => {
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (!w.isDestroyed()) w.webContents.send(IPC.UPDATE_PROGRESS, p);
+      }
+    };
+    return updater.download(push);
+  }, log);
+  registerHandler(IPC.UPDATE_INSTALL, async () => {
+    const path = updater.downloadedPath();
+    if (!path) throw new Error('安装包不存在，请重新下载');
+    const r = await updater.launch(path);
+    if (!r.ok) throw new Error(r.error || '无法启动安装程序');
+    // 拉起安装程序后退出本程序，避免占用安装目录文件（NSIS 才能覆盖安装）
+    setTimeout(() => app.quit(), 1500);
+    return { ok: true, path };
+  }, log);
+
   registerHandler(IPC.LIVE_LOAD, (_e: any, index: number) => host.loadLive(index), log);
+  // ★ 2026-09-29 EPG：渲染层把当前分组的频道引用传进来（免再拉一次直播源）
+  registerHandler(
+    IPC.LIVE_EPG,
+    (_e: any, a: { index: number; channels: EpgChannelRef[] }) => host.loadLiveEpg(Number(a?.index) || 0, a?.channels || []),
+    log,
+  );
   registerHandler('live:meta', () => host.lives, log);
 }

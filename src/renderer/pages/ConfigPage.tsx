@@ -10,8 +10,10 @@ import type { AuditItem, SourceDebugReport } from '../../shared/types';
 import { applyTheme, currentTheme } from '../lib/theme';
 import { THEME_LABELS, type Theme } from '../lib/themeTokens';
 import { DEFAULT_META_SETTINGS, type MetaSettings, type MetaSource } from '../../shared/meta';
+import { DEFAULT_PLAYER_SETTINGS, type PlayerSettings } from '../../shared/player';
+import type { DavServer } from '../../shared/webdav';
 
-type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'appearance' | 'shortcut' | 'network';
+type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'storage' | 'appearance' | 'play' | 'shortcut' | 'network' | 'backup';
 
 /** ★ 2026-09-24：元数据来源策略选项（封面与简介共用；「仅 TMDB」需用户先填自己的 API） */
 const META_SOURCE_OPTS: Array<{ v: MetaSource; label: string; hint: string }> = [
@@ -118,6 +120,53 @@ export default function ConfigPage() {
       setMetaMsg({ text: '✓ 已保存，立即生效。', kind: 'ok' });
     } catch (e) {
       setMetaMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
+    }
+  };
+
+  // ---- ★ 播放偏好（m3u8 去广告；改后本地中继 /play 即时生效，无需重启）----
+  const [playPrefs, setPlayPrefs] = useState<PlayerSettings>({ ...DEFAULT_PLAYER_SETTINGS });
+  const [playMsg, setPlayMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  useEffect(() => {
+    client.playerPrefsGet().then((s) => setPlayPrefs(s)).catch(() => undefined);
+  }, []);
+  const toggleM3u8Purify = async (on: boolean) => {
+    try {
+      const s = await client.playerPrefsSet({ m3u8Purify: on });
+      setPlayPrefs(s);
+      setPlayMsg({ text: on ? '已开启：播放点播时清除清单中的广告分段' : '已关闭', kind: 'ok' });
+    } catch (e) {
+      setPlayMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
+    }
+  };
+  // ★ 2026-09-29 磁力（BT）：MKV/HEVC 交给外部播放器边下边播（留空 = 自动探测常见安装位置）
+  const [btPlayerDraft, setBtPlayerDraft] = useState<string | null>(null);
+  const [btPlayers, setBtPlayers] = useState<Array<{ id: string; name: string; path: string }>>([]);
+  const [btMsg, setBtMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  const btPlayerValue = btPlayerDraft ?? playPrefs.btExternalPlayer;
+  const detectBtPlayers = async () => {
+    try {
+      const list = await client.btDetectPlayers();
+      setBtPlayers(list);
+      setBtMsg(
+        list.length
+          ? { text: `检测到 ${list.length} 个：${list.map((p) => p.name).join('、')}（点名字填入路径）`, kind: 'ok' }
+          : { text: '未检测到常见播放器：可安装 PotPlayer / VLC / mpv / MPC-HC，或手动粘贴播放器 exe 路径', kind: 'err' },
+      );
+    } catch (e) {
+      setBtMsg({ text: `检测失败：${(e as Error).message}`, kind: 'err' });
+    }
+  };
+  const saveBtPlayer = async () => {
+    try {
+      const s = await client.playerPrefsSet({ btExternalPlayer: btPlayerValue.trim() });
+      setPlayPrefs(s);
+      setBtPlayerDraft(null);
+      setBtMsg({
+        text: s.btExternalPlayer ? '已保存：磁力的 MKV / HEVC 将用该播放器打开' : '已清空：恢复自动检测（PotPlayer → VLC → mpv → MPC-HC）',
+        kind: 'ok',
+      });
+    } catch (e) {
+      setBtMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
     }
   };
 
@@ -473,15 +522,125 @@ export default function ConfigPage() {
     finally { setDiagBusy(false); }
   }
 
+  // ---- ★ 2026-09-29 设置备份（导出/导入；含渲染层 localStorage，观看历史在 tvboxUiMemory 里）----
+  const [bkMsg, setBkMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  const [bkBusy, setBkBusy] = useState(false);
+
+  function collectLocalStorage(): Record<string, string> {
+    const out: Record<string, string> = {};
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k) continue;
+        const v = localStorage.getItem(k);
+        if (typeof v === 'string') out[k] = v;
+      }
+    } catch { /* 存储不可用 → 仅备份主进程侧设置 */ }
+    return out;
+  }
+
+  async function doBackupExport() {
+    setBkBusy(true); setBkMsg(null);
+    try {
+      const r = await client.backupExport(collectLocalStorage());
+      setBkMsg(r.saved ? { text: `已导出到：${r.path}`, kind: 'ok' } : { text: '已取消导出', kind: 'ok' });
+    } catch (e) {
+      setBkMsg({ text: (e as Error).message, kind: 'err' });
+    } finally {
+      setBkBusy(false);
+    }
+  }
+
+  async function doBackupImport() {
+    if (!window.confirm('导入备份会覆盖当前的设置、凭据与观看历史，确定继续？')) return;
+    setBkBusy(true); setBkMsg(null);
+    try {
+      const r = await client.backupImport();
+      if (r.canceled) { setBkMsg({ text: '已取消导入', kind: 'ok' }); return; }
+      if (!r.ok) { setBkMsg({ text: r.error || '导入失败', kind: 'err' }); return; }
+      // 把备份里的 localStorage 写回（含观看历史）；主进程侧已由 IPC 落盘
+      try {
+        for (const [k, v] of Object.entries(r.renderer || {})) localStorage.setItem(k, v);
+      } catch { /* ignore */ }
+      setBkMsg({ text: '已还原，正在刷新界面…（部分设置需重启应用完全生效）', kind: 'ok' });
+      window.setTimeout(() => window.location.reload(), 900);
+    } catch (e) {
+      setBkMsg({ text: (e as Error).message, kind: 'err' });
+    } finally {
+      setBkBusy(false);
+    }
+  }
+
+  // ---- ★ 2026-09-29 WebDAV 存储（服务器管理；浏览/播放在「存储」页）----
+  const [davServers, setDavServers] = useState<DavServer[]>([]);
+  const [davDraft, setDavDraft] = useState<DavServer>({ id: '', name: '', url: '', username: '', password: '' });
+  const [davMsg, setDavMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  const [davBusy, setDavBusy] = useState(false);
+
+  async function loadDav() {
+    try {
+      setDavServers(await client.davList());
+    } catch (e) {
+      setDavMsg({ text: (e as Error).message, kind: 'err' });
+    }
+  }
+
+  async function saveDav() {
+    setDavBusy(true); setDavMsg(null);
+    try {
+      const saved = await client.davSet(davDraft);
+      await loadDav();
+      setDavDraft({ id: '', name: '', url: '', username: '', password: '' });
+      setDavMsg({ text: `已保存「${saved.name}」`, kind: 'ok' });
+    } catch (e) {
+      setDavMsg({ text: (e as Error).message, kind: 'err' });
+    } finally {
+      setDavBusy(false);
+    }
+  }
+
+  async function removeDav(s: DavServer) {
+    if (!window.confirm(`确定删除存储「${s.name}」？`)) return;
+    setDavBusy(true); setDavMsg(null);
+    try {
+      await client.davRemove(s.id);
+      if (davDraft.id === s.id) setDavDraft({ id: '', name: '', url: '', username: '', password: '' });
+      await loadDav();
+      setDavMsg({ text: `已删除「${s.name}」`, kind: 'ok' });
+    } catch (e) {
+      setDavMsg({ text: (e as Error).message, kind: 'err' });
+    } finally {
+      setDavBusy(false);
+    }
+  }
+
+  /** 测试连接：保存草稿后列一次根目录（顺带把凭据落到本地加密存储，播放时才用得上） */
+  async function testDav() {
+    setDavBusy(true); setDavMsg(null);
+    try {
+      const saved = await client.davSet(davDraft);
+      const r = await client.davBrowse({ id: saved.id, path: '/' });
+      await loadDav();
+      setDavMsg({ text: `连接成功：${r.path} 下 ${r.entries.length} 项`, kind: 'ok' });
+    } catch (e) {
+      setDavMsg({ text: (e as Error).message, kind: 'err' });
+    } finally {
+      setDavBusy(false);
+    }
+  }
+
   // ---- 选项卡（替代原 <a href="#cfg-*"> 锚点跳转，避免 HashRouter 下触发路由跳到空页）----
   const TABS: { id: TabId; label: string }[] = [
     { id: 'sources', label: '订阅与源' },
     { id: 'health', label: '源健康与维护' },
     { id: 'profiles', label: '配置档案' },
     { id: 'account', label: '凭据' },
+    { id: 'storage', label: '存储' },
     { id: 'appearance', label: '外观' },
+    { id: 'play', label: '播放' },
     { id: 'shortcut', label: '快捷键' },
     { id: 'network', label: '网络' },
+    { id: 'backup', label: '备份' },
   ];
   const CFG_TAB_KEY = 'winbox-cfg-tab';
   // 记住上次打开的选项卡：从配置页跳走再返回时仍停在原 tab
@@ -497,6 +656,12 @@ export default function ConfigPage() {
     setTab(t);
     try { localStorage.setItem(CFG_TAB_KEY, t); } catch { /* ignore */ }
   };
+
+  // ★ 2026-09-29：切到「存储」tab 时拉取 WebDAV 服务器列表（放在 tab 声明之后，避免 TDZ）
+  useEffect(() => {
+    if (tab === 'storage') void loadDav();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   const extOk = validateExtJson(draft?.ext ?? '');
   const statusCell = (s: SourceBean) => {
@@ -1193,10 +1358,71 @@ export default function ConfigPage() {
       </>
       )}
 
-      {/* ===== 六、快捷键（老板键） ===== */}
+      {/* ===== 六、播放（去广告） ===== */}
+      {tab === 'play' && (
+      <>
+      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>六、播放</h4>
+      <div className="card" id="cfg-m3u8-purify" style={{ padding: 12, marginBottom: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={playPrefs.m3u8Purify}
+              onChange={(e) => void toggleM3u8Purify(e.target.checked)}
+            />
+            <span style={{ fontWeight: 600 }}>m3u8 去广告</span>
+          </label>
+          <span className="muted" style={{ fontSize: 11 }}>
+            点播清单播放前自动删掉广告分段（切片路径/域名、订阅规则、SCTE-35、切片时长特征）。
+            启发式清洗，默认关闭；仅对点播生效，删到段才替换清单。
+          </span>
+          {playMsg && (
+            <span className={playMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0 }}>
+              {playMsg.text}
+            </span>
+          )}
+        </div>
+      </div>
+      {/* ★ 2026-09-29 磁力（BT）外部播放器：MKV / HEVC 浏览器播不了 → 交给它边下边播 */}
+      <div className="card" id="cfg-bt-player" style={{ padding: 12, marginBottom: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <span style={{ fontWeight: 600 }}>磁力外部播放器（MKV / HEVC）</span>
+          <span className="muted" style={{ fontSize: 11 }}>
+            磁力里的 MKV / HEVC 浏览器不能直接播：内置 BT 引擎边下边播时交给这里的播放器。留空 = 自动检测。
+          </span>
+          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <input
+              placeholder="播放器 exe 路径（留空 = 自动检测 PotPlayer / VLC / mpv / MPC-HC）…"
+              value={btPlayerValue}
+              style={{ flex: 1 }}
+              onChange={(e) => setBtPlayerDraft(e.target.value)}
+            />
+            <button className="primary" onClick={() => void saveBtPlayer()}>保存</button>
+            <button onClick={() => void detectBtPlayers()}>检测</button>
+          </div>
+          {btPlayers.length > 0 && (
+            <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+              {btPlayers.map((p) => (
+                <span key={p.path} className="tag" title={p.path} onClick={() => setBtPlayerDraft(p.path)}>
+                  {p.name}
+                </span>
+              ))}
+            </div>
+          )}
+          {btMsg && (
+            <span className={btMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0 }}>
+              {btMsg.text}
+            </span>
+          )}
+        </div>
+      </div>
+      </>
+      )}
+
+      {/* ===== 七、快捷键（老板键） ===== */}
       {tab === 'shortcut' && (
       <>
-      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>六、快捷键（老板键）</h4>
+      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>七、快捷键（老板键）</h4>
 {/* 老板键：全局快捷键一键隐藏/恢复（视频自动暂停静音） */}
       <div className="card" id="cfg-shortcut" style={{ padding: 12, marginBottom: 16 }}>
         {bossKey ? (
@@ -1257,10 +1483,10 @@ export default function ConfigPage() {
       </>
       )}
 
-      {/* ===== 七、网络（代理） ===== */}
+      {/* ===== 八、网络（代理） ===== */}
       {tab === 'network' && (
       <>
-      <h4 style={{ margin: '18px 0 8px' }}>七、网络（代理）</h4>
+      <h4 style={{ margin: '18px 0 8px' }}>八、网络（代理）</h4>
       <div className="card" style={{ padding: 12, marginBottom: 16 }}>
         {proxy ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -1299,6 +1525,89 @@ export default function ConfigPage() {
         ) : (
           <div className="empty">加载中…</div>
         )}
+      </div>
+      </>
+      )}
+
+      {tab === 'storage' && (
+      <>
+      <h4 style={{ margin: '18px 0 8px' }}>十、WebDAV 存储</h4>
+      <div className="card" style={{ padding: 12, marginBottom: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <span className="muted" style={{ fontSize: 12 }}>
+            在「存储」页浏览并播放自建存储里的视频。取流时凭据由本机中继注入，不会出现在播放地址里。
+          </span>
+          <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+            <span className="muted" style={{ fontSize: 11, flex: 'none', width: 48 }}>名称</span>
+            <input style={{ width: 170 }} placeholder="我的 OpenList" value={davDraft.name} onChange={(e) => setDavDraft((d) => ({ ...d, name: e.target.value }))} />
+            <span className="muted" style={{ fontSize: 11, flex: 'none', width: 48 }}>地址</span>
+            <input style={{ width: 320, fontFamily: 'monospace' }} placeholder="https://host:5244/dav" value={davDraft.url} onChange={(e) => setDavDraft((d) => ({ ...d, url: e.target.value }))} />
+          </div>
+          <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+            <span className="muted" style={{ fontSize: 11, flex: 'none', width: 48 }}>用户名</span>
+            <input style={{ width: 170 }} value={davDraft.username} onChange={(e) => setDavDraft((d) => ({ ...d, username: e.target.value }))} />
+            <span className="muted" style={{ fontSize: 11, flex: 'none', width: 48 }}>密码</span>
+            <input style={{ width: 170 }} type="password" value={davDraft.password} onChange={(e) => setDavDraft((d) => ({ ...d, password: e.target.value }))} />
+            <button className="primary" disabled={davBusy} onClick={() => void saveDav()}>{davDraft.id ? '保存修改' : '添加'}</button>
+            <button disabled={davBusy || !davDraft.url} onClick={() => void testDav()}>测试连接</button>
+            {davDraft.id && (
+              <button disabled={davBusy} onClick={() => setDavDraft({ id: '', name: '', url: '', username: '', password: '' })}>取消编辑</button>
+            )}
+          </div>
+          {davMsg && <span className={davMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0 }}>{davMsg.text}</span>}
+        </div>
+      </div>
+      <div className="card" style={{ padding: 12, marginBottom: 16 }}>
+        {davServers.length ? (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left', padding: '4px 6px' }}>名称</th>
+                <th style={{ textAlign: 'left', padding: '4px 6px' }}>地址</th>
+                <th style={{ textAlign: 'left', padding: '4px 6px' }}>用户名</th>
+                <th style={{ textAlign: 'right', padding: '4px 6px' }}>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {davServers.map((s) => (
+                <tr key={s.id}>
+                  <td style={{ padding: '4px 6px' }}>{s.name}</td>
+                  <td style={{ padding: '4px 6px', fontFamily: 'monospace' }}>{s.url}</td>
+                  <td style={{ padding: '4px 6px' }}>{s.username || '—'}</td>
+                  <td style={{ padding: '4px 6px', textAlign: 'right' }}>
+                    <button onClick={() => { setDavDraft({ ...s }); setDavMsg(null); }}>编辑</button>{' '}
+                    <button onClick={() => void removeDav(s)}>删除</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="empty">还没有添加存储</div>
+        )}
+      </div>
+      </>
+      )}
+
+      {tab === 'backup' && (
+      <>
+      <h4 style={{ margin: '18px 0 8px' }}>九、设置备份</h4>
+      <div className="card" style={{ padding: 12, marginBottom: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <span className="muted" style={{ fontSize: 12 }}>
+            备份内容：订阅源与档案 · 网盘 Cookie · 字幕 / TMDB 凭据 · 弹幕与播放偏好 · 代理 · 快捷键 · 外观 · 观看历史与收藏。
+          </span>
+          <span className="muted" style={{ fontSize: 12 }}>
+            ⚠ 凭据（网盘 Cookie / 接口密钥）在备份文件里是<b>明文</b>，便于换机或重装后还原 —— 请自行妥善保管，不要外传。
+          </span>
+          <div className="row" style={{ alignItems: 'center', gap: 10 }}>
+            <button className="primary" disabled={bkBusy} onClick={() => void doBackupExport()}>导出设置备份</button>
+            <button disabled={bkBusy} onClick={() => void doBackupImport()}>导入设置备份</button>
+            {bkMsg && (
+              <span className={bkMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0 }}>{bkMsg.text}</span>
+            )}
+          </div>
+        </div>
       </div>
       </>
       )}

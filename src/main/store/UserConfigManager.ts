@@ -164,6 +164,14 @@ export class UserConfigManager {
     return structuredClone(this.snap);
   }
 
+  /**
+   * ★ 2026-09-29 设置备份还原：整份替换（走与启动读取同一条归一化 + 落盘 + 变更回调路径）。
+   * 与导入（replaceFromImport）不同：这里是**还原**，保留备份里的 sources/lives/profiles/ui 原样。
+   */
+  restore(raw: UserConfig): void {
+    this.apply(this.normalizeLoaded(raw));
+  }
+
   sources(): SourceBean[] {
     return this.snap.sources.map((s) => ({ ...s }));
   }

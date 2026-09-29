@@ -76,6 +76,8 @@ export interface LiveBean {
   epg: string;
   playerType: string;
   timeout: number; // clamp [5,30]
+  /** ★ 2026-09-29 EPG：直播线路时区（IANA，如 Asia/Shanghai）；空/缺省 = 本机时区（对齐 FongMi `Live.getZoneId`） */
+  timeZone?: string;
   header?: Record<string, string>;
   ua?: string;
 }
@@ -108,6 +110,35 @@ export interface LiveLine {
   index: number; // 从 1 起
   name: string; // 无 $ 时 = "源" + index
   url: string;
+}
+
+// ---------- 直播 EPG（节目单） ----------
+/** 单档节目（对齐 FongMi `EpgData`：标题 + HH:mm 起止 + epoch 起止） */
+export interface EpgProgram {
+  title: string;
+  start: string; // HH:mm（live.timeZone 时区）
+  end: string; // HH:mm
+  startTime: number; // epoch ms
+  endTime: number; // epoch ms
+}
+
+/** EPG 频道匹配引用（渲染层从 LiveChannel 组装；`epg` 为频道级 XMLTV 地址，可空） */
+export interface EpgChannelRef {
+  tvgId: string;
+  tvgName: string;
+  name: string;
+  epg?: string;
+}
+
+/** 某频道的「当前 / 下一档」（主进程按请求时刻从节目表算出） */
+export interface LiveEpgEntry {
+  current?: EpgProgram;
+  next?: EpgProgram;
+}
+
+/** `live:epg` 返回：键（tvg-id / tvg-name / 频道名）→ 当前与下一档 */
+export interface LiveEpgResult {
+  byKey: Record<string, LiveEpgEntry>;
 }
 
 // ---------- 点播 ----------
@@ -227,6 +258,11 @@ export interface PlayResult {
   jx?: number | string;
   /** ★ 播放地址属于「cookie 型」网盘且该 provider 未绑定 → 渲染层提示去配置页绑定（值为网盘 provider，如 quark/uc/baidu/115） */
   needDriveCookieBind?: string;
+  /**
+   * ★ 2026-09-29：桌面版无载体的原始链接（磁力 / 电驴）——`url` 置空 + `message` 上屏时一并给出，
+   * 主进程把它复制到剪贴板（用户可直接粘进 qBittorrent / 迅雷等工具）。见 `engine/vod/playLink.ts`。
+   */
+  externalLink?: string;
 }
 
 // ---------- TMDB 元数据补全（源缺封面/缺简介时的兜底，主进程侧查询） ----------
@@ -436,7 +472,8 @@ export interface ProxyRule {
 // ---------- 宿主从 engine 注入的能力（T04 实现，T02 仅定义） ----------
 export interface HttpRequest {
   url: string;
-  method?: 'get' | 'post' | 'head';
+  /** ★ 2026-09-29 增加 `propfind`（WebDAV 列目录）；HttpClient 统一转大写后交给 undici */
+  method?: 'get' | 'post' | 'head' | 'propfind';
   headers?: Record<string, string>;
   body?: string;
   data?: unknown;

@@ -9,21 +9,68 @@ import { fileLogger } from './util/logger';
 import { applyWindowCorner } from './util/windowCorner';
 import { bossKey } from './bossKey';
 import { playerWindow, onPlayerWindowClosed } from './player/PlayerWindow';
+import { playerSettings } from './player/playerSettings';
+import { hostRegexFor } from '../engine/util/m3u8Purify';
+import { TorrentPlay } from './torrent/torrentPlay';
+import { DavService } from './webdav/DavService';
+import { DlnaService } from './dlna/DlnaService';
+import { UpdateService } from './update/UpdateService';
+import { DavStore } from './store/DavStore';
+import { JsonStore } from './store/JsonStore';
+import { userDataDir } from './util/paths';
+import { safeStorageDriveCodec } from './util/driveCodec';
 
 // esbuild 打成 CJS：__dirname 由 Node 提供（= dist/）。资源在 dist/../../resources。
 declare const __dirname: string;
 
 let mainWindow: BrowserWindow | null = null;
 const host = new SpiderHost();
-const proxy = new LocalProxyServer(fileLogger, () => host.driveList());
+/**
+ * ★ 2026-09-29：磁力（BT）引擎（用户选定方案 B）—— aria2c sidecar + 本机中继 `/bt` + 外部播放器接力。
+ * 懒启动（首次磁力播放才拉起 aria2c），退出时 dispose（另有 `--stop-with-process` 兜底防孤儿）。
+ */
+const torrent = new TorrentPlay(fileLogger, () => playerSettings.settings.btExternalPlayer);
+host.torrentPlay = torrent;
+/**
+ * ★ 2026-09-29 WebDAV 存储（用户选定「WebDAV 直连」）：服务器与凭据加密落盘，
+ * 浏览走 PROPFIND、播放走 `/play?dav=<id>` 由中继注入 Authorization（凭据绝不进 URL）。
+ */
+const dav = new DavService(
+  new DavStore(new JsonStore(join(userDataDir(), 'webdav-servers.json')), fileLogger, safeStorageDriveCodec()),
+  fileLogger,
+);
+/** ★ 2026-09-29 DLNA 投屏（SSDP 发现 + AVTransport 三动作；对位 CatClaw Dlna.cs = TVBox osc/dlna） */
+const dlna = new DlnaService(fileLogger);
+/**
+ * ★ 2026-09-29 启动强制更新：本地版本低于 GitHub 最新 Release 时强制更新（不更新不可用）——
+ *   查 `api.github.com`（失败不锁死）→ 代理加速下载 Setup → 拉起安装程序并退出本程序。
+ */
+const updater = new UpdateService(fileLogger);
+const proxy = new LocalProxyServer(
+  fileLogger,
+  () => host.driveList(),
+  // ★ 2026-09-29 m3u8 去广告注入（默认关，配置页「播放」可开）：
+  //   开关每轮清单回源时现读（改后即时生效）；规则用当前订阅的 rules[].regex 按 host 匹配。
+  {
+    enabled: () => playerSettings.settings.m3u8Purify,
+    rulesFor: (url) => hostRegexFor(url, host.siteConfig?.rules),
+  },
+  // ★ 2026-09-29 WebDAV 取流认证（凭据只在主进程加密存储里）
+  (id) => dav.authHeader(id),
+);
 // ★ 把 /play 中继的真实转发字节速率推给渲染层（播放器「缓存中」实时网速）
-proxy.onSpeed = (kbs) => {
+const pushSpeed = (kbs: number): void => {
   for (const w of BrowserWindow.getAllWindows()) {
     if (!w.isDestroyed()) w.webContents.send('net:speed', kbs);
   }
 };
+proxy.onSpeed = pushSpeed;
+// ★ 2026-09-29：BT 下载速率走同一条通道（/bt 中继写回字节 + aria2 下载速率）→ 播放器「缓存中 x MB/s」
+torrent.onSpeed = pushSpeed;
 // ★ 2026-09-26：壳/蜘蛛的宿主代理（`/proxy/<jvmPort>?do=proxy&key=…`）被访问 → 钉住那个 JVM
 proxy.onSpiderProxy = (port) => host.pinSpiderProxy(port);
+// ★ 2026-09-29：`/bt/<hash>/<idx>` 取流口（Range + piece 门控 + 本地读盘）
+proxy.bt = torrent;
 
 function isDev(): boolean {
   return !app.isPackaged && process.env.NODE_ENV !== 'production';
@@ -139,7 +186,7 @@ app.whenReady().then(async () => {
   } catch (e) {
     fileLogger.w('播放诊断初始化失败：' + (e as Error).message);
   }
-  registerIpc(host);
+  registerIpc(host, dav, dlna, updater);
   // 老板键：注入窗口提供者（主窗口 + 播放器窗口）并按上次设置注册全局快捷键
   bossKey.start(() => {
     const ws: BrowserWindow[] = [];
@@ -180,6 +227,12 @@ app.on('will-quit', () => {
   }
   try {
     host.dispose();
+  } catch {
+    /* ignore */
+  }
+  try {
+    // ★ 2026-09-29：停 BT 引擎（回收到 win-quit 这一步，保证不留 aria2c 孤儿进程）
+    torrent.dispose();
   } catch {
     /* ignore */
   }

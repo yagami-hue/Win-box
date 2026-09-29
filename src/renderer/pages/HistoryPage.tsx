@@ -55,6 +55,8 @@ export default function HistoryPage() {
   const [wave, setWave] = useState(0);
   /** 最近一条被移除的记录：非空时显示"撤销"条。整条快照，撤销即无损还原。 */
   const [lastDeleted, setLastDeleted] = useState<WatchHistory | null>(null);
+  /** ★ 2026-09-29：历史来源已不在当前订阅等提示（播放前切换来源失败时上屏） */
+  const [notice, setNotice] = useState('');
   /** ★ 2026-09-26：源 key → 源名（左上角标「来自哪个源」，不再重复显示片名） */
   const [srcNames, setSrcNames] = useState<Record<string, string>>({});
   /** ★ 2026-09-26：检测到「有更新」的历史（键 = url） */
@@ -208,35 +210,52 @@ export default function HistoryPage() {
   }, []);
 
   const play = (it: WatchHistory) => {
-  // ★★ 历史续播 = 复用「详情页 → 独立播放器窗口」链路（该路径已验证可用）：
-  //   构造单集 PlayerInit（原始 episode url + flag），播放器窗口内重新 client.play
-  //   → 夸克源会**重新转存拿新直链** → startTime 自动 seek 到上次进度。
-  //   不再走主窗口内嵌 PlayPage（依赖 nav state/直链，release78 实测不稳）。
-  // ★ 2026-09-20 修复：本页 items 是挂载时的内存快照 —— 播放器窗口关闭时刚把最新进度
-  //   写入 localStorage，若直接用 it 续播会回到**上次打开位置**而非快进后的位置。
-  //   故点开前重读该 url 的最新记录（updatedAt 最新），拿不到才回退快照。
-  const latest = loadLatestWatch(it.url) || it;
-  const base = (latest.name || '').split(' - ')[0] || latest.name || '';
-  void client.playerOpen({
-    key: latest.sourceKey || '',
-    flag: latest.flag || '',
-    episodes: [{ name: latest.remarks || '播放', url: latest.rawUrl || latest.url }],
-    epIndex: 0,
-    title: base,
-    subtitleTitle: base,
-    lastUrl: '', // 不直接用旧直链，交给播放器窗口重新解析/转存
-    lastName: latest.name || '播放',
-    startTime: latest.time,
-    meta: {
-      pic: latest.pic,
-      remarks: latest.remarks,
-      sourceName: latest.sourceName,
-      vodId: latest.vodId,
-      fromKey: latest.sourceKey,
-      id: latest.vodId,
-    },
-  });
-};
+    // ★★ 历史续播 = 复用「详情页 → 独立播放器窗口」链路（该路径已验证可用）：
+    //   构造单集 PlayerInit（原始 episode url + flag），播放器窗口内重新 client.play
+    //   → 夸克源会**重新转存拿新直链** → startTime 自动 seek 到上次进度。
+    //   不再走主窗口内嵌 PlayPage（依赖 nav state/直链，release78 实测不稳）。
+    // ★ 2026-09-20 修复：本页 items 是挂载时的内存快照 —— 播放器窗口关闭时刚把最新进度
+    //   写入 localStorage，若直接用 it 续播会回到**上次打开位置**而非快进后的位置。
+    //   故点开前重读该 url 的最新记录（updatedAt 最新），拿不到才回退快照。
+    const latest = loadLatestWatch(it.url) || it;
+    const base = (latest.name || '').split(' - ')[0] || latest.name || '';
+    // ★ 2026-09-29（用户报「切换订阅/接口后，历史播放找不到直接无法播放」）：
+    //   历史记录自带来源 key（sourceKey）→ 播放前**先把当前源切回该接口**再解析播放。
+    //   `setActiveSource` 是 `ui` 类变更（宿主立即返回，不清缓存/不重跑源），开销可忽略。
+    const sk = (latest.sourceKey || '').trim();
+    setNotice('');
+    void (async () => {
+      if (sk) {
+        try {
+          const cfg = await client.cfgGet();
+          const exists = (cfg.sources || []).some((s) => s.key === sk);
+          if (exists && cfg.ui?.activeSourceKey !== sk) await client.cfgSetActiveSource(sk);
+          else if (!exists) setNotice(`历史来源「${latest.sourceName || sk}」已不在当前订阅中，已按现有配置尝试播放`);
+        } catch {
+          /* 读取/切换失败不阻塞播放（仍按记录里的 key 解析） */
+        }
+      }
+      void client.playerOpen({
+        key: latest.sourceKey || '',
+        flag: latest.flag || '',
+        episodes: [{ name: latest.remarks || '播放', url: latest.rawUrl || latest.url }],
+        epIndex: 0,
+        title: base,
+        subtitleTitle: base,
+        lastUrl: '', // 不直接用旧直链，交给播放器窗口重新解析/转存
+        lastName: latest.name || '播放',
+        startTime: latest.time,
+        meta: {
+          pic: latest.pic,
+          remarks: latest.remarks,
+          sourceName: latest.sourceName,
+          vodId: latest.vodId,
+          fromKey: latest.sourceKey,
+          id: latest.vodId,
+        },
+      });
+    })();
+  };
 
   const openDetail = (it: WatchHistory) => {
     if (it.sourceKey && it.vodId) nav(`/detail/${encodeURIComponent(it.sourceKey)}/${encodeURIComponent(it.vodId)}`);
@@ -289,6 +308,13 @@ export default function HistoryPage() {
           </span>
           <button className="linkbtn" onClick={undo}>撤销</button>
           <button className="linkbtn muted-btn" onClick={() => setLastDeleted(null)}>关闭</button>
+        </div>
+      )}
+      {/* ★ 2026-09-29：来源已不在当前订阅等提示 */}
+      {notice && (
+        <div className="hist-undo" role="status">
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{notice}</span>
+          <button className="linkbtn muted-btn" onClick={() => setNotice('')}>关闭</button>
         </div>
       )}
       <div className="content" style={{ padding: '12px 14px' }}>

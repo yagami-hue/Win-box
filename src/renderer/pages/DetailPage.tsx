@@ -9,10 +9,17 @@ import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 import { pickCover } from '../lib/coverPick';
 import { formatEpisodeLabel } from '../lib/epName';
 import { makeStaleGuard } from '../lib/staleGuard';
+import { detailIsEmpty } from '../../engine/config/sourceKind';
 import HScrollRow from '../components/HScrollRow';
 import HeroBackdrop from '../components/HeroBackdrop';
 import DriveBindModal from '../components/DriveBindModal';
 import { useTheme } from '../lib/theme';
+
+/**
+ * ★ 2026-09-29：本会话已因「该源无剧集详情」自动跳到全源搜索的 item（键 = `<key>:<id>`）。
+ *   模块级（跨挂载保留）——用户从搜索结果返回时不再被重复跳转。
+ */
+const AUTO_AGG_DONE = new Set<string>();
 
 export default function DetailPage({
   onPlay,
@@ -54,6 +61,8 @@ export default function DetailPage({
   /** 本次解析对应的「意图」（源|线路|集）：同一意图的重复点击仍按老行为忽略，避免慢源被连点两次解析 */
   const playIntentRef = useRef('');
   const memKey = `${decodeURIComponent(key || '')}:${decodeURIComponent(id || '')}`;
+  /** ★ 2026-09-29：本会话已「无详情 → 自动全源搜索」跳过的 item（返回时不再重复跳） */
+  const autoAggRef = useRef(AUTO_AGG_DONE.has(memKey));
   /** ★ 2026-09-24：展示用片名 —— 详情自带优先，缺失时用列表页带入的（立播等源详情不返回 vod_name） */
   const displayName = (detail?.name || fromListName || '').trim();
   /** meta（封面/演职员/推荐）查询用片名：去掉「 - 副标题」尾巴 */
@@ -312,6 +321,24 @@ export default function DetailPage({
   const goSearch = (kw: string): void => { nav(`/search?agg=${encodeURIComponent(kw)}`); };
 
   /**
+   * ★ 2026-09-29（用户报「sun.json 有分类/封面，点进去无详情」- 通解）：
+   *   详情**没有可播剧集**（豆瓣类/搜索聚合源/源侧 jar 自校验失败）→ 该详情页对用户无意义，
+   *   自动（一次）用片名做一次**全源聚合搜索**，直接换到能出剧集的源；返回后不再重复跳
+   *   （模块级集合记「本会话已自动跳过的 item」）。
+   */
+  useEffect(() => {
+    if (loading || !detail || autoAggRef.current) return;
+    if (!detailIsEmpty(detail)) return;
+    const kw = (detailName || detail.name || '').trim();
+    if (!kw) return;
+    autoAggRef.current = true;
+    AUTO_AGG_DONE.add(memKey);
+    const t = setTimeout(() => nav(`/search?agg=${encodeURIComponent(kw)}`, { replace: true }), 1200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, detail, detailName]);
+
+  /**
    * ★ 2026-09-24（用户定稿）：Netflix 详情页背景 = **和首页一样的横版剧照轮播**（TMDB backdrops 长图）。
    * ★ 2026-09-25：**背景只允许横版图**（用户报「竖版图被裁剪」）——backdrops 取不到时用
    *   `metaHit.backdrop`（TMDB `backdrop_path`，同为横版剧照）；**绝不再退回竖版封面**。
@@ -381,7 +408,9 @@ export default function DetailPage({
                 </div>
               </div>
             </div>
-            {detail.flags.length > 0 && (
+            {/* ★ 2026-09-29（用户报「有分类/封面，点进去无详情」）：详情为空（豆瓣类/搜索聚合源常见）
+                 → 不再只留个空壳，直接给「全源搜索」出口（换到能出剧集的源） */}
+            {detail.flags.length > 0 && !detailIsEmpty(detail) ? (
               <>
                 <div className="row" style={{ marginBottom: 10 }}>
                   <span className="muted">播放源：</span>
@@ -403,6 +432,15 @@ export default function DetailPage({
                   </button>
                 </div>
               </>
+            ) : (
+              <div className="row" style={{ marginTop: 12, flexWrap: 'wrap', gap: 8 }}>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  该源无剧集详情（豆瓣类/搜索聚合源常见）：用片名做一次全源搜索，换个能播的源
+                </span>
+                <button className={`primary${nf ? ' nf-play-btn' : ''}`} onClick={() => goSearch(detailName || detail.name || '')}>
+                  全源搜索「{detailName || detail.name || ''}」
+                </button>
+              </div>
             )}
             {/* ★ 2026-09-24 详情页增强：类型 / 演员名单 / 相关推荐（TMDB；点击 → 全源搜索） */}
             {genres.length > 0 && (

@@ -228,10 +228,9 @@
 :root[data-theme='apple'] .srcpick-item:hover,
 :root[data-theme='apple'] .sp-item:hover { background: var(--accent-soft); }
 :root[data-theme='apple'] .srcpick-item.active { color: var(--ap-blue); font-weight: 600; }
-:root[data-theme='apple'] .sp-hot-item {
-  background: var(--ap-fill); border: 1px solid transparent; border-radius: 999px; color: #3a3a3c;
-}
-:root[data-theme='apple'] .sp-hot-item:hover { background: var(--ap-fill-hover); border-color: transparent; color: var(--text); }
+/* ★ 2026-09-29：热搜排名徽标 / 搜索历史删除按钮（Apple 皮肤配色对齐 HIG） */
+:root[data-theme='apple'] .sp-rank-no.top { background: var(--ap-blue); }
+:root[data-theme='apple'] .sp-clear { border-color: var(--ap-hairline); color: var(--ap-dim); }
 /* 侧边栏底部「当前源」：低调的玻璃行 */
 :root[data-theme='apple'] .srcpick-side { margin: 6px 2px 0; }
 :root[data-theme='apple'] .srcpick-side .srcpick-name {

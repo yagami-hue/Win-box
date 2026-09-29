@@ -13,6 +13,7 @@ import {
   clearUiMemory,
   saveUiMemory,
   recordWatch,
+  historyGroupKey,
   latestOf,
   watchedEpisodeOf,
   latestEpisodeOf,
@@ -100,7 +101,8 @@ describe('restoreWatch — 撤销（无损还原）', () => {
     deleteWatch(it.url);
     restoreWatch(it);
 
-    expect(uiMem.history.get('u1')).toEqual(it);
+    // ★ 2026-09-29：带来源标识的记录按分组键存放（同片多集合并一条）
+    expect(uiMem.history.get(historyGroupKey({ sourceKey: 'src1', vodId: 'v1' }))).toEqual(it);
   });
 
   it('目标已存在时不覆盖（避免冲掉用户之后的新记录）', () => {
@@ -132,7 +134,8 @@ describe('recordWatch — 续播所需字段（rawUrl/flag）', () => {
       vodId: 'v1',
       time: 123,
     });
-    const it = uiMem.history.get('raw://ep/12?sId=abc') as WatchHistory;
+    // ★ 2026-09-29：带 sourceKey+vodId 的记录按**分组键**存（同片多集合并一条）
+    const it = uiMem.history.get(historyGroupKey({ sourceKey: 'src1', vodId: 'v1' })) as WatchHistory;
     expect(it.rawUrl).toBe('raw://ep/12?sId=abc');
     expect(it.flag).toBe('BD5');
     expect(it.time).toBe(123);
@@ -145,6 +148,61 @@ describe('recordWatch — 续播所需字段（rawUrl/flag）', () => {
     expect(it.rawUrl).toBe('u-r');
     expect(it.flag).toBe('flag1');
     expect(it.time).toBe(66);
+  });
+});
+
+// ★ 2026-09-29（用户报「同一个资源第一集和第二集算两个历史记录」）：同源同片合并为一条
+describe('recordWatch — 同源同片多集合并（分组键）', () => {
+  it('同 sourceKey+vodId 的第1集/第2集只留一条，且字段更新为当前集', () => {
+    recordWatch({
+      url: 'ep1',
+      rawUrl: 'ep1',
+      flag: 'F',
+      name: '狂飙 - 第1集',
+      remarks: '第1集',
+      sourceKey: 'src1',
+      vodId: 'v1',
+      time: 600,
+    });
+    recordWatch({
+      url: 'ep2',
+      rawUrl: 'ep2',
+      flag: 'F',
+      name: '狂飙 - 第2集',
+      remarks: '第2集',
+      sourceKey: 'src1',
+      vodId: 'v1',
+      time: 0,
+    });
+    expect(uiMem.history.size).toBe(1);
+    const it = uiMem.history.get(historyGroupKey({ sourceKey: 'src1', vodId: 'v1' })) as WatchHistory;
+    expect(it.name).toBe('狂飙 - 第2集');
+    expect(it.remarks).toBe('第2集');
+    expect(it.rawUrl).toBe('ep2');
+    // 换集后进度必须归零（不能沿用上一集的 600s）
+    expect(it.time).toBe(0);
+  });
+
+  it('同一集内只更新进度 → 取较大进度、保留来源字段', () => {
+    const meta = { sourceKey: 'src1', vodId: 'v1' };
+    recordWatch({ url: 'ep5', rawUrl: 'ep5', flag: 'F', name: '剧 - 第5集', ...meta, time: 30 });
+    recordWatch({ url: 'ep5', rawUrl: 'ep5', name: '剧 - 第5集', ...meta, time: 900 });
+    const it = uiMem.history.get(historyGroupKey(meta)) as WatchHistory;
+    expect(it.time).toBe(900);
+    expect(it.flag).toBe('F');
+    expect(it.sourceKey).toBe('src1');
+  });
+
+  it('有 sourceKey 无 vodId（同一源内同名）也合并；解析不到标识才退回 url', () => {
+    recordWatch({ url: 'a1', rawUrl: 'a1', name: '某剧 - 第1集', sourceKey: 's' });
+    recordWatch({ url: 'a2', rawUrl: 'a2', name: '某剧 - 第2集', sourceKey: 's' });
+    expect(uiMem.history.size).toBe(1);
+    expect(uiMem.history.get(historyGroupKey({ sourceKey: 's', name: '某剧 - 第2集' }))?.remarks).toBeUndefined();
+
+    recordWatch({ url: 'b1', name: '无来源 - 第1集' });
+    recordWatch({ url: 'b2', name: '无来源 - 第2集' });
+    expect(uiMem.history.has('b1')).toBe(true);
+    expect(uiMem.history.has('b2')).toBe(true);
   });
 });
 

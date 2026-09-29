@@ -103,3 +103,29 @@ export function sourceKindLabel(s: Pick<SourceBean, 'type' | 'api'>): string {
 export function extRelevant(s: Pick<SourceBean, 'type' | 'api'>): boolean {
   return INFO[sourceKindOf(s)].usesExt;
 }
+
+// ---- ★ 2026-09-29（用户报「很多源本质上是豆瓣，他们没有具体详情」）----
+
+/**
+ * 「点击片源应走**全源聚合搜索**而非详情页」的源判据（静态）。
+ *
+ * 依据（实测订阅里的豆瓣类源写法）：`key/name/api/ext` 任一带 `豆瓣` / `douban`。
+ * 这类源是**搜索聚合型**（蜘蛛只做 searchContent，detailContent 返回空或只有简介），
+ * 点进详情页必然「无详情 / 无剧集」；正确姿势是拿片名做一次全源搜索，换到能播的源。
+ *
+ * ★ 只作**点击分流**的加速判据；运行时兜底见 `detailIsEmpty()`（详情确实为空时同口径）。
+ */
+export function isDoubanLikeSource(
+  s: Pick<SourceBean, 'key' | 'name' | 'api' | 'ext'> | null | undefined,
+): boolean {
+  if (!s) return false;
+  const ext = typeof s.ext === 'string' ? s.ext : JSON.stringify(s.ext ?? '');
+  const blob = `${s.key || ''} ${s.name || ''} ${String(s.api || '').split(';')[0]} ${ext}`.toLowerCase();
+  return /豆瓣|douban/.test(blob);
+}
+
+/** 详情结果是否「没有可播剧集」（各 flag 全空）—— 运行时兜底判据 */
+export function detailIsEmpty(d: { episodes?: Record<string, unknown[]> } | null | undefined): boolean {
+  if (!d || !d.episodes) return true;
+  return !Object.values(d.episodes).some((list) => Array.isArray(list) && list.length > 0);
+}

@@ -15,6 +15,22 @@ import type { EngineHost } from '../ports';
 import { UnsupportedSourceError } from '../util/errors';
 import { transformToCjs } from './esmTransform';
 import { buildSandboxGlobals } from './globals';
+import { createLocalUpstream } from './globals/SandboxLocal';
+import { headImportBindings, parseHeadImports, stripHeadImports } from './esmHeadImports';
+
+/**
+ * `assets://js/lib/X.js` → dr_py 仓库的 libs/X.js（drpy2 引擎脚本头部就是这种写法）。
+ *
+ * 由来（对位 CatClawVideo `DrpyJsSpiderRuntime.ResolveModuleUrl`）：安卓侧 `assets://` 指 App 内置
+ * assets/js/lib，桌面没有该资产树 —— 顺序是「**本机 resources/js-lib 优先**（我们已随包
+ * cheerio/crypto-js/gbk/模板/cat/similarity/utils），缺失才按 dr_py 官方仓库同名 lib 远程取」。
+ * 非 assets:// 规格返回空串（调用方走原有相对路径/裸名分支）。
+ */
+function assetLibUrl(spec: string): string {
+  const m = /^assets:\/\/js\/lib\/(.+)$/i.exec((spec || '').trim());
+  if (!m) return '';
+  return `https://raw.githubusercontent.com/hjdhnx/dr_py/main/libs/${m[1]}`;
+}
 
 export interface JsSandboxOptions {
   siteKey: string;
@@ -148,11 +164,23 @@ export class JsSandbox {
       }
       this.spider = spider as Record<string, unknown>;
       this.detectStyle();
+      // ★ drpy2 风格 → local 换**上游语义**（get 缺失返回 ''，见 createLocalUpstream 注释）。
+      //   必须在 forwardInit（drpy 的 init 会读缓存）与首次调用之前完成；沙箱对象属性变更
+      //   对已 context 化的 vm 全局立即可见。
+      if (this.style === 'drpy' && this.globals) {
+        this.globals.local = createLocalUpstream(this.host);
+      }
       this.forwardInit(isCat);
       this.loaded = true;
     } catch (e) {
       if (e instanceof UnsupportedSourceError) throw e;
-      throw new UnsupportedSourceError('SCRIPT_ERROR', `脚本执行失败: ${e instanceof Error ? e.message : String(e)}`);
+      // ★ 2026-09-29：带一行栈帧（minify 脚本只有 1~2 行，位置信息全在列号里）——
+      //   drpy/壳类源排障时「Cannot access 'X' before initialization」这类 TDZ 报错没位置等于没法查
+      const frame = e instanceof Error && e.stack ? (e.stack.split('\n')[1] ?? '').trim() : '';
+      throw new UnsupportedSourceError(
+        'SCRIPT_ERROR',
+        `脚本执行失败: ${e instanceof Error ? e.message : String(e)}${frame ? ` @ ${frame}` : ''}`,
+      );
     }
   }
 
@@ -245,6 +273,19 @@ export class JsSandbox {
   // ------------------------------------------------------------------
   /** 执行一个模块源码（转换 + 预取依赖 + 沙箱内运行），返回 module.exports */
   private async runModule(url: string, source: string): Promise<Record<string, unknown>> {
+    // ★ 2026-09-29：**头部 import 块**走「注册表装配」，不经 esmTransform 生成 `require(...)` 调用 ——
+    //   drpy2 引擎自带 `function require(url){eval(request(url))}`，会遮蔽包装函数的 require 形参，
+    //   在模块头就触发 `MOBILE_UA` TDZ 崩溃（详见 esmHeadImports.ts 文件头）。
+    const heads = parseHeadImports(source);
+    if (heads.length) {
+      const reg = ((this.globals as Record<string, unknown>).__M = ((this.globals as Record<string, unknown>).__M as
+        | Record<string, unknown>
+        | undefined) ?? {});
+      for (const it of heads) {
+        if (reg[it.spec] === undefined) reg[it.spec] = await this.loadImportBinding(it.spec);
+      }
+      source = stripHeadImports(source, heads);
+    }
     let cjs: string;
     try {
       cjs = transformToCjs(source, url);
@@ -252,12 +293,26 @@ export class JsSandbox {
       if (e instanceof UnsupportedSourceError) throw e;
       throw new UnsupportedSourceError('TRANSFORM_FAILED', `转换失败: ${url}`);
     }
+    if (heads.length) cjs = `${headImportBindings(heads)}\n${cjs}`;
     // CJS require 是同步的，import 依赖必须先预取进缓存
     const specs = new Set<string>();
     for (const m of cjs.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)) specs.add(m[1]);
     for (const spec of specs) {
       // 只预取相对/绝对路径模块；裸名库（cheerio/crypto-js/net.js 等）走 require 的同步分支
       if (spec === 'cheerio' || spec === 'crypto-js' || spec.includes('net.js') || spec.includes('utils.js') || spec.includes('模板.js')) continue;
+      // ★ assets://js/lib/X.js（drpy2 引擎头部写法）：本机 js-lib 有就直接用（require 同步命中），
+      //   没有则按 dr_py 仓库同名 lib 预取 —— 失败落空模块（对齐安卓 EMPTY_MODULE_CODE 语义）
+      const assetUrl = assetLibUrl(spec);
+      if (assetUrl) {
+        if (!this.moduleCache.has(assetUrl)) {
+          try {
+            await this.loadModuleAsync(assetUrl);
+          } catch {
+            this.moduleCache.set(assetUrl, {});
+          }
+        }
+        continue;
+      }
       if (!/^\.{0,2}\//.test(spec)) continue;
       let resolved = '';
       try {
@@ -306,11 +361,58 @@ export class JsSandbox {
     }
   }
 
+  /**
+   * 头部 import 的**异步**解析（对位 CatClawVideo `DrpyJsSpiderRuntime.LoadModule`）：
+   * 与 makeRequire 同一套判据，但允许网络取数（本机 js-lib 优先 → assets:// 映射 → 相对/绝对 URL）。
+   * 取不到一律空模块（不抛：头部 import 抛错会毁掉整个源，对齐安卓 EMPTY_MODULE_CODE 语义）。
+   */
+  private async loadImportBinding(spec: string): Promise<unknown> {
+    const g = this.globals as Record<string, unknown>;
+    // ★ 库类**本机 js-lib 构建优先**：TVBox 的 cheerio 构建带 `jinja2` 补丁（drpy2 的 init 直接
+    //   调 `cheerio.jinja2(rule.homeUrl,…)`）——必须给源里点名的那份构建，缺失才回落注入的 npm 版
+    if (spec.includes('cheerio') || spec.includes('crypto-js')) {
+      const local = spec.endsWith('.js') ? this.evalLocalLib(spec) : undefined;
+      if (local !== undefined) return local;
+      return spec.includes('cheerio') ? g.cheerio : g.CryptoJS;
+    }
+    if (spec.includes('net.js')) return { req: g.req, http: g.http };
+    if (spec.includes('utils.js')) return {}; // //bb 字节码不可执行 → 空模块
+    if (spec.includes('模板.js')) return this.getTemplate();
+    if (spec.endsWith('.js')) {
+      const local = this.evalLocalLib(spec);
+      if (local !== undefined) return local;
+    }
+    const target = assetLibUrl(spec) || this.resolveImportSpec(spec);
+    if (!target) return {};
+    try {
+      return await this.loadModuleAsync(target);
+    } catch {
+      return {};
+    }
+  }
+
+  /** 说明符 → 绝对 URL（http(s) 原样；其余相对蜘蛛 api 解析）；解析不了返回空串 */
+  private resolveImportSpec(spec: string): string {
+    if (/^https?:\/\//i.test(spec)) return spec;
+    try {
+      return new URL(spec, this.api).toString();
+    } catch {
+      return '';
+    }
+  }
+
   /** 同步 require —— 预取已进缓存则命中；本地 js-lib 库可直接同步读 */
   private makeRequire(baseUrl: string): (spec: string) => unknown {
     return (spec: string): unknown => {
-      if (spec === 'cheerio' || spec === 'cheerio.min.js') return (this.globals as Record<string, unknown>).cheerio;
-      if (spec === 'crypto-js' || spec === 'crypto-js.js') return (this.globals as Record<string, unknown>).CryptoJS;
+      // ★ 2026-09-29 drpy2/ESM 形态：`assets://js/lib/cheerio.min.js`、`./crypto-js.js` 这类**路径形式**
+      //   与裸名同义（drpy2.min.js 头部就是这种写法）；库类同样**本机 js-lib 构建优先**（见 loadImportBinding）
+      if (spec.includes('cheerio') || spec.includes('crypto-js')) {
+        const local = spec.endsWith('.js') ? this.evalLocalLib(spec) : undefined;
+        if (local !== undefined) return local;
+        return spec.includes('cheerio')
+          ? (this.globals as Record<string, unknown>).cheerio
+          : (this.globals as Record<string, unknown>).CryptoJS;
+      }
       if (spec.includes('net.js')) {
         const g = this.globals as Record<string, unknown>;
         return { req: g.req, http: g.http };
@@ -323,6 +425,9 @@ export class JsSandbox {
       if (spec.endsWith('.js')) {
         const local = this.evalLocalLib(spec);
         if (local !== undefined) return local;
+        // ★ 本机 js-lib 没有 → 用 assets:// 映射出的远程模块（runModule 预取阶段已进缓存）
+        const assetUrl = assetLibUrl(spec);
+        if (assetUrl && this.moduleCache.has(assetUrl)) return this.moduleCache.get(assetUrl);
       }
       // 相对路径 → 预取缓存命中
       try {

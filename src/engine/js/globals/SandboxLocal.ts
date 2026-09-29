@@ -39,3 +39,34 @@ export function createLocal(host: EngineHost): Record<string, unknown> {
     },
   };
 }
+
+/**
+ * drpy 口径的 local（**get 缺失时返回 ''**，即上游 `local.java` 的原始行为）。
+ *
+ * ★ 2026-09-29 为什么必须分两套：上面那套是**用户授权的 hiker 修复** —— 把第二参数当默认值
+ * （`local.get(k, 默认值)` 拿回退值）。而 drpy2 引擎的写法是 `local.get(RKEY, k) || 默认值`
+ * （drpy2.min.js 的 `getItem`），缺失时期望拿到**假值**；沿用上面的修复会返回 **k 本身**
+ * （真值）→ drpy 误判"有缓存"→ 返回错误数据。故识别出 drpy 风格后换成这套上游语义。
+ */
+export function createLocalUpstream(host: EngineHost): Record<string, unknown> {
+  const key = (a: string, b: string): string => `jsRuntime_${a}_${b}`;
+  return {
+    get(a: string, b: string): string {
+      try {
+        return host.kv.get(key(a ?? '', b ?? ''));
+      } catch {
+        return '';
+      }
+    },
+    set(a: string, b: string, v: string): void {
+      try {
+        host.kv.set(key(a ?? '', b ?? ''), v ?? '');
+      } catch { /* swallow */ }
+    },
+    delete(a: string, b: string): void {
+      try {
+        host.kv.delete(key(a ?? '', b ?? ''));
+      } catch { /* swallow */ }
+    },
+  };
+}

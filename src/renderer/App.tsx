@@ -10,8 +10,12 @@ import DiscoverPage from './pages/DiscoverPage';
 import DetailPage from './pages/DetailPage';
 import PlayerPage from './pages/PlayerPage';
 import LivePage from './pages/LivePage';
+// ★ 2026-09-29：WebDAV 存储（只读浏览/播放）
+import StoragePage from './pages/StoragePage';
 import HistoryPage from './pages/HistoryPage';
 import AboutPage from './pages/AboutPage';
+/** ★ 2026-09-29：启动强制更新门禁（本地版本低于 GitHub 最新 Release 时遮挡全界面） */
+import UpdateGate from './components/UpdateGate';
 import { loadUiMemory, saveUiMemory } from './lib/uiMemory';
 import { useTheme } from './lib/theme';
 import { TOP_NAV_THEMES } from './lib/themeTokens';
@@ -24,6 +28,8 @@ const NAV = [
   { to: '/home', label: '点播', ico: '▶' },
   { to: '/history', label: '历史', ico: '🕘' },
   { to: '/live', label: '直播', ico: '📡' },
+  // ★ 2026-09-29（WebDAV 存储）：把自建 OpenList/AList/Nextcloud 等当媒体库浏览播放
+  { to: '/storage', label: '存储', ico: '🗄' },
   { to: '/config', label: '配置', ico: '⚙' },
   // ★ 2026-09-28（用户要求）：最后新增「说明」页（详细免责声明 + GitHub / 爱发电入口）
   { to: '/about', label: '说明', ico: 'ℹ' },
@@ -68,6 +74,14 @@ const AP_ICONS: Record<string, React.ReactNode> = {
       <path d="M8 1.9v1.5M8 12.6v1.5M1.9 8h1.5M12.6 8h1.5M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M12.3 3.7l-1.1 1.1M4.8 11.2l-1.1 1.1" />
     </svg>
   ),
+  // 存储（WebDAV）= externaldrive（外置盘）
+  '/storage': (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2.1" y="3.4" width="11.8" height="9.2" rx="2.2" />
+      <path d="M2.1 9.6h11.8" />
+      <path d="M5.1 11.8h1.6" />
+    </svg>
+  ),
   // 说明 = info.circle
   '/about': (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
@@ -79,7 +93,7 @@ const AP_ICONS: Record<string, React.ReactNode> = {
 
 /** Apple 皮肤侧边栏的**分组**（HIG：侧边栏最多两级、分组标签要简短） */
 const AP_GROUPS: { label: string; items: typeof NAV }[] = [
-  { label: '媒体', items: NAV.filter((n) => ['/', '/home', '/history', '/live'].includes(n.to)) },
+  { label: '媒体', items: NAV.filter((n) => ['/', '/home', '/history', '/live', '/storage'].includes(n.to)) },
   { label: '其他', items: NAV.filter((n) => ['/config', '/about'].includes(n.to)) },
 ];
 
@@ -99,6 +113,14 @@ function PageShell() {
 }
 
 export default function App() {
+  return (
+    <UpdateGate>
+      <AppShell />
+    </UpdateGate>
+  );
+}
+
+function AppShell() {
   const nav = useNavigate();
   const loc = useLocation();
   /** ★ 2026-09-24：四套皮肤（经典深/浅 + Netflix + 哔哩哔哩）；Netflix/B 站用「顶部导航」替代侧边栏
@@ -352,6 +374,8 @@ export default function App() {
         <Route path="/history" element={<HistoryPage />} />
         <Route path="/detail/:key/:id" element={<DetailPage onPlay={onDetailPlay} />} />
         <Route path="/live" element={<LivePage />} />
+        {/* ★ 2026-09-29：WebDAV 存储（只读）—— 浏览自建 OpenList/AList/Nextcloud 等并播放 */}
+        <Route path="/storage" element={<StoragePage />} />
         <Route path="/config" element={<ConfigPage />} />
         <Route path="/about" element={<AboutPage />} />
       </Route>

@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useLocation, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../api/client';
 import type { SourceBean, VodItem, SearchAllReport, AggVodItem, FilterGroup } from '../../shared/types';
 import { sourceAvailability } from '../../engine/vod/sourceAvailability';
+import { isDoubanLikeSource } from '../../engine/config/sourceKind';
 import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSearch';
 import { uiMem, schedulePersist, saveUiMemory, type HomeSearchMem } from '../lib/uiMemory';
 import SourcePicker from '../components/SourcePicker';
@@ -35,6 +36,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const [wd, setWd] = useState('');
   /** ★ 外部入口：/search?agg=<关键词>（详情页演员/推荐、发现页卡片点击跳来）→ 自动执行一次全源搜索 */
   const [searchParams, setSearchParams] = useSearchParams();
+  const nav = useNavigate();
   /** ★ 2026-09-28：用于判断当前是否在 /search 路由（URL 同步搜索词只在该路由做，避免 /home 被改成搜索路由而重挂载） */
   const location = useLocation();
   const [loading, setLoading] = useState(false);
@@ -869,6 +871,22 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const listStyle = !!curSite?.style && /list/i.test(curSite.style);
   const siteCats = curSite?.categories?.filter(Boolean) ?? [];
   /**
+   * ★ 2026-09-29（用户要求）：豆瓣类源**本质是搜索聚合**（蜘蛛只有 searchContent，
+   *   detailContent 为空或仅简介）⇒ 点封面**不进详情页**，改成拿片名做一次全源聚合搜索，
+   *   让用户直接换到「能出剧集」的源。非豆瓣源保持原行为（进详情）。
+   */
+  const goAggSearch = (name: string): void => { nav(`/search?agg=${encodeURIComponent(name)}`); };
+  const openItem = (it: VodItem): void => {
+    if (isDoubanLikeSource(curSite)) { goAggSearch(it.name); return; }
+    onOpenDetail(key, it.id, picOf(it), it.name);
+  };
+  /** 聚合搜索结果卡：来自豆瓣类源的条目同样直接全源搜索（它自己的详情必空） */
+  const openAggItem = (it: AggVodItem): void => {
+    const site = sites.find((s) => s.key === it.sourceKey);
+    if (isDoubanLikeSource(site)) { goAggSearch(it.name); return; }
+    onOpenDetail(it.sourceKey, it.id, aggPicOf(it), it.name);
+  };
+  /**
    * ★ 2026-09-26（用户要求）：**源内网盘绑定** —— 该源是否靠网盘 Cookie 取流（ext 带 Cloud-drive
    *   或蜘蛛类属网盘家族）。是则在源主页给一条横幅 +「网盘绑定」入口，不用再去点源里的「配置」源。
    */
@@ -1052,7 +1070,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                         it={it}
                         pic={aggPicOf(it)}
                         onErr={aggPicErr(it)}
-                        onOpen={() => onOpenDetail(it.sourceKey, it.id, aggPicOf(it), it.name)}
+                        onOpen={() => openAggItem(it)}
                       />
                     ))}
                   </div>
@@ -1176,7 +1194,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 {listStyle ? (
                   <div className="list">
                     {items.map((it) => (
-                      <div key={it.id} className="list-item" onClick={() => onOpenDetail(key, it.id, picOf(it), it.name)}>
+                      <div key={it.id} className="list-item" onClick={() => openItem(it)}>
                         <img src={picOf(it)} onError={picErr(it)} loading="lazy" decoding="async" />
                         <span className="li-name" title={it.name}>{it.name}</span>
                         {it.remarks && <span className="badge">{it.remarks}</span>}
@@ -1186,7 +1204,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 ) : (
                 <div className="grid">
                   {items.map((it) => (
-                    <div key={it.id} className="card-media" onClick={() => onOpenDetail(key, it.id, picOf(it), it.name)}>
+                    <div key={it.id} className="card-media" onClick={() => openItem(it)}>
                       <div className="card">
                         <div style={{ position: 'relative' }}>
                           {/* ★ 空封面（搜索未命中 + 源图坏）→ 渲染占位块，绝不渲染坏图/灰影 */}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveShareFile, extractEpisodeFid, matchTransferredFile, isQuarkSharePlay, isDirNode, isRealFileNode, quarkPlayUrl, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
+import { resolveShareFile, extractEpisodeFid, extractEpisodeName, episodeKeyOf, matchTransferredFile, isQuarkSharePlay, isDirNode, isRealFileNode, quarkPlayUrl, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
 import type { ShareListFetcher } from '../src/main/net/quarkTransfer';
 
 // ★ 会话子目录（tr_xxx）：每次播放落盘唯一目录，规避"上次文件未删完 → 第二次转存同名冲突"
@@ -212,5 +212,60 @@ describe('extractEpisodeFid（episode id 提取内层 fid）', () => {
     expect(extractEpisodeFid('')).toBe('');
     expect(extractEpisodeFid('https://pan.quark.cn/s/abc')).toBe('');
     expect(extractEpisodeFid('{"sId":"abc"}')).toBe('');
+  });
+});
+
+// ★ 2026-09-29（用户报「部分资源夸克播放失败」）：fid 未命中时按集名唯一匹配兜底
+describe('extractEpisodeName / episodeKeyOf（集名兜底）', () => {
+  it('从 episode JSON 提取集名（name / file_name / fileName / title，含转义）', () => {
+    expect(extractEpisodeName('{"sId":"a","name":"第6集.mp4"}')).toBe('第6集.mp4');
+    expect(extractEpisodeName('{"file_name":"Show.S01E06.mkv"}')).toBe('Show.S01E06.mkv');
+    expect(extractEpisodeName('{"title":"剧名\\"特别篇\\""}')).toBe('剧名"特别篇"');
+    expect(extractEpisodeName('https://pan.quark.cn/s/abc')).toBe('');
+  });
+
+  it('集名归一：集号优先（SxxExx / 第N集 / E06 / 06.mp4 / 尾部裸数字）', () => {
+    expect(episodeKeyOf('Show.S01E06.mkv')).toBe('ep6');
+    expect(episodeKeyOf('剧名 第06集.mp4')).toBe('ep6');
+    expect(episodeKeyOf('EP6.mp4')).toBe('ep6');
+    expect(episodeKeyOf('06.mp4')).toBe('ep6');
+    expect(episodeKeyOf('斗罗大陆 120')).toBe('ep120');
+    expect(episodeKeyOf('纯名字')).toBe('纯名字');
+    expect(episodeKeyOf('')).toBe('');
+  });
+});
+
+describe('resolveShareFile — fid 未命中 → 按集名唯一匹配（★ 2026-09-29）', () => {
+  const quiet = { i: () => {}, w: () => {}, e: () => {} };
+  const file = (fid: string, name: string, token = `tk-${fid}`) => ({ fid, dir: false, file_name: name, size: 100, share_fid_token: token });
+  const tree: Record<string, any[]> = {
+    '0': [
+      { fid: 'dir1', dir: true, file_name: '全季' },
+      file('x1', '花絮.mp4'),
+    ],
+    dir1: [
+      file('ep1', '剧名 第01集.mp4', 't1'),
+      file('ep2', '剧名 第02集.mp4', 't2'),
+    ],
+  };
+  const fetcher = async (pdirFid: string, offset: number) => (offset === 0 ? tree[pdirFid] || [] : []);
+
+  it('指定 fid 找不到，但集名唯一命中 → 采用该文件（不再直接失败）', async () => {
+    const r = await resolveShareFile('old-fid-gone', quiet, fetcher, '剧名.第02集.mp4');
+    expect(r?.fid).toBe('ep2');
+    expect(r?.token).toBe('t2');
+  });
+
+  it('集名匹配到多个 → 仍拒绝（避免播错集）', async () => {
+    const dupTree: Record<string, any[]> = {
+      '0': [file('a', '剧名 第02集.mp4'), file('b', '剧名 第02集.mp4')],
+    };
+    const f2 = async (pdirFid: string, offset: number) => (offset === 0 ? dupTree[pdirFid] || [] : []);
+    expect(await resolveShareFile('gone', quiet, f2, '第02集')).toBeNull();
+  });
+
+  it('fid 精确命中时优先（不触发集名兜底）', async () => {
+    const r = await resolveShareFile('ep1', quiet, fetcher, '第02集');
+    expect(r?.fid).toBe('ep1');
   });
 });

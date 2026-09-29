@@ -76,6 +76,26 @@ const api = {
   live: {
     load: (index: number) => invoke(IPC.LIVE_LOAD, index),
     meta: () => invoke('live:meta'),
+    /** ★ 2026-09-29 EPG：传入该线路的频道引用（tvg-id/tvg-name/频道名/频道级 epg），返回各键的当前/下一档 */
+    epg: (index: number, channels: unknown) => invoke(IPC.LIVE_EPG, { index, channels }),
+  },
+  /** ★ 2026-09-29 设置备份：导出（含渲染层 localStorage）/ 导入（返回需写回的 localStorage） */
+  backup: {
+    export: (renderer: unknown) => invoke(IPC.BACKUP_EXPORT, renderer),
+    import: () => invoke(IPC.BACKUP_IMPORT),
+  },
+  /** ★ 2026-09-29 WebDAV 存储（只读）：服务器管理 + 目录浏览 + 外部播放器接力 */
+  dav: {
+    list: () => invoke(IPC.DAV_LIST),
+    set: (s: unknown) => invoke(IPC.DAV_SET, s),
+    remove: (id: string) => invoke(IPC.DAV_REMOVE, id),
+    browse: (a: { id: string; path?: string }) => invoke(IPC.DAV_BROWSE, a),
+    openExternal: (url: string) => invoke(IPC.DAV_OPEN_EXTERNAL, url),
+  },
+  /** ★ 2026-09-29 DLNA 投屏（SSDP 发现 + AVTransport 三动作） */
+  dlna: {
+    discover: () => invoke(IPC.DLNA_DISCOVER),
+    cast: (a: unknown) => invoke(IPC.DLNA_CAST, a),
   },
   subtitle: {
     get: () => invoke(IPC.SUBTITLE_GET),
@@ -182,6 +202,26 @@ const api = {
   merge: {
     export: (ids: string[]) => invoke(IPC.CFG_MERGE_EXPORT, ids),
     save: (a: { content: string; defaultName?: string }) => invoke<{ saved: boolean; path: string }>(IPC.CFG_EXPORT_SAVE, a),
+  },
+  // 播放相关本地偏好（m3u8 去广告开关；改后本地中继 /play 即时生效）
+  playerPrefs: {
+    get: () => invoke(IPC.PLAYER_PREFS_GET),
+    set: (patch: unknown) => invoke(IPC.PLAYER_PREFS_SET, patch),
+  },
+  // ★ 2026-09-29 磁力（BT）：探测本机已安装的外部播放器（MKV/HEVC 接力；只探测不启动）
+  bt: {
+    detectPlayers: () => invoke<Array<{ id: string; name: string; path: string }>>(IPC.BT_DETECT_PLAYERS),
+  },
+  /** ★ 2026-09-29 启动强制更新：检查 / 下载（进度事件）/ 拉起安装程序 */
+  update: {
+    check: () => invoke(IPC.UPDATE_CHECK),
+    download: () => invoke(IPC.UPDATE_DOWNLOAD),
+    install: () => invoke(IPC.UPDATE_INSTALL),
+    onProgress: (cb: (p: unknown) => void) => {
+      const l = (_e: unknown, p: unknown) => cb(p);
+      ipcRenderer.on(IPC.UPDATE_PROGRESS, l);
+      return () => ipcRenderer.removeListener(IPC.UPDATE_PROGRESS, l);
+    },
   },
   quark: {
     // 夸克落盘文件清理（渲染层播放页/播放器页卸载、窗口关闭时触发）

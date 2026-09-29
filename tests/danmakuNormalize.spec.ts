@@ -69,4 +69,17 @@ describe('formatCandidateLabel（弹幕候选显示压缩）', () => {
     expect(formatCandidateLabel()).toBe('');
     expect(formatCandidateLabel('', '第3集')).toBe('第3集');
   });
+
+  // ★ 2026-09-29（用户报「tencent 的条目看不到是第几集」）：净化平台/类型噪声 + 集号字段兜底
+  it('tencent 条目：剔【动漫】/from tencent 噪声，集号从集名提炼', () => {
+    expect(formatCandidateLabel('斗罗大陆系列小剧场(2026)【动漫】from tencent', '【qq】 第1集 菜头萧萧双向守护')).toBe(
+      '斗罗大陆系列小剧场（2026） · 第1集',
+    );
+  });
+
+  it('标题提不出集号时用接口 episodeNumber 兜底', () => {
+    expect(formatCandidateLabel('斗罗大陆之燃魂战(2024)【电视剧】from tencent', '【qq】 正片', '39')).toBe(
+      '斗罗大陆之燃魂战（2024） · 第39集',
+    );
+  });
 });

@@ -3,12 +3,23 @@
 //   点击展开面板：默认展示**热搜**（复用发现页 TMDB 榜单标题，零新增接口），
 //   输入时 250ms 防抖查**自动联想**（TMDB / 豆瓣，随「元数据来源策略」），
 //   回车或点击任一条 → 跳 /search?agg=<关键词>（复用 HomePage 的全源搜索入口）。
+// ★ 2026-09-29（用户要求）：搜索框做大；热搜做成**右侧排名榜**；左侧下方为**搜索历史**
+//   （逐条可删 ✕、下方「清空搜索记录」、上限 10 条，第 11 条顶掉第 1 条）。
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { client } from '../api/client';
 import type { MetaSuggestion } from '../../shared/meta';
+import {
+  clearSearchHistory,
+  loadSearchHistory,
+  pushSearchTerm,
+  removeSearchTerm,
+  saveSearchHistory,
+} from '../lib/searchHistory';
 
 const DEBOUNCE_MS = 250;
+/** 热搜榜展示条数（右侧排名列） */
+const HOT_RANK_MAX = 10;
 
 export default function SearchPanel() {
   const nav = useNavigate();
@@ -18,6 +29,8 @@ export default function SearchPanel() {
   const [hotTried, setHotTried] = useState(false);
   const [sug, setSug] = useState<MetaSuggestion[]>([]);
   const [busy, setBusy] = useState(false);
+  /** ★ 2026-09-29：搜索历史（localStorage，最多 10 条） */
+  const [hist, setHist] = useState<string[]>([]);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -46,6 +59,11 @@ export default function SearchPanel() {
       })
       .catch(() => setHotTried(false));
   }, [open, hotTried]);
+
+  // 打开面板时载入搜索历史（其它窗口/页面刚搜过的也能看到）
+  useEffect(() => {
+    if (open) setHist(loadSearchHistory());
+  }, [open]);
 
   // 打开时聚焦输入框；外部点击 / Esc 关闭
   useEffect(() => {
@@ -95,10 +113,27 @@ export default function SearchPanel() {
   const go = (kw: string): void => {
     const t = (kw || '').trim();
     if (!t) return;
+    // ★ 2026-09-29：任何入口（回车/联想/热搜/历史）都记入搜索历史（上限 10，FIFO）
+    const next = pushSearchTerm(loadSearchHistory(), t);
+    saveSearchHistory(next);
+    setHist(next);
     setOpen(false);
     setQ('');
     setSug([]);
     nav(`/search?agg=${encodeURIComponent(t)}`);
+  };
+
+  /** 删除一条搜索历史（不影响列表其它条目） */
+  const delHist = (t: string): void => {
+    const next = removeSearchTerm(hist, t);
+    setHist(next);
+    saveSearchHistory(next);
+  };
+
+  /** 清空搜索历史 */
+  const clearHist = (): void => {
+    clearSearchHistory();
+    setHist([]);
   };
 
   return (
@@ -145,15 +180,47 @@ export default function SearchPanel() {
               ))}
             </div>
           ) : (
-            <div className="sp-list">
-              <div className="sp-hot-tip muted">热搜（来自元数据榜单）</div>
-              {hot.length === 0 && <div className="sp-item muted">暂无热搜，直接输入关键词即可</div>}
-              <div className="sp-hot">
-                {hot.map((t) => (
-                  <span key={t} className="sp-hot-item" onClick={() => go(t)}>
-                    {t}
-                  </span>
-                ))}
+            /* ★ 2026-09-29（用户要求）：左列 = 搜索历史（可逐条删 + 清空），右列 = 热搜排名榜 */
+            <div className="sp-cols">
+              <div className="sp-hist">
+                <div className="sp-hot-tip muted">搜索历史{hist.length ? `（${hist.length}/${10}）` : ''}</div>
+                {hist.length === 0 ? (
+                  <div className="sp-item muted">暂无搜索记录</div>
+                ) : (
+                  <div className="sp-hist-list">
+                    {hist.map((t) => (
+                      <div key={t} className="sp-item sp-hist-item" onClick={() => go(t)}>
+                        <span className="sp-hist-txt" title={t}>{t}</span>
+                        <button
+                          className="sp-hist-del"
+                          title="删除这条搜索记录"
+                          aria-label={`删除搜索记录 ${t}`}
+                          onClick={(e) => { e.stopPropagation(); delHist(t); }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {hist.length > 0 && (
+                  <button className="sp-clear" onClick={clearHist}>清空搜索记录</button>
+                )}
+              </div>
+              <div className="sp-rank">
+                <div className="sp-hot-tip muted">热搜榜（来自元数据榜单）</div>
+                {hot.length === 0 ? (
+                  <div className="sp-item muted">暂无热搜，直接输入关键词即可</div>
+                ) : (
+                  <div className="sp-rank-list">
+                    {hot.slice(0, HOT_RANK_MAX).map((t, i) => (
+                      <div key={t} className="sp-rank-item" onClick={() => go(t)} title={t}>
+                        <span className={`sp-rank-no${i < 3 ? ' top' : ''}`}>{i + 1}</span>
+                        <span className="sp-rank-txt">{t}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}

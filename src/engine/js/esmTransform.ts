@@ -9,10 +9,30 @@
 //   2) export const {a, b} = obj 解构导出不支持 → 保持原样 → vm 语法错误 → 蜘蛛降级；
 //   3) 动态 import() 不转换（蜘蛛脚本几乎不用）。
 import { UnsupportedSourceError } from '../util/errors';
+import { ID_SRC } from './esmHeadImports';
 
 /** 快速判定：是否含有需要转换的模块语法（行首 import/export 或 export default）。
  * 普通脚本（cat.js 这类 bundle、纯 CJS）直接原样返回，避免正则误伤 486KB 的长字符串。 */
 const HAS_MODULE_SYNTAX = /(^|[\n;])\s*(import|export)\b/;
+
+/**
+ * ★ 2026-09-29：标识符必须认 **Unicode 字母** —— drpy2 引擎（`drpy2.min.js`）头部就是
+ *   `import 模板 from "../js/模板.js";`。旧正则只写 `[A-Za-z_$][\w$]*` ⇒ 该行不被转换 ⇒
+ *   `SyntaxError: Cannot use import statement outside a module` ⇒ 整个 drpy2 源降级
+ *   （用户口径「drpy JS 源桌面端不支持」的真根因之一）。ID_SRC 与 esmHeadImports 同一来源。
+ */
+
+/** 进口/导出语句模式（`u` 旗标 + Unicode 标识符；★ `import\s*\{` / `export\s+default\s*` 必须容忍
+ *  **minify 无空格写法** —— 真实 `drpy2.min.js` 就是 `import{gbkTool}from"./gbk.js"` 与 `export default{…}`，
+ *  旧版用 `\s+` 会漏转 → SyntaxError → 整源降级） */
+const RE_IMPORT_DEFAULT_NAMED = new RegExp(String.raw`import\s+(${ID_SRC})\s*,\s*\{([\s\S]*?)\}\s*from\s*['"]([^'"]+)['"]\s*;?`, 'gu');
+const RE_IMPORT_NS = new RegExp(String.raw`import\s*\*\s*as\s+(${ID_SRC})\s+from\s*['"]([^'"]+)['"]\s*;?`, 'gu');
+const RE_IMPORT_NAMED = new RegExp(String.raw`import\s*\{([\s\S]*?)\}\s*from\s*['"]([^'"]+)['"]\s*;?`, 'gu');
+const RE_IMPORT_DEFAULT = new RegExp(String.raw`import\s+(${ID_SRC})\s+from\s*['"]([^'"]+)['"]\s*;?`, 'gu');
+const RE_EXPORT_FUNC = new RegExp(String.raw`export\s+(async\s+)?function\s+(${ID_SRC})`, 'gu');
+const RE_EXPORT_VAR = new RegExp(String.raw`export\s+(const|let|var)\s+(${ID_SRC})`, 'gu');
+/** `export default`（同样容忍 minify：`export default{…}`） */
+const RE_EXPORT_DEFAULT = /export\s+default\s*/;
 
 interface SpecPair {
   /** 来源属性名（plain 时与 name 相同） */
@@ -21,13 +41,16 @@ interface SpecPair {
   name: string;
 }
 
+/** 说明符（可为 Unicode：`{ 名称 as 别名 }`） */
+const RE_SPECIFIER = new RegExp(String.raw`^(${ID_SRC})(?:\s+as\s+(${ID_SRC}))?$`, 'u');
+
 /** 拆 "A, B as C, D" 形态的说明符列表（容忍多余空白与换行） */
 function splitSpecifiers(raw: string): SpecPair[] {
   const out: SpecPair[] = [];
   for (const piece of raw.split(',')) {
     const s = piece.trim();
     if (!s) continue;
-    const m = /^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$/.exec(s);
+    const m = RE_SPECIFIER.exec(s);
     if (m) out.push({ prop: m[1], name: m[2] ?? m[1] });
   }
   return out;
@@ -74,7 +97,7 @@ export function transformToCjs(source: string, moduleName: string): string {
     // ---- 3) import 语句（组合形态优先于单一形态） ----
     // import X, { A, B as C } from 'p'
     code = code.replace(
-      /import\s+([A-Za-z_$][\w$]*)\s*,\s*\{([\s\S]*?)\}\s*from\s*['"]([^'"]+)['"]\s*;?/g,
+      RE_IMPORT_DEFAULT_NAMED,
       (_m: string, def: string, names: string, spec: string) => {
         const tmp = `_m${seq++}`;
         const lines = [`const ${tmp} = require(${JSON.stringify(spec)});`, defaultOf(tmp, def)];
@@ -86,12 +109,12 @@ export function transformToCjs(source: string, moduleName: string): string {
     );
     // import * as X from 'p'
     code = code.replace(
-      /import\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*['"]([^'"]+)['"]\s*;?/g,
+      RE_IMPORT_NS,
       (_m: string, ns: string, spec: string) => `const ${ns} = require(${JSON.stringify(spec)});`,
     );
     // import { A, B as C } from 'p'
     code = code.replace(
-      /import\s+\{([\s\S]*?)\}\s*from\s*['"]([^'"]+)['"]\s*;?/g,
+      RE_IMPORT_NAMED,
       (_m: string, names: string, spec: string) => {
         const tmp = `_m${seq++}`;
         const lines = [`const ${tmp} = require(${JSON.stringify(spec)});`];
@@ -103,7 +126,7 @@ export function transformToCjs(source: string, moduleName: string): string {
     );
     // import X from 'p'
     code = code.replace(
-      /import\s+([A-Za-z_$][\w$]*)\s+from\s*['"]([^'"]+)['"]\s*;?/g,
+      RE_IMPORT_DEFAULT,
       (_m: string, def: string, spec: string) => {
         const tmp = `_m${seq++}`;
         return `const ${tmp} = require(${JSON.stringify(spec)});\n${defaultOf(tmp, def)}`;
@@ -113,11 +136,11 @@ export function transformToCjs(source: string, moduleName: string): string {
     code = code.replace(/import\s*['"]([^'"]+)['"]\s*;?/g, (_m: string, spec: string) => `require(${JSON.stringify(spec)});`);
 
     // ---- 4) export default <expr>（对象字面量可跨行，只替换前缀） ----
-    code = code.replace(/export\s+default\s/, 'module.exports.default = ');
+    code = code.replace(RE_EXPORT_DEFAULT, 'module.exports.default = ');
 
     // ---- 5) export function / export async function ----
     code = code.replace(
-      /export\s+(async\s+)?function\s+([A-Za-z_$][\w$]*)/g,
+      RE_EXPORT_FUNC,
       (_m: string, aw: string | undefined, name: string) => {
         tail.push(`module.exports[${JSON.stringify(name)}] = ${name};`);
         return `${aw ?? ''}function ${name}`;
@@ -126,7 +149,7 @@ export function transformToCjs(source: string, moduleName: string): string {
 
     // ---- 6) export const|let|var NAME（简单标识符；解构导出不支持，见文件头局限 2） ----
     code = code.replace(
-      /export\s+(const|let|var)\s+([A-Za-z_$][\w$]*)/g,
+      RE_EXPORT_VAR,
       (_m: string, kw: string, name: string) => {
         tail.push(`module.exports[${JSON.stringify(name)}] = ${name};`);
         return `${kw} ${name}`;

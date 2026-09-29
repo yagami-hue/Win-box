@@ -169,14 +169,24 @@ export default function PlayerPage() {
   useEffect(() => {
     const raw = init?.episodes?.[epIndex]?.url || '';
     if (!raw || !activeUrl) return;
+    // ★ 2026-09-29：回写进度也带上来源/资源标识 —— 否则会被写成「按 url 记」的第二条
+    //   （历史按 sourceKey+vodId 分组，同片多集只留一条）
+    const hist = {
+      flag: init?.flag,
+      sourceName: init?.meta?.sourceName,
+      sourceKey: init?.meta?.fromKey,
+      vodId: init?.meta?.vodId ?? init?.meta?.id,
+      pic: init?.meta?.pic,
+    };
     const t = setInterval(() => {
       const sec = uiMem.playTime.get(activeUrl) || 0;
       if (sec > 0) {
         recordWatch({
           url: raw,
           rawUrl: raw,
-          flag: init?.flag,
+          ...hist,
           name: curName || init?.lastName || '',
+          remarks: init?.episodes?.[epIndex]?.name,
           time: sec,
         });
         // ★ 立即落盘：历史由本（播放器）窗口写入，主窗口历史页靠读 localStorage 同步
@@ -192,7 +202,17 @@ export default function PlayerPage() {
       if (c.raw && c.url) {
         const sec = uiMem.playTime.get(c.url) || 0;
         if (sec > 0) {
-          recordWatch({ url: c.raw, rawUrl: c.raw, flag: init?.flag, name: c.name, time: sec });
+          recordWatch({
+            url: c.raw,
+            rawUrl: c.raw,
+            flag: init?.flag,
+            sourceName: init?.meta?.sourceName,
+            sourceKey: init?.meta?.fromKey,
+            vodId: init?.meta?.vodId ?? init?.meta?.id,
+            pic: init?.meta?.pic,
+            name: c.name,
+            time: sec,
+          });
           saveUiMemory();
         }
       }

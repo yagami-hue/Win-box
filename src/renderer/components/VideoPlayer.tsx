@@ -14,6 +14,8 @@ import { parseDanmakuResponse } from '../../engine/danmaku/parseDanmakuXml';
 import { danmakuQueryCandidates, parseEpisodeInput, episodeFieldFromName, formatCandidateLabel } from '../../engine/danmaku/normalizeQuery';
 import { customEndpointsText, mergeEndpoints, pickAnimesForExpand, seasonOf, sortCandidatesByEp } from '../../engine/danmaku/endpoints';
 import { resolvePlayTarget } from '../lib/playTarget';
+// ★ 2026-09-29 DLNA 投屏（SSDP 发现 + AVTransport 三动作；对位 CatClaw Dlna.cs）
+import { parseCastTarget, type DlnaDevice } from '../../shared/dlna';
 import { loadPlayerPrefs, savePlayerPrefs, PLAYER_FITS, type PlayerPrefs, type PlayerFit } from '../lib/playerPrefs';
 import { subtitleEmptyReason, subtitleSourceLabel } from '../lib/subtitleText';
 import DriveBindModal from './DriveBindModal';
@@ -27,11 +29,26 @@ import {
 } from '../../shared/danmaku';
 import DanmakuOverlay from './DanmakuOverlay';
 
-// ---- 弹幕匹配记忆：资源名常被规避审核改得奇奇怪怪，首次命中后记住 episodeId 与规范名，
+// ---- 弹幕匹配记忆：资源名常被规避审核改得奇奇怪怪，首次命中后记住「番剧 + 来源」，
 //     下次同资源/同怪名输入直接复用（localStorage，仅渲染层）。
-//     ★ 2026-09-26：多来源后同时记住 source（接口基础地址）。----
-interface DmMem { episodeId: number; source?: string; sourceName?: string; anime?: string; ep?: string }
+//     ★ 2026-09-29（用户报「不管第几集都匹配到第一集」）：**只记番剧级**（bangumiId + source），
+//       不再记某个具体 episodeId —— 旧实现把第一集的 id 记进去，之后每集都命中那一集，
+//       且手动重搜也被这条短路（整个候选列表只剩这一条）。现在命中记忆后按 bangumiId
+//       重新拉整季剧集，再按目标集号挑选。----
+interface DmMem {
+  source: string;
+  sourceName?: string;
+  anime?: string;
+  bangumiId?: number;
+  /** 旧版字段（仅兼容读取，不再写入） */
+  episodeId?: number;
+  ep?: string;
+  /** 写入时间（容量上限按此淘汰最旧） */
+  at?: number;
+}
 const DM_MEM_KEY = 'winbox-dm-mem';
+/** 记忆条目上限（超出淘汰最旧；防 localStorage 无限膨胀） */
+const DM_MEM_MAX = 80;
 function loadDmMem(): Record<string, DmMem> {
   try {
     const j = localStorage.getItem(DM_MEM_KEY);
@@ -41,7 +58,16 @@ function loadDmMem(): Record<string, DmMem> {
   }
 }
 function saveDmMem(m: Record<string, DmMem>): void {
-  try { localStorage.setItem(DM_MEM_KEY, JSON.stringify(m)); } catch { /* ignore */ }
+  try {
+    const keys = Object.keys(m);
+    if (keys.length > DM_MEM_MAX) {
+      keys
+        .sort((a, b) => (m[a].at || 0) - (m[b].at || 0))
+        .slice(0, keys.length - DM_MEM_MAX)
+        .forEach((k) => delete m[k]);
+    }
+    localStorage.setItem(DM_MEM_KEY, JSON.stringify(m));
+  } catch { /* ignore */ }
 }
 /** 最多展开前 4 部命中番剧的剧集列表（★ 跨来源优先：避免前几名全被同一来源占满） */
 const MAX_ANIME_EXPAND = 4;
@@ -54,9 +80,27 @@ const DM_RICH_ENOUGH = 40;
 /** 最优结果仍少于这么多条 → 提示「疑似花絮/预告，建议换候选」（实测花絮条目常只有 1 条） */
 const DM_THIN = 10;
 
-/** 剧集标题（第3话/03）是否与目标集号（已去前导零）同集 */
-function episodeMatches(title: string | undefined, targetEp: string): boolean {
-  if (!title || !targetEp) return false;
+/**
+ * ★ 2026-09-29（用户报「部分资源播放，会报错 HLS 之类的」）：把 hls.js 的致命错误
+ *   翻译成人话（原来直接把 `details` 抛给用户，看不懂也无法行动）。
+ */
+function hlsErrText(type: string | undefined, details: string | undefined): string {
+  const d = details || '';
+  if (/manifestParsingError|manifestIncompatibleCodecsError/i.test(d)) return '清单不是有效的 m3u8（源可能已失效或被拦截）';
+  if (/manifestLoadError/i.test(d)) return '清单加载失败（网络不通 / 防盗链 / 需要登录）';
+  if (/levelLoadError/i.test(d)) return '清晰度清单加载失败（网络抖动）';
+  if (/fragLoadError|fragLoadTimeOut/i.test(d)) return '分片加载失败（网络不畅或源限速）';
+  if (/bufferAppendError|bufferAddCodecError/i.test(d)) return '解码器不支持该视频编码（建议换线路/换源）';
+  if (/bufferStalledError/i.test(d)) return '缓冲停滞（网络太慢）';
+  return `${type || 'HLS'} / ${d || '未知错误'}`;
+}
+
+/** 剧集条目是否与目标集号同集：优先接口的 `episodeNumber`，标题「第N集/第N话」兜底 */
+function episodeMatches(title: string | undefined, episodeNumber: string | undefined, targetEp: string): boolean {
+  if (!targetEp) return false;
+  const num = (episodeNumber || '').trim();
+  if (/^\d{1,4}$/.test(num) && num.replace(/^0+/, '') === targetEp) return true;
+  if (!title) return false;
   const m = /[^\d]*(\d{1,4})/.exec(title);
   return !!m && m[1].replace(/^0+/, '') === targetEp;
 }
@@ -64,46 +108,84 @@ function episodeMatches(title: string | undefined, targetEp: string): boolean {
 /** 候选排序：优先「集号命中」的，其后按原顺序（多来源自动尝试时先试更可能命中的） */
 function orderCandidatesForEp(list: DanmakuCandidate[], targetEp: string): DanmakuCandidate[] {
   if (!targetEp) return list;
-  const hit = list.filter((c) => episodeMatches(c.episodeTitle, targetEp));
-  const rest = list.filter((c) => !episodeMatches(c.episodeTitle, targetEp));
+  const hit = list.filter((c) => episodeMatches(c.episodeTitle, c.episodeNumber, targetEp));
+  const rest = list.filter((c) => !episodeMatches(c.episodeTitle, c.episodeNumber, targetEp));
   return [...hit, ...rest];
+}
+
+/** 拉某番剧的整季剧集（失败/空 → []） */
+async function expandAnime(a: DanmakuAnime): Promise<DanmakuCandidate[]> {
+  if (!a || !Number.isFinite(Number(a.bangumiId)) || !a.source) return [];
+  try {
+    return (await client.danmakuEpisodes(Number(a.bangumiId), a.title, a.source)) || [];
+  } catch {
+    return [];
+  }
+}
+
+/** 从多部同名片里挑「最可能是用户正在看的那部」：含目标集号者优先 → 剧集多者优先 → 首个 */
+function pickBestAnime(
+  groups: Array<{ a: DanmakuAnime; list: DanmakuCandidate[] }>,
+  targetEp: string,
+): { a: DanmakuAnime; list: DanmakuCandidate[] } {
+  const withEp = targetEp
+    ? groups.filter((g) => g.list.some((c) => episodeMatches(c.episodeTitle, c.episodeNumber, targetEp)))
+    : [];
+  const pool = withEp.length ? withEp : groups;
+  return pool.reduce((best, g) => (g.list.length > best.list.length ? g : best), pool[0]);
 }
 
 /**
  * 弹幕候选搜索（两级：作品名搜番剧 → 展开剧集列表）。
- * 记忆 > 原文 > 清洗变体逐个试；命中即记忆，返回剧集级候选列表。
+ * 原文 > 清洗变体逐个试；命中即写「番剧级」记忆，返回剧集级候选列表。
  * ★ 2026-09-26：搜索为主进程**多来源并行**（启用中的接口清单），候选自带来源；
  *   `season` 由资源名提取 → 同季条目优先（否则「第N季」类剧会先命中花絮条目）。
+ * ★ 2026-09-29：`targetEp` 参与「选哪部番剧」与记忆写入；`fresh=true`（用户手动重搜）
+ *   跳过记忆快路径，始终拿全部来源的完整候选（修「重搜只出一条 / 列表被覆盖」）。
  */
-async function searchDanmakuCandidates(baseName: string, season?: number): Promise<DanmakuCandidate[]> {
+async function searchDanmakuCandidates(
+  baseName: string,
+  season: number | undefined,
+  targetEp: string,
+  fresh: boolean,
+): Promise<DanmakuCandidate[]> {
   if (!baseName) return [];
-  const mem = loadDmMem();
-  const hit = mem[baseName];
-  if (hit && hit.source) {
-    return [{ episodeId: hit.episodeId, source: hit.source, sourceName: hit.sourceName || '记忆来源', title: hit.anime, episodeTitle: hit.ep }];
+  // 记忆快路径（仅自动匹配走）：按 bangumiId 重拉整季剧集 → 由调用方按目标集号挑选
+  if (!fresh) {
+    const hit = loadDmMem()[baseName];
+    if (hit && hit.source && Number.isFinite(Number(hit.bangumiId))) {
+      const list = await expandAnime({
+        animeId: Number(hit.bangumiId),
+        bangumiId: Number(hit.bangumiId),
+        title: hit.anime || baseName,
+        source: hit.source,
+        sourceName: hit.sourceName || '记忆来源',
+      });
+      if (list.length) return list;
+    }
   }
   for (const q of danmakuQueryCandidates(baseName)) {
     let animes: DanmakuAnime[] = [];
     try { animes = (await client.danmakuSearch(q, season)) || []; } catch { animes = []; }
     if (!animes.length) continue;
-    const expanded: DanmakuCandidate[] = [];
+    const groups: Array<{ a: DanmakuAnime; list: DanmakuCandidate[] }> = [];
     for (const a of pickAnimesForExpand(animes, MAX_ANIME_EXPAND)) {
-      let list: DanmakuCandidate[] = [];
-      try { list = (await client.danmakuEpisodes(a.bangumiId, a.title, a.source)) || []; } catch { list = []; }
-      expanded.push(...list);
+      const list = await expandAnime(a);
+      if (list.length) groups.push({ a, list });
     }
-    if (expanded.length) {
-      const next = loadDmMem();
-      next[baseName] = {
-        episodeId: expanded[0].episodeId,
-        source: expanded[0].source,
-        sourceName: expanded[0].sourceName,
-        anime: expanded[0].title,
-        ep: expanded[0].episodeTitle,
-      };
-      saveDmMem(next);
-      return expanded;
-    }
+    if (!groups.length) continue;
+    const expanded = groups.flatMap((g) => g.list);
+    const best = pickBestAnime(groups, targetEp);
+    const next = loadDmMem();
+    next[baseName] = {
+      source: best.a.source,
+      sourceName: best.a.sourceName,
+      anime: best.a.title,
+      bangumiId: best.a.bangumiId,
+      at: Date.now(),
+    };
+    saveDmMem(next);
+    return expanded;
   }
   return [];
 }
@@ -172,6 +254,9 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const ref = useRef<HTMLVideoElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  /** ★ 2026-09-29：HLS 致命错误自愈计数（网络类 / 媒体类各 2 次；切集时清零） */
+  const hlsNetRetryRef = useRef(0);
+  const hlsMediaRetryRef = useRef(0);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** 字幕/弹幕设置面板是否打开（面板打开时暂停闲置隐藏，悬停面板保持显示） */
   const panelOpenRef = useRef(false);
@@ -190,6 +275,11 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const [paused, setPaused] = useState(true);
   const [cur, setCur] = useState(0);
   const [dur, setDur] = useState(0);
+  // ★ 2026-09-29 DLNA 投屏：设备弹层状态
+  const [castOpen, setCastOpen] = useState(false);
+  const [castBusy, setCastBusy] = useState(false);
+  const [castDevices, setCastDevices] = useState<DlnaDevice[]>([]);
+  const [castMsg, setCastMsg] = useState('');
   const [buffered, setBuffered] = useState(0);
   const [vol, setVol] = useState(() => prefsRef.current!.vol);
   const [rate, setRate] = useState(() => prefsRef.current!.rate);
@@ -400,7 +490,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     const tMin = times.length ? Math.min(...times) : 0;
     const tMax = times.length ? Math.max(...times) : 0;
     const base = items.length
-      ? `已加载 ${items.length} 条弹幕（${src} · ${formatCandidateLabel(c.title, c.episodeTitle)}）${tMax > 0 ? ` · 时段 ${fmt(tMin)}~${fmt(tMax)}` : ''}`
+      ? `已加载 ${items.length} 条弹幕（${src} · ${formatCandidateLabel(c.title, c.episodeTitle, c.episodeNumber)}）${tMax > 0 ? ` · 时段 ${fmt(tMin)}~${fmt(tMax)}` : ''}`
       : `「${src}」该剧集暂无弹幕`;
     setDmMsg(
       hint
@@ -431,7 +521,9 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   // 匹配并加载弹幕：作品名搜番剧（多来源并行）→ 展开剧集候选 → 按集号优选**依次尝试、保留最丰富的结果**
   // query=剧名副名（详情页/兜底截断），epInput=「集」输入框内容（★ 2026-09-27 独立可改：
   //   支持 S01E10 / E10 / 第10集 / 10 / 更新至10；给了季号则同季条目优先）
-  const matchDanmaku = async (query: string, epInput?: string) => {
+  // ★ 2026-09-29：opts.fresh=true（手动点「匹配弹幕」/回车）→ 跳过记忆、重搜全部来源；
+  //   自动匹配（开关弹幕）走记忆快路径（按番剧重拉整季，仍按集号挑）。
+  const matchDanmaku = async (query: string, epInput?: string, opts?: { fresh?: boolean }) => {
     const name = query.trim();
     if (!name) { setDmMsg('请填写要搜索的剧名'); return; }
     const gen = ++dmGenRef.current; // 本次匹配为最新代际
@@ -442,8 +534,9 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     //   资源名被改得奇怪时用户无从修正，只能整串改剧名（这是「手动搜索也不准」的根因）。
     const epParsed = parseEpisodeInput(epInput || '');
     const season = epParsed.season ?? seasonOf(epInput || '') ?? seasonOf(resourceName || '') ?? seasonOf(danmakuTitle || '') ?? seasonOf(name);
+    const targetEp = epParsed.ep || extractEp(resourceName || '');
     try {
-      const list = await searchDanmakuCandidates(name, season);
+      const list = await searchDanmakuCandidates(name, season, targetEp, !!opts?.fresh);
       if (gen !== dmGenRef.current) return; // 期间换集/发起新匹配 → 丢弃
       // ★ 2026-09-28（用户要求）：列表显示排序 —— 有集数的按集号升序在前，没集数的沉底
       setDmCands(sortCandidatesByEp(list || []));
@@ -451,7 +544,6 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         setDmMsg('未找到匹配剧集——试试更常见的剧名写法（去掉特殊符号/集号/括号）；也可在「弹幕源」里开启更多接口');
         return;
       }
-      const targetEp = epParsed.ep || extractEp(resourceName || '');
       const attempts = orderCandidatesForEp(list, targetEp).slice(0, MAX_DM_TRY);
       const deadline = Date.now() + DM_TRY_BUDGET_MS;
       // ★ 保留最丰富的结果：单一「命中即停」会被花絮/预告条目骗到（实测某剧花絮条目只有 1 条弹幕，
@@ -737,6 +829,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     v.src = '';
     hlsRef.current?.destroy();
     hlsRef.current = null;
+    hlsNetRetryRef.current = 0;
+    hlsMediaRetryRef.current = 0;
     const oldFlv = (v as unknown as { __flv?: mpegts.Player }).__flv;
     if (oldFlv) {
       try {
@@ -826,12 +920,24 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       v.play().then(() => setPaused(false)).catch(() => {});
     };
 
-    if (low.endsWith('.m3u8')) {
+    if (low.endsWith('.m3u8') || /m3u8|\/hls\//.test(low)) {
+      // ★ 2026-09-29（用户报「部分资源播放会报 HLS 错误」）：判型放宽到「URL 含 m3u8 / 路径含 /hls/」
+      //   （不少 CDN 的清单没有 .m3u8 后缀，此前落到原生 <video> → Chromium 不会解 HLS → 必失败）
       if (v.canPlayType('application/vnd.apple.mpegurl')) {
         v.src = url;
         start();
       } else if (Hls.isSupported()) {
-        const hls = new Hls({ enableWorker: true });
+        // ★ 2026-09-29（用户报「部分资源播放会报 HLS 错误」）：显式加大清单/分片重试，
+        //   并给致命错误做「自愈」（网络类 startLoad / 媒体类 recoverMediaError），
+        //   而不是一见 fatal 就把错误甩给用户。
+        const hls = new Hls({
+          enableWorker: true,
+          manifestLoadingMaxRetry: 4,
+          manifestLoadingRetryDelay: 800,
+          levelLoadingMaxRetry: 4,
+          fragLoadingMaxRetry: 4,
+          fragLoadingRetryDelay: 800,
+        });
         hlsRef.current = hls;
         hls.loadSource(url);
         hls.attachMedia(v);
@@ -842,14 +948,47 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           if (s && s.loading > 0) reportKBps(s.loaded / 1024 / (s.loading / 1000));
         });
         hls.on(Hls.Events.ERROR, (_e, d) => {
-          if (d.fatal) setErr('HLS 播放失败：' + (d.details || '未知错误'));
+          if (!d.fatal) return;
+          // ① 网络类致命（清单/分片加载失败）：hls.js 不会自动无限重试 → 手动续拉最多 2 次
+          if (d.type === Hls.ErrorTypes.NETWORK_ERROR && hlsNetRetryRef.current < 2) {
+            hlsNetRetryRef.current++;
+            setErr('');
+            try {
+              hls.startLoad();
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
+          // ② 媒体类致命（解码/追加失败）：recoverMediaError 最多 2 次
+          if (d.type === Hls.ErrorTypes.MEDIA_ERROR && hlsMediaRetryRef.current < 2) {
+            hlsMediaRetryRef.current++;
+            setErr('');
+            try {
+              hls.recoverMediaError();
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
+          const retried = hlsNetRetryRef.current + hlsMediaRetryRef.current;
+          setErr(
+            `HLS 播放失败：${hlsErrText(d.type, d.details)}` + (retried ? `（已自动重试 ${retried} 次）` : ''),
+          );
         });
       } else {
         setErr('当前环境不支持 HLS 播放');
       }
-    } else if (low.endsWith('.flv')) {
+    } else if (low.endsWith('.flv') || low.endsWith('.ts') || /mpegts/.test(low)) {
+      // ★ 2026-09-29：`.ts` / `mpegts` 一并交 mpegts.js（Chromium 原生解不了 TS，落到 <video> 必失败）
       if (mpegts.isSupported()) {
-        const p = mpegts.createPlayer({ type: 'flv', url, isLive: true });
+        const isFlv = low.endsWith('.flv') || /mpegts/.test(low);
+        // 直连 .ts 多为单文件直播流（URL 常含 live）；flv 沿用既有「按直播处理」口径
+        const p = mpegts.createPlayer({
+          type: isFlv ? 'flv' : 'mpegts',
+          url,
+          isLive: isFlv || /live/i.test(low),
+        });
         (v as unknown as { __flv?: mpegts.Player }).__flv = p;
         p.attachMediaElement(v);
         p.load();
@@ -1167,6 +1306,48 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     setVol(ratio);
   };
 
+  // ★ 2026-09-29 DLNA 投屏：搜索设备（SSDP 约 3s）/ 选定设备后按 AVTransport 三动作投屏
+  async function searchCastDevices() {
+    setCastBusy(true);
+    setCastMsg('正在搜索局域网设备…');
+    setCastDevices([]);
+    try {
+      const ds = await client.dlnaDiscover();
+      setCastDevices(ds);
+      setCastMsg(ds.length ? '' : '没有发现可投屏设备（电视需支持 DLNA/UPnP，且与本机在同一局域网）');
+    } catch (e) {
+      setCastMsg((e as Error).message);
+    } finally {
+      setCastBusy(false);
+    }
+  }
+
+  function toggleCast() {
+    if (castOpen) {
+      setCastOpen(false);
+      return;
+    }
+    setCastOpen(true);
+    void searchCastDevices();
+  }
+
+  async function castTo(d: DlnaDevice) {
+    setCastBusy(true);
+    setCastMsg('');
+    try {
+      const positionMs = Math.round((ref.current?.currentTime ?? cur) * 1000);
+      const target = parseCastTarget(url, resourceName || 'Win-Box 投屏', positionMs);
+      if (target.localRelay) setCastMsg('⚠ 该地址是本机中继（BT / 蜘蛛代理），电视端可能拉不到流，仍尝试投送…');
+      const r = await client.dlnaCast({ device: d, target });
+      setCastMsg(r.ok ? `已投到「${r.device || d.name}」` : (r.error || '投屏失败'));
+      if (r.ok) window.setTimeout(() => setCastOpen(false), 1200);
+    } catch (e) {
+      setCastMsg((e as Error).message);
+    } finally {
+      setCastBusy(false);
+    }
+  }
+
   // 竖向音量条：pointerdown 定位 + pointermove 拖动时持续跟随。
   // 用 ref 同步拖动状态，避免 pointermove 高频回调读到过期 state。
   const onVolPointer = (e: React.PointerEvent) => {
@@ -1407,6 +1588,27 @@ export default function VideoPlayer(props: VideoPlayerProps) {
               )}
             </button>
           </div>
+          {/* ★ 2026-09-29 DLNA 投屏：设备弹层 + 按钮（对位 TVBox osc/dlna 的 AVTransport 三动作） */}
+          <div className={`vp-cast${castOpen ? ' open' : ''}`} onClick={(e) => e.stopPropagation()}>
+            <div className={`vp-cpanel${castOpen ? ' open' : ''}`}>
+              <div className="vp-cpct">{castBusy ? '搜索中…' : '投屏到'}</div>
+              {castDevices.map((d) => (
+                <button key={d.udn} className="vp-citem" disabled={castBusy} onClick={() => void castTo(d)} title={d.location}>
+                  {d.name}
+                </button>
+              ))}
+              {castMsg && <div className="vp-cmsg">{castMsg}</div>}
+              <button className="vp-citem vp-crefresh" disabled={castBusy} onClick={() => void searchCastDevices()}>重新搜索</button>
+            </div>
+            <button className="vp-ctl" title="投屏（DLNA）" onClick={toggleCast}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6.5A2.5 2.5 0 0 1 5.5 4h13A2.5 2.5 0 0 1 21 6.5v11A2.5 2.5 0 0 1 18.5 20h-5" />
+                <path d="M3 14.6a5.9 5.9 0 0 1 5.9 5.9" />
+                <path d="M3 10.6a9.9 9.9 0 0 1 9.9 9.9" />
+                <circle cx="3.6" cy="20.4" r="1.1" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
+          </div>
           <button
             className="vp-ctl"
             title={`字幕：${subEnabled ? '开' : '关'}（左键开关 · 右键/长按调整）`}
@@ -1574,7 +1776,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
                   placeholder="剧名（自动清洗；可改输常见名）…"
                   style={{ flex: 1, minWidth: 120 }}
                   onChange={(e) => { dmQueryUserRef.current = true; setDmQuery(e.target.value); }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') void matchDanmaku(dmQuery, dmEp); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void matchDanmaku(dmQuery, dmEp, { fresh: true }); }}
                 />
                 <input
                   type="text"
@@ -1583,14 +1785,14 @@ export default function VideoPlayer(props: VideoPlayerProps) {
                   title="集号：支持 S1E01、E01、第01集、1、更新至1 等写法；填 S2 可只指定季"
                   style={{ width: 128, flex: '0 0 128px' }}
                   onChange={(e) => setDmEp(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') void matchDanmaku(dmQuery, dmEp); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void matchDanmaku(dmQuery, dmEp, { fresh: true }); }}
                 />
               </div>
               <div className="vsp-row" style={{ marginBottom: 6 }}>
                 <button
                   className="vsp-btn primary"
                   disabled={dmSearching || !dmQuery.trim()}
-                  onClick={() => void matchDanmaku(dmQuery, dmEp)}
+                  onClick={() => void matchDanmaku(dmQuery, dmEp, { fresh: true })}
                 >
                   {dmSearching ? '匹配中…' : '匹配弹幕'}
                 </button>
@@ -1653,7 +1855,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
                   {dmCands.map((c, i) => {
                     // ★ 2026-09-28（用户要求）：候选显示压缩为「剧名（年份）· 第N季 · 第M集」，
                     //   原始长标题放 title 里（鼠标悬停可看全），面板同时已加宽（.vp-dmpanel）
-                    const label = formatCandidateLabel(c.title, c.episodeTitle) || '未知番剧';
+                    const label = formatCandidateLabel(c.title, c.episodeTitle, c.episodeNumber) || '未知番剧';
                     return (
                       <button
                         key={i}

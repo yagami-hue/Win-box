@@ -8,10 +8,43 @@ import { parseJsonLenient } from '../util/json';
 export interface MultiRepoItem {
   url: string;
   name?: string;
+  /** 多仓选线路下标（来自订阅地址尾部的 `#line=N`；-1 = 未指定）。见 splitRepoLine 注释。 */
+  line?: number;
 }
 
 export interface MultiRepo {
   items: MultiRepoItem[];
+}
+
+/**
+ * 剥订阅地址尾部的 `#line=N` 选线路标记（对位 CatClawVideo `TvBoxSubscriptionManager.SplitLine`：159-164）。
+ *   - `https://a/b.json#line=0` → `{ url: 'https://a/b.json', line: 0 }`；
+ *   - 无标记 / 非法（非整数、负数）→ `{ url: 原样, line: -1 }`（原样返回，避免请求带脏尾巴）。
+ * 用途：部分多仓订阅用「同一份 url + 线路下标」指定具体子仓（服务端按行路由），
+ * 直接整串请求会 404 / 拉回整份 —— 拉取前必须剥掉再按行取。
+ */
+export function splitRepoLine(rawUrl: string): { url: string; line: number } {
+  const s = (rawUrl || '').trim();
+  const i = s.toLowerCase().lastIndexOf('#line=');
+  // 与上游一致：`#line=` 必须在地址中段（i > 0）且其后是**非负整数**，否则原样返回（line = -1）
+  if (i <= 0) return { url: s, line: -1 };
+  const rest = s.slice(i + '#line='.length).trim();
+  if (!/^\d+$/.test(rest)) return { url: s, line: -1 };
+  return { url: s.slice(0, i).trim(), line: parseInt(rest, 10) };
+}
+
+/**
+ * 按 `#line=N` 取线路（对位 CatClaw `lines[Math.Clamp(lineIndex, 0, lines.Count - 1)]`）：
+ * 越界**收敛**（负数 → 首条，N 过大 → 末条），不报错；空列表 → null。
+ * 返回实际下标，便于把「#line=9 超出范围 → 已取末条」写进导入提示。
+ */
+export function pickRepoLine(
+  items: MultiRepoItem[],
+  line: number,
+): { index: number; item: MultiRepoItem } | null {
+  if (!items.length) return null;
+  const index = Math.min(Math.max(line, 0), items.length - 1);
+  return { index, item: items[index] };
 }
 
 /**

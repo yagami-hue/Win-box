@@ -74,6 +74,20 @@ export const IPC = {
   VOD_AUDIT: 'vod:audit',
   CFG_MERGE_EXPORT: 'cfg:mergeExport',
   CFG_EXPORT_SAVE: 'cfg:exportSave',
+  /** ★ 2026-09-29 设置备份：导出全部设置与凭据（+ 渲染层 localStorage）到单个 JSON 文件 */
+  BACKUP_EXPORT: 'backup:export',
+  /** ★ 2026-09-29 设置备份：从 JSON 文件还原（主进程各 store + 返回给渲染层写回的 localStorage） */
+  BACKUP_IMPORT: 'backup:import',
+  // ★ 2026-09-29 WebDAV 存储（只读）：服务器管理 + 目录浏览；播放走 /play?dav=<id> 取流
+  DAV_LIST: 'dav:list',
+  DAV_SET: 'dav:set',
+  DAV_REMOVE: 'dav:remove',
+  DAV_BROWSE: 'dav:browse',
+  /** WebDAV 文件用本机外部播放器接力（mkv/HEVC 等 Chromium 播不了的形态） */
+  DAV_OPEN_EXTERNAL: 'dav:openExternal',
+  // ★ 2026-09-29 DLNA 投屏（SSDP 发现 + AVTransport 三动作）
+  DLNA_DISCOVER: 'dlna:discover',
+  DLNA_CAST: 'dlna:cast',
   // ★ 播放网盘资源未绑定 cookie → 从任意窗口请求主窗口跳到「点播页」（源内有「网盘绑定」入口）
   UI_GOTO_DRIVE_BIND: 'ui:gotoDriveBind',
   // 主进程 → 主窗口事件：跳到点播页（播放器窗口发起时经此跨窗口跳转）
@@ -86,6 +100,8 @@ export const IPC = {
   VOD_DEBUG: 'vod:debug',
   LIVE_LOAD: 'live:load',
   LIVE_GROUPS: 'live:groups',
+  /** ★ 2026-09-29 EPG 节目单：按线路取各频道「当前 / 下一档」（XMLTV 拉取+缓存+匹配在主进程） */
+  LIVE_EPG: 'live:epg',
   STORE_HISTORY: 'store:history',
   STORE_FAVORITE: 'store:favorite',
   // 独立播放器窗口
@@ -103,4 +119,15 @@ export const IPC = {
   // ★ 网络代理设置（DNS 污染 / SNI 阻断站点用；配置页可填）
   PROXY_GET: 'proxy:get',
   PROXY_SET: 'proxy:set',
+  // ★ 播放相关本地偏好（当前：m3u8 去广告开关；本地中继 /play 即时生效）
+  PLAYER_PREFS_GET: 'player:prefsGet',
+  PLAYER_PREFS_SET: 'player:prefsSet',
+  /** ★ 2026-09-29 磁力（BT）：探测本机已安装的外部播放器（MKV/HEVC 接力用；只探测不启动） */
+  BT_DETECT_PLAYERS: 'bt:detectPlayers',
+  // ★ 2026-09-29 启动强制更新：查 GitHub 最新 Release / 代理加速下载 Setup / 拉起安装程序
+  UPDATE_CHECK: 'update:check',
+  UPDATE_DOWNLOAD: 'update:download',
+  UPDATE_INSTALL: 'update:install',
+  /** 主进程 → 渲染层：下载进度（bytes / 百分比 / 速度） */
+  UPDATE_PROGRESS: 'update:progress',
 } as const;

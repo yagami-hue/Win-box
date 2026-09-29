@@ -2,7 +2,7 @@
 // ★ 源形态归类：确保设置页「按形态显示字段」的判定稳定。
 // 这是 Task「整理 ext 配置界面」的回归护栏 —— 分类错了会把 ext 框藏起来或误留给 CMS 源。
 import { describe, it, expect } from 'vitest';
-import { sourceKindOf, sourceKindInfo, sourceKindLabel, extRelevant } from '../src/engine/config/sourceKind';
+import { sourceKindOf, sourceKindInfo, sourceKindLabel, extRelevant, isDoubanLikeSource, detailIsEmpty } from '../src/engine/config/sourceKind';
 
 describe('sourceKindOf — type/api 归类', () => {
   it('type=0 → cms-xml，type=1 → cms-json（不走蜘蛛）', () => {
@@ -66,5 +66,32 @@ describe('sourceKindLabel / extRelevant 便捷函数', () => {
     expect(extRelevant({ type: 3, api: 'csp_X' })).toBe(true);
     expect(extRelevant({ type: 3, api: './a.js' })).toBe(true);
     expect(extRelevant({ type: 4, api: 'x' })).toBe(false);
+  });
+});
+
+// ★ 2026-09-29（用户要求）：豆瓣类源「无详情」→ 点封面直接走全源聚合搜索
+describe('isDoubanLikeSource / detailIsEmpty（无详情源判据）', () => {
+  const site = (o: Partial<{ key: string; name: string; api: string; ext: string }>) => ({
+    key: o.key ?? 'k',
+    name: o.name ?? '',
+    api: o.api ?? 'csp_Douban',
+    ext: o.ext ?? '',
+  });
+
+  it('key/name/api/ext 任一带「豆瓣 / douban」即判是（大小写不敏感）', () => {
+    expect(isDoubanLikeSource(site({ name: '豆瓣' }))).toBe(true);
+    expect(isDoubanLikeSource(site({ key: 'douban' }))).toBe(true);
+    expect(isDoubanLikeSource(site({ api: 'csp_DouBan' }))).toBe(true);
+    expect(isDoubanLikeSource(site({ ext: '{"site":"豆瓣电影"}' }))).toBe(true);
+    expect(isDoubanLikeSource(site({ name: '玩偶哥哥', api: 'csp_Wogg' }))).toBe(false);
+    expect(isDoubanLikeSource(null)).toBe(false);
+  });
+
+  it('detailIsEmpty：无 flags / 各线路全空 → true；任一线路有集 → false', () => {
+    expect(detailIsEmpty(null)).toBe(true);
+    expect(detailIsEmpty({})).toBe(true);
+    expect(detailIsEmpty({ episodes: {} })).toBe(true);
+    expect(detailIsEmpty({ episodes: { q: [], y: [] } })).toBe(true);
+    expect(detailIsEmpty({ episodes: { q: [{ url: 'u' }] } })).toBe(false);
   });
 });

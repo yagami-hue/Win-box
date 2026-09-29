@@ -210,6 +210,9 @@ export function pickAnimesForExpand(list: DanmakuAnime[], max: number): DanmakuA
 
 /** 从剧集标题里提集号（返回 null = 没集号）：`第12话` / `S01E12` / `12` 都认（与 epName 同口径的宽松匹配） */
 function epNumber(c: DanmakuCandidateLike): number | null {
+  // ★ 2026-09-29：接口给的集号字段优先（tencent 等条目标题可能不提集号，只靠标题会漏）
+  const num = Number(c.episodeNumber);
+  if (c.episodeNumber && Number.isFinite(num) && num > 0) return num;
   const t = (c.episodeTitle || '').trim();
   if (!t) return null;
   const m =
@@ -224,6 +227,7 @@ function epNumber(c: DanmakuCandidateLike): number | null {
 /** 候选列表排序用到的字段（避免与 shared 类型耦合过紧；DanmakuCandidate 结构满足） */
 interface DanmakuCandidateLike {
   episodeTitle?: string;
+  episodeNumber?: string;
 }
 
 /**

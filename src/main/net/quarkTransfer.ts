@@ -76,11 +76,13 @@ let transferChain: Promise<unknown> = Promise.resolve();
  * @param pwdId  分享 ID（pan.quark.cn/s/<pwdId> 或 episode JSON 里的 sId）
  * @param cookie 绑定夸克的完整 cookie（driveList()['quark'] / Cloud-drive 的 quarkCookie）
  * @param opts.innerFid 可选：已解析出的分享内层文件 fid（跳过列表首文件选择，但仍去列表取 token/name）
+ * @param opts.innerName ★ 2026-09-29：可选：集名（episode id 里的 name）——fid 在分享内找不到时
+ *        的**精确兜底**（按集名/集号唯一命中；仍拒绝"取第一个文件"，杜绝播错集）
  */
 export function quarkTransfer(
   pwdId: string,
   cookie: string,
-  opts: { innerFid?: string; stoken?: string; logger?: Logger } = {},
+  opts: { innerFid?: string; innerName?: string; stoken?: string; logger?: Logger } = {},
 ): Promise<QuarkTransferResult> {
   // ★ 2026-09-28：整条转存的**结果与耗时**落一份结构化诊断（失败时带 reason），
   //   用于统计「落盘成功率约 50%」到底卡在哪一段（见 util/playDiag.ts）。
@@ -111,7 +113,7 @@ export function quarkTransfer(
 async function quarkTransferInner(
   pwdId: string,
   cookie: string,
-  opts: { innerFid?: string; stoken?: string; logger?: Logger } = {},
+  opts: { innerFid?: string; innerName?: string; stoken?: string; logger?: Logger } = {},
 ): Promise<QuarkTransferResult> {
   const log = opts.logger ?? { i: () => {}, w: () => {}, e: () => {} } as Logger;
   const base = BASE + Q;
@@ -126,7 +128,7 @@ async function quarkTransferInner(
   if (!stoken) return { url: '', header: {}, ok: false, reason: '获取 stoken 失败' };
 
   // 2) 分享文件列表，定位内层真实视频文件并取 fid + share_fid_token + file_name（save 与护栏都靠它）
-  const shareFile = await pickShareFile(stoken, pwdId, cookie, opts.innerFid, log);
+  const shareFile = await pickShareFile(stoken, pwdId, cookie, opts.innerFid, opts.innerName, log);
   if (!shareFile) return { url: '', header: {}, ok: false, reason: '未从分享解析到可转存文件' };
   const innerFid = shareFile.fid;
   const innerName = shareFile.name;
@@ -209,6 +211,7 @@ async function pickShareFile(
   pwdId: string,
   cookie: string,
   preferFid: string | undefined,
+  preferName: string | undefined,
   log: Logger,
 ): Promise<QuarkShareFile | null> {
   // 默认分页 fetch：走真实 API（size=50，翻 offset 枚举全量；"第一页 50 条"是本次 Bug
@@ -218,7 +221,7 @@ async function pickShareFile(
     const list = d.json?.data?.list;
     return Array.isArray(list) ? list : [];
   };
-  return resolveShareFile(preferFid, log, defaultFetcher);
+  return resolveShareFile(preferFid, log, defaultFetcher, preferName);
 }
 
 /**
@@ -236,6 +239,7 @@ export async function resolveShareFile(
   preferFid: string | undefined,
   log: Logger,
   fetcher: ShareListFetcher,
+  preferName?: string,
 ): Promise<QuarkShareFile | null> {
   const toFile = (item: any): QuarkShareFile | null => {
     if (!item || typeof item !== 'object' || !item.fid) return null;
@@ -270,15 +274,15 @@ export async function resolveShareFile(
   };
 
   // 有 preferFid → DFS 递归精确匹配（含多层目录），未命中返回 null（绝不瞎猜回退）
-  if (preferFid) {
-    const wanted = String(preferFid);
+  if (preferFid || preferName) {
+    const wanted = String(preferFid || '');
     let hit: any = null;
     const seenDirs = new Set<string>();
     const dfs = async (pdirFid: string, depth: number): Promise<boolean> => {
       if (depth > 8 || seenDirs.has(pdirFid)) return false; // 深度/循环保护
       seenDirs.add(pdirFid);
       const list = await listAll(pdirFid);
-      const direct = list.find((f: any) => f?.fid && String(f.fid) === wanted);
+      const direct = wanted ? list.find((f: any) => f?.fid && String(f.fid) === wanted) : undefined;
       if (direct) { hit = direct; return true; }
       for (const node of list) {
         if (!isDirNode(node) || !node.fid) continue;
@@ -286,14 +290,46 @@ export async function resolveShareFile(
       }
       return false;
     };
-    const found = await dfs('0', 0);
-    if (!found) {
-      log.w(`quarkTransfer: 分享内未找到指定 fid=${wanted.slice(0, 8)}…（拒绝回退首文件，避免播错集）`);
-      return null;
+    if (wanted) {
+      const found = await dfs('0', 0);
+      if (found) {
+        const file = toFile(hit);
+        if (!file) { log.w('quarkTransfer: 命中节点缺 fid/token'); return null; }
+        return file;
+      }
+      log.w(`quarkTransfer: 分享内未找到指定 fid=${wanted.slice(0, 8)}…`);
     }
-    const file = toFile(hit);
-    if (!file) { log.w('quarkTransfer: 命中节点缺 fid/token'); return null; }
-    return file;
+    // ★ 2026-09-29：fid 未命中（分享更新/换 fid/源侧给的是旧 id）→ 按**集名唯一匹配**兜底。
+    //   判定基于「集号 / 归一文件名」精确相等，且必须**唯一命中**；多候选一律拒绝（杜绝播错集）。
+    const key = episodeKeyOf(preferName || '');
+    if (key) {
+      const all: any[] = [];
+      const seen2 = new Set<string>();
+      const collect = async (pdirFid: string, depth: number): Promise<void> => {
+        if (depth > 8 || seen2.has(pdirFid)) return;
+        seen2.add(pdirFid);
+        const list = await listAll(pdirFid);
+        for (const node of list) {
+          if (isDirNode(node) && node.fid) await collect(String(node.fid), depth + 1);
+          else if (node?.fid) all.push(node);
+        }
+      };
+      await collect('0', 0);
+      const matches = all.filter((n) => episodeKeyOf(String(n?.file_name || n?.fname || '')) === key);
+      if (matches.length === 1) {
+        const file = toFile(matches[0]);
+        if (file) {
+          log.i(`quarkTransfer: 指定 fid 未命中 → 按集名唯一匹配命中（${file.name.slice(0, 40)}）`);
+          return file;
+        }
+      }
+      log.w(
+        matches.length > 1
+          ? `quarkTransfer: 集名匹配到 ${matches.length} 个文件，拒绝盲选（避免播错集）`
+          : 'quarkTransfer: 指定 fid 与集名均未匹配到分享内文件',
+      );
+    }
+    return null;
   }
 
   // 无 preferFid：候选必须唯一才自动选中（单文件分享 / 每集一个分享链接）。
@@ -623,4 +659,51 @@ export function extractEpisodeFid(id: string): string {
   const q = /[?&](?:fid|vfid|file_id)=([^&#"'\\\s]+)/i.exec(id);
   if (q?.[1]) return decodeURIComponent(q[1]);
   return '';
+}
+
+/**
+ * ★ 2026-09-29：从 episode id 提取**集名**（`name`/`file_name`/`fileName`/`title`）。
+ *   用于 fid 在分享内匹配不到时的「按集名唯一匹配」兜底（见 resolveShareFile 第 ④ 条）。
+ */
+export function extractEpisodeName(id: string): string {
+  if (!id) return '';
+  // 值里可能含转义引号（JSON 字符串）→ 用 `(?:[^"\\]|\\.)` 逐字符匹配
+  const V = '((?:[^"\\\\]|\\\\.){1,120})';
+  const pats = [
+    new RegExp(`"name"\\s*:\\s*"${V}"`),
+    new RegExp(`"file_name"\\s*:\\s*"${V}"`),
+    new RegExp(`"fileName"\\s*:\\s*"${V}"`),
+    new RegExp(`"title"\\s*:\\s*"${V}"`),
+  ];
+  for (const re of pats) {
+    const m = re.exec(id);
+    if (m?.[1]) {
+      try {
+        return JSON.parse(`"${m[1]}"`) as string; // 反转义
+      } catch {
+        return m[1];
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * ★ 2026-09-29：集名归一（用于夸克转存的「按集名唯一匹配」兜底）。
+ *   优先集号：`S01E06` / `第6集` / `E06` / `06.mp4` → `ep6`；提不到集号 → 去扩展名的文件名。
+ *   纯函数、可单测；集号相同才算同一集（避免「同名不同集」误判）。
+ */
+export function episodeKeyOf(name: string): string {
+  const s = String(name || '').trim();
+  if (!s) return '';
+  const se = /[Ss]\d{1,2}\s*[Ee]\s*0*(\d{1,4})/.exec(s);
+  if (se) return `ep${Number(se[1])}`;
+  const cn = /第\s*0*(\d{1,4})\s*[集话期]/.exec(s);
+  if (cn) return `ep${Number(cn[1])}`;
+  const e = /[Ee][Pp]?\s*0*(\d{1,4})(?![0-9])/.exec(s);
+  if (e) return `ep${Number(e[1])}`;
+  // 结尾裸集号（`06.mp4` / `斗罗大陆 120`）
+  const bare = /(?:^|[^0-9])0*(\d{1,3})(?=\.[a-z0-9]{1,5}$|\s*$)/i.exec(s);
+  if (bare) return `ep${Number(bare[1])}`;
+  return s.replace(/\.[a-z0-9]{1,6}$/i, '').trim();
 }

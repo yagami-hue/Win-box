@@ -76,6 +76,12 @@ export interface DanmakuCandidate {
   title?: string;
   /** 剧集标题（如 第1话 / 01） */
   episodeTitle?: string;
+  /**
+   * ★ 2026-09-29：接口给的**集号字段**（`episodeNumber`，实测炊烟/腾讯系条目为 "1"/"2"…）。
+   *   部分来源（tencent）的 `episodeTitle` 不含「第N集」字样或为空 ⇒ 只靠标题提不出集号
+   *   → 候选列表看不出是第几集、也排不了序；此字段作显示/排序/匹配的一手依据。
+   */
+  episodeNumber?: string;
   /** 来源接口基础地址 */
   source: string;
   /** 来源显示名（炊烟袅袅 / 稳健 / 御坂 …，UI 标注用） */

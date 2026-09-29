@@ -101,10 +101,14 @@ export function parseEndpointEpisodes(
     const e = raw as Record<string, unknown>;
     const id = Number(e.episodeId);
     if (!Number.isFinite(id)) continue;
+    // ★ 2026-09-29：接口的集号字段（`episodeNumber`，数字或数字串）——tencent 等条目标题可能不提集号
+    const epNumRaw = e.episodeNumber ?? e.episode_number;
+    const epNum = epNumRaw == null ? '' : String(epNumRaw).trim();
     out.push({
       episodeId: id,
       title: title || undefined,
       episodeTitle: e.episodeTitle ? String(e.episodeTitle).trim() : undefined,
+      ...(epNum && /^\d{1,4}$/.test(epNum) ? { episodeNumber: epNum } : {}),
       source,
       sourceName,
     });

@@ -49,7 +49,10 @@ export class JsSpider extends Spider {
       await this.sandbox.ensureLoaded();
       return this.sandbox;
     } catch (e) {
-      this.failure = `${e instanceof Error ? e.name : 'Error'}: ${e instanceof Error ? e.message : String(e)}`;
+      // ★ 2026-09-29：UnsupportedSourceError 的 (message, reason) 是「错误码 + 细节」——
+      //   旧写法只记 message，细节（脚本执行失败原因）丢了，drpy/壳类源排障时只剩一个 SCRIPT_ERROR。
+      const err = e as { name?: string; message?: string; reason?: string };
+      this.failure = `${err.name || 'Error'}: ${err.message || String(e)}${err.reason ? `（${err.reason}）` : ''}`;
       this.host.logger.w(`spider js:${this.siteKey} JS 蜘蛛降级（${this.failure}）api=${this.api}`);
       return null;
     }

@@ -189,23 +189,42 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 /* 顶栏搜索按钮与面板 */
 .sp-btn { cursor: default; }
 .sp-panel {
-  position: absolute; top: calc(100% + 8px); right: 0; z-index: 70; width: 340px; padding: 10px;
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 70; width: 520px; padding: 12px;
   background: var(--bg-glass, rgba(18,20,26,.94)); border: 1px solid var(--border); border-radius: 10px;
   box-shadow: 0 12px 40px rgba(0,0,0,.5); backdrop-filter: blur(8px);
 }
 .sp-row { display: flex; gap: 8px; }
-.sp-input { flex: 1; min-width: 0; }
+/* ★ 2026-09-29（用户要求「搜索框做大一点」）：加高加大输入框 */
+.sp-input { flex: 1; min-width: 0; height: 38px; font-size: 14px; padding: 0 12px; }
 .sp-list { margin-top: 8px; max-height: 300px; overflow: auto; }
 .sp-item { display: flex; justify-content: space-between; gap: 10px; padding: 7px 8px; border-radius: 6px; font-size: 13px; cursor: default; }
 .sp-item:hover { background: var(--accent-soft, rgba(120,170,255,.12)); }
 .sp-meta { font-size: 11px; flex: 0 0 auto; }
 .sp-hot-tip { font-size: 11px; margin: 2px 0 6px; }
-.sp-hot { display: flex; flex-wrap: wrap; gap: 6px; }
-.sp-hot-item {
-  font-size: 12px; padding: 4px 10px; border-radius: 999px; cursor: default;
-  background: var(--bg-elev); border: 1px solid var(--border);
+/* ★ 2026-09-29（用户要求）：左列 = 搜索历史；右列 = 热搜排名榜 */
+.sp-cols { display: flex; gap: 14px; margin-top: 10px; align-items: flex-start; }
+.sp-hist { flex: 1 1 54%; min-width: 0; }
+.sp-rank { flex: 1 1 46%; min-width: 0; border-left: 1px solid var(--border-soft); padding-left: 14px; }
+.sp-hist-list, .sp-rank-list { max-height: 268px; overflow: auto; }
+.sp-hist-item { align-items: center; font-size: 12.5px; padding: 5px 6px; gap: 4px; }
+.sp-hist-txt, .sp-rank-txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-hist-del {
+  all: unset; cursor: pointer; flex: 0 0 auto; color: var(--text-dim); font-size: 11px;
+  padding: 2px 5px; border-radius: 4px; line-height: 1;
 }
-.sp-hot-item:hover { border-color: var(--accent); color: var(--accent); }
+.sp-hist-del:hover { color: var(--danger, #ff6b6b); background: var(--accent-soft, rgba(120,170,255,.12)); }
+.sp-clear {
+  all: unset; cursor: pointer; display: block; box-sizing: border-box; width: 100%; text-align: center;
+  margin-top: 6px; padding: 5px 0; font-size: 12px; color: var(--text-dim);
+  border: 1px dashed var(--border); border-radius: 6px;
+}
+.sp-clear:hover { color: var(--danger, #ff6b6b); border-color: var(--danger, #ff6b6b); }
+.sp-rank-item { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; font-size: 12.5px; cursor: default; }
+.sp-rank-item:hover { background: var(--accent-soft, rgba(120,170,255,.12)); }
+.sp-rank-no {
+  flex: 0 0 18px; text-align: center; font-size: 11px; color: var(--text-dim); line-height: 16px;
+}
+.sp-rank-no.top { color: #fff; font-weight: 700; border-radius: 4px; background: linear-gradient(135deg, #4f86ff, #6a5cff); }
 h2, h3, h4 { font-weight: 650; letter-spacing: .2px; }
 h3 { font-size: 18px; } h4 { font-size: 14px; color: var(--text); }
 
@@ -393,6 +412,24 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 
 /* ---- 播放器音量控件：竖向条状音量条（悬浮面板） ---- */
 .vp-vol { position: relative; display: inline-flex; align-items: center; }
+/* ★ 2026-09-29 DLNA 投屏：控制条按钮 + 设备弹层（与音量面板同款玻璃材质/展开动效） */
+.vp-cast { position: relative; display: inline-flex; align-items: center; }
+.vp-cpanel { position: absolute; bottom: calc(100% + 8px); left: 50%; z-index: 7;
+  transform: translateX(-50%) translateY(6px) scale(.98); transform-origin: bottom center;
+  display: flex; flex-direction: column; gap: 6px; min-width: 168px; max-width: 260px;
+  padding: 10px; border-radius: 10px;
+  background: rgba(10, 12, 16, .86); border: 1px solid rgba(255, 255, 255, .1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45); backdrop-filter: blur(8px);
+  opacity: 0; pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
+.vp-cpanel.open { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0) scale(1); }
+.vp-cpct { font-size: 11px; color: rgba(255, 255, 255, .62); padding: 0 2px 2px; }
+.vp-citem { text-align: left; font-size: 12px; padding: 6px 8px; border-radius: 7px; cursor: pointer;
+  background: rgba(255, 255, 255, .07); border: 1px solid rgba(255, 255, 255, .08); color: #fff;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vp-citem:hover:not(:disabled) { background: rgba(255, 255, 255, .14); }
+.vp-citem:disabled { opacity: .55; cursor: default; }
+.vp-crefresh { color: rgba(255, 255, 255, .72); background: transparent; }
+.vp-cmsg { font-size: 11px; color: rgba(255, 255, 255, .72); line-height: 1.5; word-break: break-all; }
 .vp-vpanel { position: absolute; bottom: calc(100% + 8px); left: 50%; z-index: 7;
   transform: translateX(-50%) translateY(6px) scale(.98); transform-origin: bottom center;
   display: flex; flex-direction: column; align-items: center; gap: 6px;
@@ -497,11 +534,43 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
    直播页此前把它直接放进 block 容器 `.right` → flex 失效 + 子元素全为绝对定位 → 高度折成 0。
    这里给出「定比 + 视口上限」的 flex 宿主，`.vplayer` 的 flex:1 重新生效（宽度显式取 min 以同时满足两约束）。 */
 .live-player { width: min(100%, calc(62vh * 16 / 9)); aspect-ratio: 16 / 9; display: flex; }
+/* ★ 2026-09-29 WebDAV 存储页：面包屑 / 目录行 / 播放器宿主（与直播页同「定比 + 视口上限」口径） */
+.dav-crumb { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 8px; font-size: 12.5px; }
+.dav-crumb-item { cursor: pointer; }
+.dav-crumb-item:hover { color: var(--accent); }
+.dav-player { width: min(100%, calc(48vh * 16 / 9)); aspect-ratio: 16 / 9; display: flex; margin-bottom: 8px; }
+.dav-list { display: flex; flex-direction: column; }
+.dav-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: 12.5px; border-bottom: 1px solid var(--border); }
+.dav-row:last-child { border-bottom: none; }
+.dav-row:hover { background: var(--bg-elev); }
+.dav-ico { flex: none; width: 18px; text-align: center; }
+.dav-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dav-size { flex: none; width: 76px; text-align: right; }
+.dav-time { flex: none; width: 124px; text-align: right; }
+/* ★ 2026-09-29 EPG：当前 / 下一档一行（仅当该频道有节目单时渲染） */
+.live-epg { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 8px; font-size: 12.5px; }
+.live-epg > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.live-epg b { font-weight: 600; color: var(--text-dim); margin-right: 4px; }
+.live-epg-now { color: var(--text); }
 .ep-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; }
 .ep { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 7px; cursor: pointer;
   font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: all .12s; }
 .ep:hover { border-color: var(--accent); color: var(--text); }
 .ep.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
+/* ★ 2026-09-29 启动强制更新门禁：本地版本低于 GitHub 最新 Release 时遮挡全界面（不更新不可用） */
+.upd-blur { pointer-events: none; filter: blur(2px); opacity: .35; }
+.upd-overlay { position: fixed; inset: 0; z-index: 5000; display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .72); backdrop-filter: blur(8px); }
+.upd-card { width: 480px; max-width: 92vw; padding: 26px; background: var(--bg); box-shadow: 0 18px 60px rgba(0, 0, 0, .55); }
+.upd-vers { font-size: 12.5px; margin-bottom: 18px; }
+.upd-bar { height: 8px; border-radius: 6px; background: rgba(127, 127, 127, .25); overflow: hidden; }
+.upd-fill { height: 100%; width: 2%; border-radius: 6px; background: var(--accent); transition: width .25s ease; }
+.upd-status { display: flex; justify-content: space-between; gap: 10px; margin-top: 10px; font-size: 12.5px; }
+.upd-speed { margin-top: 4px; font-size: 12px; }
+.upd-err { font-size: 13px; color: var(--danger); line-height: 1.7; }
+.upd-actions { justify-content: flex-end; margin-top: 20px; }
 
 /* ---- 滚动条 ---- */
 ::-webkit-scrollbar { width: 9px; height: 9px; }

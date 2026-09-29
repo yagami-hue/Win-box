@@ -9,6 +9,8 @@ import type {
   PlayResult,
   LiveGroup,
   LiveBean,
+  EpgChannelRef,
+  LiveEpgResult,
   UserConfig,
   SourceMoveDirection,
   SourceUpdatePatch,
@@ -30,6 +32,11 @@ import type {
 import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings } from '../../shared/danmaku';
 import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../../shared/types';
 import type { MetaSettings, MetaSettingsView, MetaSuggestion } from '../../shared/meta';
+import type { PlayerSettings } from '../../shared/player';
+import type { BackupExportResult, BackupImportResult } from '../../shared/backup';
+import type { DavBrowseResult, DavServer } from '../../shared/webdav';
+import type { DlnaCastResult, DlnaCastTarget, DlnaDevice } from '../../shared/dlna';
+import type { UpdateCheckResult, UpdateProgress } from '../../shared/update';
 
 interface HomeResult {
   sortClasses: { id: string; name: string; flag?: string; filters?: FilterGroup[] }[];
@@ -95,6 +102,26 @@ declare global {
       live: {
         load: (index: number) => Promise<IpcResult<{ groups: LiveGroup[]; liveName: string }>>;
         meta: () => Promise<IpcResult<LiveBean[]>>;
+        /** ★ 2026-09-29 EPG：传入该线路的频道引用，返回各键（tvg-id/tvg-name/频道名）的「当前 / 下一档」 */
+        epg: (index: number, channels: EpgChannelRef[]) => Promise<IpcResult<LiveEpgResult>>;
+      };
+      /** ★ 2026-09-29 设置备份（含渲染层 localStorage） */
+      backup: {
+        export: (renderer: Record<string, string>) => Promise<IpcResult<BackupExportResult>>;
+        import: () => Promise<IpcResult<BackupImportResult>>;
+      };
+      /** ★ 2026-09-29 WebDAV 存储（只读） */
+      dav: {
+        list: () => Promise<IpcResult<DavServer[]>>;
+        set: (s: DavServer) => Promise<IpcResult<DavServer>>;
+        remove: (id: string) => Promise<IpcResult<void>>;
+        browse: (a: { id: string; path?: string }) => Promise<IpcResult<DavBrowseResult>>;
+        openExternal: (url: string) => Promise<IpcResult<{ ok: boolean; player?: string; error?: string }>>;
+      };
+      /** ★ 2026-09-29 DLNA 投屏（SSDP 发现 + AVTransport 三动作） */
+      dlna: {
+        discover: () => Promise<IpcResult<DlnaDevice[]>>;
+        cast: (a: { device: DlnaDevice; target: DlnaCastTarget }) => Promise<IpcResult<DlnaCastResult>>;
       };
       subtitle: {
         get: () => Promise<IpcResult<SubtitleSettings>>;
@@ -176,6 +203,22 @@ declare global {
       quark: {
         cleanup: () => Promise<IpcResult<void>>;
       };
+      // ★ 播放偏好（m3u8 去广告开关；改后本地中继 /play 即时生效）
+      playerPrefs: {
+        get: () => Promise<IpcResult<PlayerSettings>>;
+        set: (patch: Partial<PlayerSettings>) => Promise<IpcResult<PlayerSettings>>;
+      };
+      // ★ 2026-09-29 磁力（BT）：本机已安装的外部播放器（MKV/HEVC 接力；只探测不启动）
+      bt: {
+        detectPlayers: () => Promise<IpcResult<Array<{ id: string; name: string; path: string }>>>;
+      };
+      /** ★ 2026-09-29 启动强制更新 */
+      update: {
+        check: () => Promise<IpcResult<UpdateCheckResult>>;
+        download: () => Promise<IpcResult<{ ok: boolean; path?: string; error?: string }>>;
+        install: () => Promise<IpcResult<{ ok: boolean; path: string }>>;
+        onProgress: (cb: (p: UpdateProgress) => void) => () => void;
+      };
     };
   }
 }
@@ -238,6 +281,9 @@ export const client = {
   mergeSave: (a: { content: string; defaultName?: string }) => unwrap(window.api.merge.save(a)),
   // 夸克落盘文件清理（播放页/播放器页卸载、窗口关闭时触发）
   quarkCleanup: () => unwrap(window.api.quark.cleanup()),
+  // ★ 播放偏好（m3u8 去广告开关；配置页读写，本地中继 /play 即时生效）
+  playerPrefsGet: () => unwrap(window.api.playerPrefs.get()),
+  playerPrefsSet: (patch: Partial<PlayerSettings>) => unwrap(window.api.playerPrefs.set(patch)),
   driveGet: () => unwrap(window.api.drives.get()),
   driveSet: (provider: string, token: string) => unwrap(window.api.drives.set({ provider, token })),
   driveRemove: (provider: string) => unwrap(window.api.drives.remove(provider)),
@@ -253,6 +299,19 @@ export const client = {
   play: (a: { key: string; flag: string; id: string }) => unwrap(window.api.vod.play(a)),
   loadLive: (index: number) => unwrap(window.api.live.load(index)),
   liveMeta: () => unwrap(window.api.live.meta()),
+  liveEpg: (index: number, channels: EpgChannelRef[]) => unwrap(window.api.live.epg(index, channels)),
+  /** ★ 2026-09-29 设置备份 */
+  backupExport: (renderer: Record<string, string>) => unwrap(window.api.backup.export(renderer)),
+  backupImport: () => unwrap(window.api.backup.import()),
+  /** ★ 2026-09-29 WebDAV 存储（只读） */
+  davList: () => unwrap(window.api.dav.list()),
+  davSet: (s: DavServer) => unwrap(window.api.dav.set(s)),
+  davRemove: (id: string) => unwrap(window.api.dav.remove(id)),
+  davBrowse: (a: { id: string; path?: string }) => unwrap(window.api.dav.browse(a)),
+  davOpenExternal: (url: string) => unwrap(window.api.dav.openExternal(url)),
+  /** ★ 2026-09-29 DLNA 投屏 */
+  dlnaDiscover: () => unwrap(window.api.dlna.discover()),
+  dlnaCast: (a: { device: DlnaDevice; target: DlnaCastTarget }) => unwrap(window.api.dlna.cast(a)),
   subtitleGet: () => unwrap(window.api.subtitle.get()),
   subtitleSet: (patch: Partial<SubtitleSettings>) => unwrap(window.api.subtitle.set(patch)),
   /** ★ 2026-09-28：各字幕源的开关/可用状态（配置页渲染） */
@@ -288,6 +347,13 @@ export const client = {
   /** ★ 发现页 Hero 轮播：横版剧照（≤6）/ 竖版海报（≤8），已包装 /img 中继 */
   metaImages: (mediaType: 'movie' | 'tv', tmdbId: number) => unwrap(window.api.meta.images(mediaType, tmdbId)),
   netSpeed: (cb: (kbs: number) => void) => window.api.net.onSpeed(cb),
+  /** ★ 2026-09-29 磁力（BT）：探测本机外部播放器（MKV/HEVC 接力；配置页可指定路径） */
+  btDetectPlayers: () => unwrap(window.api.bt.detectPlayers()),
+  /** ★ 2026-09-29 启动强制更新：检查 / 下载 / 拉起安装程序（进度走 onUpdateProgress） */
+  updateCheck: () => unwrap(window.api.update.check()),
+  updateDownload: () => unwrap(window.api.update.download()),
+  updateInstall: () => unwrap(window.api.update.install()),
+  onUpdateProgress: (cb: (p: UpdateProgress) => void) => window.api.update.onProgress(cb),
   /** ★ 网络代理设置（DNS 污染 / SNI 阻断站点用） */
   proxyGet: () => unwrap<{ enabled: boolean; url: string }>(window.api.net.proxyGet()),
   proxySet: (patch: { enabled?: boolean; url?: string }) =>

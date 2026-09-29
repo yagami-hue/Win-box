@@ -121,18 +121,23 @@ function epNumberOf(s: string): string {
 
 /**
  * 弹幕候选显示压缩：`斗破苍穹年番 第212话` → `斗破苍穹年番 · 第212集`；
- * `斗破苍穹（2022）第2季 第5集` → `斗破苍穹（2022）· 第2季 · 第5集`。
+ * `斗罗大陆系列小剧场(2026)【动漫】from tencent` → `斗罗大陆系列小剧场 · 第1集`。
  * 年份取标题里的 `(19|20)xx`（带不带括号都认，纯净化为全角括号展示）；
- * 季号沿用 {@link seasonOf}；集号优先取 `episodeTitle`，提不到再退回标题。
+ * 季号沿用 {@link seasonOf}；集号优先取 `episodeTitle`，其次接口的 `episodeNumber`，最后退回标题。
+ * ★ 2026-09-29：净化「平台/类型」噪声（`【动漫】` / `from tencent` 等）——它们会把
+ *   `· 第N集` 挤到第二行或截断，用户反映「tencent 的条目看不到是第几集」。
  */
-export function formatCandidateLabel(title?: string, episodeTitle?: string): string {
+export function formatCandidateLabel(title?: string, episodeTitle?: string, episodeNumber?: string): string {
   const raw = full2half((title || '').trim());
   const ym = /[（(\[]?\s*((?:19|20)\d{2})\s*[）)\]]?/.exec(raw);
   const year = ym ? ym[1] : '';
-  const ep = epNumberOf(episodeTitle || '') || epNumberOf(raw);
+  const num = (episodeNumber || '').trim();
+  const ep = epNumberOf(episodeTitle || '') || (/^\d{1,4}$/.test(num) ? stripEp(num) : '') || epNumberOf(raw);
   const season = seasonOf(raw) ?? seasonOf(episodeTitle || '');
   let name = raw
     .replace(/[（(\[]\s*(?:19|20)\d{2}\s*[）)\]]/g, ' ')
+    .replace(/\bfrom\s*[^\s（()\u4e00-\u9fa5]+/gi, ' ')
+    .replace(/[（(\[【]\s*(?:3D)?(?:动漫|动画|国漫|日漫|电视剧|电影|综艺|纪录片|TV|OVA)\s*[）)\]】]/gi, ' ')
     .replace(/第\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*[季部]/g, ' ')
     .replace(/[Ss](?:eason)?\s*\d{1,2}\s*[Ee]\s*\d{1,4}/g, ' ')
     .replace(/[Ss]\s*\d{1,2}(?![0-9A-Za-z])/g, ' ')

@@ -1,7 +1,7 @@
 // tests/multiRepo.spec.ts
 // 多仓（影视仓/多仓盒子 {urls:[...]}）订阅格式识别纯函数单测。
 import { describe, expect, it } from 'vitest';
-import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName } from '../src/engine/config/multiRepo';
+import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName, splitRepoLine, pickRepoLine } from '../src/engine/config/multiRepo';
 
 describe('parseMultiRepo', () => {
   it('识别标准多仓 {urls:[{url,name}]}', () => {
@@ -59,6 +59,35 @@ describe('parseMultiRepo', () => {
     const r = parseMultiRepo('{"urls":[{"url":"https://a.example/x.json","name":"带//的名称"}]}');
     expect(r?.items?.[0]?.url).toBe('https://a.example/x.json');
     expect(r?.items?.[0]?.name).toBe('带//的名称');
+  });
+});
+
+// ★ 2026-09-29：多仓选线路 `#line=N`（对位 CatClaw `TvBoxSubscriptionManager.SplitLine` /
+//   `lines[Math.Clamp(lineIndex, 0, lines.Count - 1)]`）—— 拉取前剥掉、越界收敛、非法不处理。
+describe('splitRepoLine / pickRepoLine（#line=N 选线路）', () => {
+  it('剥离尾部 #line=N（大小写不敏感）并给出下标', () => {
+    expect(splitRepoLine('https://a/b.json#line=2')).toEqual({ url: 'https://a/b.json', line: 2 });
+    expect(splitRepoLine('https://a/b.json#line=0')).toEqual({ url: 'https://a/b.json', line: 0 });
+    expect(splitRepoLine('https://a/b.json#LINE=3')).toEqual({ url: 'https://a/b.json', line: 3 });
+    expect(splitRepoLine('  https://a/b.json#line=1  ')).toEqual({ url: 'https://a/b.json', line: 1 });
+  });
+
+  it('无标记 / 非法 / 在地址开头 → 原样返回（line = -1，不误伤 URL）', () => {
+    expect(splitRepoLine('https://a/b.json')).toEqual({ url: 'https://a/b.json', line: -1 });
+    expect(splitRepoLine('https://a/b.json#line=')).toEqual({ url: 'https://a/b.json#line=', line: -1 });
+    expect(splitRepoLine('https://a/b.json#line=-1')).toEqual({ url: 'https://a/b.json#line=-1', line: -1 });
+    expect(splitRepoLine('https://a/b.json#line=abc')).toEqual({ url: 'https://a/b.json#line=abc', line: -1 });
+    expect(splitRepoLine('https://a/b.json#line=2&x=1')).toEqual({ url: 'https://a/b.json#line=2&x=1', line: -1 });
+    expect(splitRepoLine('#line=2')).toEqual({ url: '#line=2', line: -1 });
+    expect(splitRepoLine('')).toEqual({ url: '', line: -1 });
+  });
+
+  it('取线路：越界收敛（负数→首条 / 过大→末条），空列表 → null', () => {
+    const items = [{ url: 'https://a' }, { url: 'https://b' }, { url: 'https://c', name: '丙' }];
+    expect(pickRepoLine(items, 1)).toEqual({ index: 1, item: { url: 'https://b' } });
+    expect(pickRepoLine(items, -1)?.index).toBe(0);
+    expect(pickRepoLine(items, 9)).toEqual({ index: 2, item: { url: 'https://c', name: '丙' } });
+    expect(pickRepoLine([], 0)).toBeNull();
   });
 });
 

@@ -9,7 +9,7 @@
 //     拿到 404 → 初始化失败 → 分类/首页空白。
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { request as undiciRequest, Agent } from 'undici';
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, createReadStream } from 'node:fs';
 import { join, normalize, sep } from 'node:path';
 import { decodeUrlSafe } from '../../engine/util/base64';
 import type { Logger } from '../../shared/types';
@@ -19,10 +19,26 @@ import { logPlayDiag, redactUrl } from '../util/playDiag';
 import { createDohAgent } from '../net/DnsResolver';
 import { dispatchChain } from '../net/proxy';
 import { mergeSetCookies, setCookieList, cookiePairOf } from '../net/cookieMerge';
+import { purifyVodM3u8 } from '../../engine/util/m3u8Purify';
+import { parseBtRoute } from '../../engine/torrent/magnet';
 
 const agent = new Agent({ connect: { timeout: 30000 } });
 /** 出图中继专用（TMDB 图床经 DoH 可达；渲染层直连可能被 DNS 污染 → 图裂） */
 const imgAgent = createDohAgent();
+
+/** `/bt` 中继的分片大小：与 /play 聚合一致；每片前做一次 piece 门控（seek 到未下载区即等待） */
+const BT_CHUNK = 512 * 1024;
+
+/**
+ * ★ 2026-09-29：BT 取流访问口（磁力 B）。实现方是 main/torrent/torrentPlay（会话表 + piece 门控）。
+ * 抽成接口是为了让本中继不认识 aria2：它只负责「Range 解析 → 等数据 → 从磁盘喂字节」。
+ */
+export interface BtStreamAccess {
+  /** 命中会话且文件序号一致 → 给本地绝对路径与 torrent 内布局；否则 null（404） */
+  resolveStream(infoHash: string, fileIndex: number): { absPath: string; length: number; fileOffset: number; pieceLength: number } | null;
+  /** 等 [start,end]（文件内相对字节）落盘；false = 超时/零进度（调用方 503，绝不喂零） */
+  waitCovered(infoHash: string, fileIndex: number, start: number, end: number, opts?: { timeoutMs?: number; stallMs?: number }): Promise<boolean>;
+}
 
 /**
  * ★ 2026-09-25：出站 dispatcher 链 —— 用户设的**网络代理**（非本机目标）优先，其次 DoH，最后直连。
@@ -54,6 +70,8 @@ export class LocalProxyServer {
    *   key 只有那个 JVM 能解，所以这里要做一次本机转发；转发的同时通知池别回收它，否则播放中段断流。
    */
   onSpiderProxy?: (port: number) => void;
+  /** ★ 2026-09-29：BT 取流口（磁力 B；main/index.ts 注入 TorrentPlay；未注入 = /bt 一律 404） */
+  bt?: BtStreamAccess;
   /**
    * ★ 2026-09-26：网盘播放会话 Cookie jar（provider → 上游下发的 `k=v` 键值行）。
    *   上游直链/清单响应会刷新 `__puus` 等会话 cookie，必须与账号 cookie 一起用；
@@ -62,7 +80,22 @@ export class LocalProxyServer {
    */
   private playCookieJar = new Map<string, string[]>();
 
-  constructor(private logger: Logger, private driveTokens?: () => Record<string, string>) {}
+  constructor(
+    private logger: Logger,
+    private driveTokens?: () => Record<string, string>,
+    /**
+     * ★ 2026-09-29：m3u8 去广告注入（对位 TVBox `HawkConfig.M3U8_PURIFY`，默认关）。
+     *   · `enabled()` —— 配置页开关（<userData>/player-settings.json），每轮清单回源时读一次 → 改后即时生效；
+     *   · `rulesFor(url)` —— 该播放地址所属 host 的订阅 `rules[].regex`（`hostRegexFor` 的产物）。
+     *   不注入 = 彻底不做去广告（旧行为）。
+     */
+    private purify?: { enabled: () => boolean; rulesFor: (url: string) => string[] },
+    /**
+     * ★ 2026-09-29 WebDAV 取流认证：`/play?...&dav=<serverId>` → 该服务器的 `Authorization` 头值。
+     *   凭据只存在主进程加密存储里，**绝不进 URL**；不注入 = 不做 WebDAV 认证（旧行为）。
+     */
+    private davAuth?: (id: string) => string,
+  ) {}
 
   /** 把 jar 里记下的 Set-Cookie 键值合并进本次请求的 Cookie（无记录则原样返回） */
   private applyPlayCookieJar(provider: string, base: string): string {
@@ -82,7 +115,7 @@ export class LocalProxyServer {
     this.playCookieJar.set(provider, keep.slice(-20));
   }
 
-  start(): Promise<void> {
+  start(port: number = LOCAL_PROXY_PORT): Promise<void> {
     return new Promise((resolve) => {
       this.server = createServer((req, res) => this.handle(req, res));
       // ★ 2026-09-26 真 bug 修复：端口被占用时**必须让 Promise 落定**——旧实现只在 error 里记日志，
@@ -91,12 +124,12 @@ export class LocalProxyServer {
       let settled = false;
       const done = () => { if (!settled) { settled = true; resolve(); } };
       this.server.on('error', (e) => {
-        this.logger.e(`proxy 监听失败（${LOCAL_PROXY_PORT} 端口占用？本地中继不可用：直播归一化 / /play / /img 会失效）`, e);
+        this.logger.e(`proxy 监听失败（${port} 端口占用？本地中继不可用：直播归一化 / /play / /img 会失效）`, e);
         try { this.server?.close(); } catch { /* ignore */ }
         done();
       });
-      this.server.listen(LOCAL_PROXY_PORT, '127.0.0.1', () => {
-        this.logger.i(`proxy: 监听 127.0.0.1:${LOCAL_PROXY_PORT}`);
+      this.server.listen(port, '127.0.0.1', () => {
+        this.logger.i(`proxy: 监听 127.0.0.1:${port}`);
         done();
       });
     });
@@ -168,6 +201,9 @@ export class LocalProxyServer {
       }
       if (u.pathname.startsWith('/file/')) {
         return this.fileProxy(u, res);
+      }
+      if (u.pathname.startsWith('/bt/')) {
+        return this.btProxy(u, req, res);
       }
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('not found');
@@ -275,6 +311,131 @@ private imgProxy(u: URL, res: ServerResponse): void {
     }
   }
 
+  /**
+   * `/bt/<infoHash>/<fileIndex>` —— 磁力（BT）取流中继（★ 2026-09-29，方案 B）。
+   *
+   * 与 `/play` 的差别：数据不在上游，而在**本机 aria2 正在下载的文件**里，因此：
+   *   ① 必须有 Range：`<video>` 的 seek、外部播放器的起播探测全靠它（200 只回整段会拖死拖动）；
+   *   ② 必须有**piece 门控**：文件是稀疏的（未下载区读出来是零字节）→ 喂零 = 坏流。
+   *      分片喂：每 BT_CHUNK 之前问一次 `waitCovered`，未落盘就等（此时播放器看到的是"缓存中"）；
+   *      首片单独门控（只等这一小段，而不是等整个 Range —— 否则 `bytes=0-` 会变成"等全片下完"）；
+   *   ③ 速率统计照旧推 `onSpeed`（播放器「缓存中 x MB/s」与 /play 共用同一条通道）。
+   */
+  private async btProxy(u: URL, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const t = parseBtRoute(u.pathname);
+    const stream = t ? this.bt?.resolveStream(t.infoHash, t.fileIndex) : null;
+    if (!t || !stream) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('bt session not found');
+      return;
+    }
+    const total = stream.length;
+    if (!(total > 0)) {
+      res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('bt file empty');
+      return;
+    }
+    const rangeRaw = req.headers['range'];
+    const range = rangeRaw === undefined ? '' : Array.isArray(rangeRaw) ? rangeRaw[0] : String(rangeRaw);
+    let start = 0;
+    let end = total - 1;
+    const partial = !!range;
+    if (range) {
+      const parsed = parseByteRange(range);
+      if (!parsed) {
+        res.writeHead(416, { 'Content-Range': `bytes */${total}` });
+        res.end();
+        return;
+      }
+      start = Math.min(Math.max(0, parsed.start), total - 1);
+      end = parsed.end === undefined ? total - 1 : Math.min(parsed.end, total - 1);
+      if (end < start) {
+        res.writeHead(416, { 'Content-Range': `bytes */${total}` });
+        res.end();
+        return;
+      }
+    }
+    const headers: Record<string, string> = {
+      'Content-Type': guessContentType(stream.absPath),
+      'Accept-Ranges': 'bytes',
+      'Content-Length': String(end - start + 1),
+      'Access-Control-Allow-Origin': '*',
+    };
+    if (partial) headers['Content-Range'] = `bytes ${start}-${end}/${total}`;
+    if (req.method === 'HEAD') {
+      res.writeHead(partial ? 206 : 200, headers);
+      res.end();
+      return;
+    }
+    // 首片门控：等这一小段落盘再写响应头（否则播放器拿到 200 却迟迟无字节，早早判死）
+    const firstEnd = Math.min(end, start + BT_CHUNK - 1);
+    const ready = await this.bt?.waitCovered(t.infoHash, t.fileIndex, start, firstEnd);
+    if (res.destroyed || req.destroyed) return; // 等待期间客户端已断开（seek/关闭）
+    if (!ready) {
+      this.logger.w(`proxy /bt: 首段未就绪（做种冷/超时）${t.infoHash.slice(0, 8)} [${start},${firstEnd}]`);
+      res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('bt data not ready');
+      return;
+    }
+    res.writeHead(partial ? 206 : 200, headers);
+    // 速率统计（与 /play 同一口径：按真实写回播放器的字节）
+    const out = { bytes: 0, prev: 0, prevT: 0 };
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+    res.once('close', stop);
+    res.once('finish', stop);
+    if (this.onSpeed) {
+      timer = setInterval(() => {
+        const now = Date.now();
+        const dt = (now - out.prevT) / 1000;
+        if (out.prevT > 0 && dt > 0) {
+          const kbs = (out.bytes - out.prev) / 1024 / dt;
+          if (kbs > 0) this.onSpeed?.(kbs);
+        }
+        out.prev = out.bytes;
+        out.prevT = now;
+      }, 600);
+    }
+    const aborted = () => res.destroyed || req.destroyed;
+    try {
+      for (let pos = start; pos <= end; pos += BT_CHUNK) {
+        const stop2 = Math.min(pos + BT_CHUNK - 1, end);
+        if (pos > start) {
+          const ok = await this.bt?.waitCovered(t.infoHash, t.fileIndex, pos, stop2);
+          if (aborted()) return;
+          if (!ok) {
+            this.logger.w(`proxy /bt: 片段未就绪，断开本次取流 ${t.infoHash.slice(0, 8)} [${pos},${stop2}]`);
+            res.destroy();
+            return;
+          }
+        }
+        await this.pipeFileSlice(stream.absPath, pos, stop2, res, out);
+        if (aborted()) return;
+      }
+      if (!res.writableEnded) res.end();
+    } catch (e) {
+      if (!(e instanceof Error) || e.name !== 'AbortError') this.logger.w(`proxy /bt 取流异常：${(e as Error).message}`);
+      res.destroy();
+    }
+  }
+
+  /** 从本地文件读 [start,end] 并写回播放器（背压感知；文件此时必然已落盘） */
+  private pipeFileSlice(absPath: string, start: number, end: number, res: ServerResponse, out: { bytes: number }): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const rs = createReadStream(absPath, { start, end });
+      rs.on('data', (chunk) => {
+        out.bytes += chunk.length;
+        if (!res.write(chunk)) {
+          rs.pause();
+          res.once('drain', () => rs.resume());
+        }
+      });
+      rs.on('error', (e) => { rs.destroy(); reject(e); });
+      rs.on('end', () => resolve());
+      res.once('close', () => rs.destroy());
+    });
+  }
+
   /** do=live：ext 是 base64urlsafe 的真实订阅 URL，抓取后原样返回 */
   private async liveProxy(u: URL, res: ServerResponse): Promise<void> {
     const ext = u.searchParams.get('ext') || '';
@@ -298,6 +459,7 @@ private imgProxy(u: URL, res: ServerResponse): void {
     const referer = u.searchParams.get('referer') || '';
     const ck = u.searchParams.get('ck') || '';
     const rawCookie = u.searchParams.get('cookie') || ''; // 蜘蛛 header 直接给的原始 Cookie
+    const dav = u.searchParams.get('dav') || '';
     if (!target) {
       res.writeHead(400);
       res.end('missing url'); return;
@@ -305,6 +467,17 @@ private imgProxy(u: URL, res: ServerResponse): void {
     const headers: Record<string, string> = {};
     if (ua) headers['User-Agent'] = ua;
     if (referer) headers['Referer'] = referer;
+    // ★ 2026-09-29 WebDAV：凭据从主进程加密存储取（`dav=<id>`），只注入 Authorization
+    if (dav) {
+      const auth = this.davAuth ? this.davAuth(dav) : '';
+      if (!auth) {
+        this.logger.w(`proxy /play: WebDAV 服务器不可用或未填凭据（dav=${dav}）`);
+        res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('WebDAV 服务器不存在或凭据缺失，请在配置页「存储」中检查');
+        return;
+      }
+      headers['Authorization'] = auth;
+    }
     let cookie = rawCookie;
     if (ck) {
       const c = this.driveTokens ? (this.driveTokens()[ck] || '') : '';
@@ -366,9 +539,25 @@ private imgProxy(u: URL, res: ServerResponse): void {
     try { pathIsPlaylist = /\.m3u8$/i.test(new URL(target).pathname); } catch { /* 非法 URL 交给下游 */ }
     if (/mpegurl|m3u8/i.test(ct) || pathIsPlaylist) {
       // m3u8 清单小，读全文后重写片段地址（每段都走 /play 带回 header/Cookie）
-      const raw = Buffer.from(await resp.body.arrayBuffer());
+      const rawText = Buffer.from(await resp.body.arrayBuffer()).toString('utf-8');
       const base = resp.finalUrl || target; // ★ 302/重定向后的真实地址
-      const body = rewriteM3u8(raw, base, ua, referer, cookie);
+      // ★ 2026-09-29 m3u8 去广告（TVBox M3u8.purify 移植；默认关，见 player-settings.json）
+      //   口径照抄 TVBox VodController.java:1962-1974：只对**点播**清单（含 ENDLIST）做，
+      //   且只有确实删到段（removed > 0）才替换播放列表 —— 否则一律回原文。
+      let text = rawText;
+      if (this.purify?.enabled()) {
+        try {
+          const p = purifyVodM3u8(rawText, base, this.purify.rulesFor(base), (m) => this.logger.i(`proxy /play: ${m}`));
+          if (p && p.removed > 0) {
+            text = p.text;
+            this.logger.i(`proxy /play: m3u8 去广告移除 ${p.removed}/${p.total} 段（${redactUrl(base)}）`);
+          }
+        } catch (e) {
+          // 清洗失败绝不影响播放：回原文
+          this.logger.w(`proxy /play: m3u8 去广告异常，已回原文：${(e as Error).message}`);
+        }
+      }
+      const body = rewriteM3u8(Buffer.from(text, 'utf-8'), base, ua, referer, cookie);
       res.writeHead(resp.status, { 'Content-Type': /mpegurl|m3u8/i.test(ct) ? ct : 'application/vnd.apple.mpegurl' });
       res.end(body);
       return;
@@ -850,5 +1039,13 @@ function guessContentType(path: string): string {
   if (p.endsWith('.gif')) return 'image/gif';
   if (p.endsWith('.webp')) return 'image/webp';
   if (p.endsWith('.svg')) return 'image/svg+xml';
+  // ★ 2026-09-29 /bt 取流：媒体类型必须给对（浏览器据此选解码器；octet-stream 会被拒）
+  if (p.endsWith('.mp4') || p.endsWith('.m4v')) return 'video/mp4';
+  if (p.endsWith('.webm')) return 'video/webm';
+  if (p.endsWith('.mkv')) return 'video/x-matroska';
+  if (p.endsWith('.mov')) return 'video/quicktime';
+  if (p.endsWith('.ts')) return 'video/mp2t';
+  if (p.endsWith('.avi')) return 'video/x-msvideo';
+  if (p.endsWith('.flv')) return 'video/x-flv';
   return 'application/octet-stream';
 }
