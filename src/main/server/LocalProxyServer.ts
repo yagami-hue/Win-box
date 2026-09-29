@@ -15,6 +15,7 @@ import { decodeUrlSafe } from '../../engine/util/base64';
 import type { Logger } from '../../shared/types';
 import { LOCAL_PROXY_BASE, LOCAL_PROXY_PORT } from '../../shared/constants';
 import { userDataDir, cacheDir } from '../util/paths';
+import { logPlayDiag, redactUrl } from '../util/playDiag';
 import { createDohAgent } from '../net/DnsResolver';
 import { dispatchChain } from '../net/proxy';
 import { mergeSetCookies, setCookieList, cookiePairOf } from '../net/cookieMerge';
@@ -327,9 +328,34 @@ private imgProxy(u: URL, res: ServerResponse): void {
     const range = req.headers['range'];
     if (range) headers['Range'] = Array.isArray(range) ? range[0] : String(range);
 
-    const resp = await this.openStream(target, headers);
+    let resp = await this.openStream(target, headers);
+    // ★ 2026-09-28：网盘会话过期（UC 非会员尤甚）→ 上游 401/403 往往**同时下发刷新后的会话 Cookie**
+    //   （`__puus`）。先把 Set-Cookie 记进会话 jar，再用刷新后的 Cookie 重试一次；仍失败才把失败透传。
+    if (ck && (resp.status === 401 || resp.status === 403)) {
+      this.rememberPlaySetCookies(ck, resp.headers);
+      const retryCookie = this.applyPlayCookieJar(ck, cookie);
+      if (retryCookie && retryCookie !== cookie) {
+        try { await resp.body.dump(); } catch { /* 旧响应体丢弃失败无妨 */ }
+        cookie = retryCookie;
+        headers['Cookie'] = cookie;
+        this.logger.w(`proxy /play: 上游 ${resp.status} → 用刷新后的会话 Cookie 重试一次（provider=${ck}）`);
+        resp = await this.openStream(target, headers);
+      } else {
+        this.logger.w(`proxy /play: 上游 ${resp.status} 且无可刷新的会话 Cookie（provider=${ck}，绑定可能已失效）`);
+      }
+    }
     // 上游 Set-Cookie（刷新后的 __puus 等）→ 记入本会话 cookie jar，供后续分片/清单请求使用
     if (ck) this.rememberPlaySetCookies(ck, resp.headers);
+    // ★ 2026-09-28：每次回源的**结果落一行诊断**（播放失败率统计的第一手数据）
+    logPlayDiag({
+      kind: 'relay',
+      stage: 'upstream',
+      ok: resp.status < 400,
+      status: resp.status,
+      ck: ck || undefined,
+      range: range ? String(range).slice(0, 32) : undefined,
+      url: redactUrl(target),
+    });
     const ct = (resp.headers['content-type'] as string | undefined) || 'application/octet-stream';
     // ★ 2026-09-23 修复 py 源「视频无法播放」：清单判定不能只看 Content-Type，
     //   且**相对地址必须以「302 之后的最终地址」为基准**重写。
@@ -396,6 +422,10 @@ private imgProxy(u: URL, res: ServerResponse): void {
         (resp.body as unknown as { cancel?: () => Promise<void> }).cancel?.().catch(() => { /* ignore */ });
         return;
       }
+      // ★ 2026-09-28：聚合**没能接管**时必须留痕 —— 旧实现静默降级成单连接，
+      //   表现是「能播但极慢/偶发卡顿」，却查不到原因（用户第 6 项的一部分症状）。
+      this.logger.w(`proxy /play: Range 聚合未接管，降级为单连接透传（status=${resp.status} range=${rng}）`);
+      logPlayDiag({ kind: 'relay', stage: 'aggregate-failed', ok: false, status: resp.status, range: rng, url: redactUrl(target) });
     }
     // 媒体/其它 → 流式透传：原样转发上游状态码与关键响应头（Content-Length/Content-Range/Accept-Ranges），边收边发给播放器
     const fwd: Record<string, string | string[]> = { 'Content-Type': ct };
@@ -412,6 +442,15 @@ private imgProxy(u: URL, res: ServerResponse): void {
     upstream.on('error', (e: unknown) => {
       if (!(e instanceof Error) || e.name !== 'AbortError') {
         this.logger.e('proxy /play 上游流错误', e);
+        logPlayDiag({
+          kind: 'relay',
+          stage: 'stream-error',
+          ok: false,
+          status: resp.status,
+          range: rng || undefined,
+          url: redactUrl(target),
+          reason: String((e as Error)?.message ?? e).slice(0, 160),
+        });
       }
       (upstream as { destroy?: () => void }).destroy?.();
     });
@@ -441,13 +480,23 @@ private imgProxy(u: URL, res: ServerResponse): void {
     concurrency: number = AGGREGATE_CONCURRENCY,
   ): Promise<boolean> {
     const total = this.partialRangeOf(probe.headers);
-    if (total === null) return false;
+    if (total === null) {
+      logPlayDiag({ kind: 'relay', stage: 'aggregate-skip', reason: 'no-content-range', url: redactUrl(target) });
+      return false;
+    }
     const parsed = parseByteRange(rangeHeader);
-    if (!parsed) return false;
+    if (!parsed) {
+      logPlayDiag({ kind: 'relay', stage: 'aggregate-skip', reason: `range-parse-fail:${rangeHeader}`, url: redactUrl(target) });
+      return false;
+    }
     const start = parsed.start;
     const end = parsed.end === undefined ? total - 1 : Math.min(parsed.end, total - 1);
     const len = end - start + 1;
-    if (len < AGGREGATE_MIN_LEN) return false; // 小 Range（如探帧）不值得并发
+    if (len < AGGREGATE_MIN_LEN) {
+      // 小 Range（探帧/短片段）不值得并发 —— 这是**正常跳过**，不是失败
+      logPlayDiag({ kind: 'relay', stage: 'aggregate-skip', reason: `range-too-small:${len}<${AGGREGATE_MIN_LEN}`, total, url: redactUrl(target) });
+      return false;
+    }
     const ct = (probe.headers['content-type'] as string | undefined) || 'application/octet-stream';
     res.writeHead(206, {
       'Content-Type': ct,

@@ -29,6 +29,22 @@ export interface PlayerInit {
 }
 
 let playerWin: BrowserWindow | null = null;
+/**
+ * ★ 2026-09-28：`player:init` 的**单调序号** + 待发送的那一份。
+ *
+ * 解决两类竞态：
+ *  ① 窗口还没加载完就先到的 init —— 直接 send 会丢，改为存下最新一份、`did-finish-load` 再发；
+ *  ② 旧解析晚到的 init（用户已换源/换集）顶掉新内容 —— 渲染层凭序号丢弃更旧的那次。
+ */
+let initSeq = 0;
+let pendingInit: (PlayerInit & { initSeq: number }) | null = null;
+
+/** 盖章（序号 +1）并缓存为「最新一份待发 init」 */
+function stampInit(init: PlayerInit): PlayerInit & { initSeq: number } {
+  initSeq += 1;
+  pendingInit = { ...init, initSeq };
+  return pendingInit;
+}
 
 /** ★ 播放器窗口关闭回调（index.ts 注册：触发夸克落盘文件清理等；每个回调只执行一次随窗口销毁） */
 const closeHooks: Array<() => void> = [];
@@ -111,9 +127,11 @@ export function playerSetMini(isMini: boolean): void {
 export function openPlayerWindow(init: PlayerInit): void {
   if (playerWin && !playerWin.isDestroyed()) {
     playerWin.focus();
-    playerWin.webContents.send('player:init', init);
+    playerWin.webContents.send('player:init', stampInit(init));
     return;
   }
+  // ★ 先盖章缓存：窗口加载完成前可能又来了新的 init，did-finish-load 时只发最新那份
+  const payload = stampInit(init);
   playerWin = new BrowserWindow({
     width: 1040,
     height: 640,
@@ -167,7 +185,7 @@ export function openPlayerWindow(init: PlayerInit): void {
     playerWin.loadFile(join(__dirname, 'renderer', 'index.html'), { hash: '/player' });
   }
   playerWin.webContents.on('did-finish-load', () => {
-    playerWin?.webContents.send('player:init', init);
+    playerWin?.webContents.send('player:init', pendingInit ?? payload);
   });
 }
 

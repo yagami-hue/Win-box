@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { client } from '../api/client';
 import type { ImportReturn } from '../api/client';
 import type { ImportReport, SourceBean, UserConfig, BossKeySettings } from '../../shared/types';
+import type { SubtitleProviderView } from '../../shared/subtitle';
 import { sourceAvailability } from '../../engine/vod/sourceAvailability';
 import { EXT_TEMPLATES, validateExtJson } from '../../engine/config/extHelper';
 import { sourceKindInfo } from '../../engine/config/sourceKind';
@@ -80,15 +81,21 @@ export default function ConfigPage() {
   const [lastOk, setLastOk] = useState('');
   // 外观主题
   const [theme, setTheme] = useState<Theme>(() => currentTheme());
-  // 外挂字幕（assrt token）
+  // 外挂字幕（多源：SubtitleCat 免 token / assrt 需 token）
   const [subToken, setSubToken] = useState('');
   const [subTokenSaved, setSubTokenSaved] = useState(false);
+  /** ★ 2026-09-28：各字幕源的开关与可用状态（点击标签开关） */
+  const [subProviders, setSubProviders] = useState<SubtitleProviderView[]>([]);
+  const refreshSubProviders = useCallback(() => {
+    client.subtitleProviders().then(setSubProviders).catch(() => undefined);
+  }, []);
   // 清理缓存
   const [cacheMsg, setCacheMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
   const [cacheBusy, setCacheBusy] = useState(false);
   useEffect(() => {
     client.subtitleGet().then((s) => { setSubToken(s.assrtToken || ''); setSubTokenSaved(!!s.assrtToken); }).catch(() => undefined);
-  }, []);
+    refreshSubProviders();
+  }, [refreshSubProviders]);
 
   // 元数据来源（★ 2026-09-24）：TMDB 自填 Key / API 代理地址 / 图片镜像地址 + 封面与简介策略
   const [metaDraft, setMetaDraft] = useState<MetaSettings>({ ...DEFAULT_META_SETTINGS });
@@ -1051,11 +1058,32 @@ export default function ConfigPage() {
       <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>四、凭据</h4>
       {/* 网盘 Cookie 统一在「源内绑定」（点播页 → 网盘类源 → 源主页「网盘绑定」按钮） */}
 
-      {/* 外挂字幕：assrt token 配置（用户自填，仅作接口调用） */}
+      {/* 外挂字幕：多字幕源（SubtitleCat 免 token / assrt 需 token） */}
       <div className="card" id="cfg-subtitle" style={{ padding: 12, marginBottom: 16 }}>
         <div className="row" style={{ marginBottom: 8 }}>
-          <span className="muted" style={{ fontWeight: 600 }}>外挂字幕（assrt 在线检索）</span>
+          <span className="muted" style={{ fontWeight: 600 }}>外挂字幕（多源在线检索）</span>
         </div>
+        {/* ★ 2026-09-28：逐源开关（点标签切换）+ 可用状态；关掉的源不参与检索 */}
+        {subProviders.length > 0 && (
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            {subProviders.map((p) => (
+              <button
+                key={p.id}
+                className={`tag${p.enabled ? ' active' : ''}`}
+                title={p.reason || (p.enabled ? '点击关闭该字幕源' : '点击启用该字幕源')}
+                onClick={async () => {
+                  const next: Record<string, boolean> = {};
+                  for (const x of subProviders) next[x.id] = x.enabled;
+                  next[p.id] = !p.enabled;
+                  await client.subtitleSet({ providers: next }).catch(() => undefined);
+                  refreshSubProviders();
+                }}
+              >
+                {p.name}{p.available ? '' : '（不可用）'}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="row" style={{ gap: 8, alignItems: 'center' }}>
           <input
             type="password"
@@ -1067,10 +1095,11 @@ export default function ConfigPage() {
           <button className="primary" disabled={!subToken.trim()} onClick={async () => {
             await client.subtitleSet({ assrtToken: subToken.trim() }).catch(() => undefined);
             setSubTokenSaved(true);
+            refreshSubProviders();
           }}>保存</button>
         </div>
         <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-          {subTokenSaved ? '✓ 已保存' : '在 assrt.net 免费注册后，会员中心可获取 token。'}
+          {subTokenSaved ? '✓ 已保存' : 'assrt 需到 assrt.net 免费注册后取 token；SubtitleCat 免 token，开箱可用。'}
         </div>
       </div>
 
@@ -1151,7 +1180,8 @@ export default function ConfigPage() {
                 t === 'dark' ? '经典深色'
                   : t === 'light' ? '经典亮色'
                     : t === 'netflix' ? 'Netflix 风格'
-                      : '哔哩哔哩风格'
+                      : t === 'bilibili' ? '哔哩哔哩风格'
+                        : 'Apple / macOS 风格'
               }
             >
               {label} {theme === t ? '✓' : ''}

@@ -12,9 +12,15 @@ interface TitleBarProps {
   showMini?: boolean;
   mini?: boolean;
   onMiniToggle?: () => void;
+  /**
+   * ★ 2026-09-29：`mac` = macOS 交通灯变体（仅供 Apple 皮肤的全宽工具栏使用）——
+   *   渲染**左置红/黄/绿圆点**（关闭/最小化/最大化，符号悬停显现），标题与右侧窗口按钮不再渲染
+   *   （标题与搜索/换源由 App 的 `.ap-toolbar` 负责；其余皮肤保持 `win` 原样，零影响）。
+   */
+  variant?: 'win' | 'mac';
 }
 
-export default function TitleBar({ title = 'Win-Box', showMini = false, mini = false, onMiniToggle }: TitleBarProps) {
+export default function TitleBar({ title = 'Win-Box', showMini = false, mini = false, onMiniToggle, variant = 'win' }: TitleBarProps) {
   const [max, setMax] = useState(false);
   const [icon, setIcon] = useState('');
   useEffect(() => {
@@ -25,6 +31,30 @@ export default function TitleBar({ title = 'Win-Box', showMini = false, mini = f
     await client.winMaximize();
     setMax(await client.winIsMaximized());
   };
+
+  if (variant === 'mac') {
+    return (
+      <div
+        className="titlebar ap-titlebar"
+        onDoubleClick={() => void toggleMax()}
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+      >
+        <div className="ap-lights" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          <button className="ap-light ap-light-close" title="关闭" aria-label="关闭" onClick={() => void client.winClose()}>
+            <svg width="7" height="7" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.6 1.6l4.8 4.8M6.4 1.6L1.6 6.4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+          </button>
+          <button className="ap-light ap-light-min" title="最小化" aria-label="最小化" onClick={() => void client.winMinimize()}>
+            <svg width="7" height="7" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.2 4h5.6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+          </button>
+          <button className="ap-light ap-light-zoom" title={max ? '还原' : '最大化'} aria-label="最大化" onClick={() => void toggleMax()}>
+            <svg width="7" height="7" viewBox="0 0 8 8" aria-hidden="true">
+              <path d="M1.5 3V1.5H3M6.5 5v1.5H5M1.5 5v1.5H3M6.5 3V1.5H5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

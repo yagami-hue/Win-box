@@ -8,12 +8,11 @@
 import { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { client } from '../api/client';
-import { driveProviderLabel } from '../../shared/driveProvider';
+import { driveProviderLabel, WEB_LOGIN_PROVIDERS } from '../../shared/driveProvider';
 
 /** 应用内二维码（CAS）支持的 provider */
 const QR_SUPPORTED = ['ali', 'alipan', 'quark', 'uc'];
-/** 走「网页二维码」的 provider（可靠、不无故过期） */
-const WEBLOGIN_PROVIDERS = ['quark', 'uc', 'baidu'];
+// ★ 2026-09-28：网页登录清单来自 shared（与主进程 webLogin.ts 共用，避免"后台支持了但 UI 没按钮"）
 
 interface Props {
   /** 当前选中的网盘 provider（由外层 chips 决定） */
@@ -36,7 +35,7 @@ export default function DriveLogin({ provider, onBound }: Props) {
   const qrOverallStart = useRef(0);
 
   const label = driveProviderLabel(provider);
-  const viaWeb = WEBLOGIN_PROVIDERS.includes(provider);
+  const viaWeb = WEB_LOGIN_PROVIDERS.includes(provider);
   const viaCas = !viaWeb && QR_SUPPORTED.includes(provider);
 
   function stopQrPoll(): void {

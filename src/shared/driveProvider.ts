@@ -81,6 +81,16 @@ export function driveProviderLabel(provider: string): string {
 }
 
 /**
+ * ★ 2026-09-28：**走「网页二维码登录」的 provider**（主进程弹网盘网页 → 抓完整 Cookie）。
+ *
+ * 为什么放在 shared：此前这份清单在渲染层被**硬编码复制**了一份（`DriveLogin.tsx` 里
+ * `const WEBLOGIN_PROVIDERS = ['quark','uc','baidu']`），主进程加了新 provider（如 115）
+ * 而渲染层不同步 → 「后台支持了但 UI 不出现登录按钮」。现两处共用这一个清单。
+ * 主进程侧的真源是 `src/main/net/webLogin.ts` 的 CFGS（含登录页 URL / 判定 cookie）。
+ */
+export const WEB_LOGIN_PROVIDERS: readonly string[] = ['quark', 'uc', 'baidu', '115'];
+
+/**
  * 蜘蛛类名归一：去 `csp_` 前缀与 `Guard` 后缀、转小写。
  * 必要原因：**同一只蜘蛛在不同配置里的类名不一样** —— fty/游魂系写 `csp_WoGGGuard`（壳类），
  * 摸鱼系直接写 `csp_Wogg`（真实类）。只按原文匹配会漏掉一半配置。
@@ -191,7 +201,32 @@ export function looksLikeDriveBindFailure(message?: string | null): boolean {
   if (m.includes('jsonobject["data"] not found') || m.includes('jsonobject[data] not found')) return true;
   // 授权类关键词 + 网盘语境 → 也算（避免把普通 CMS 的解析错误误判成网盘问题）
   if (/(cookie|token|authorization|未登录|登录|扫码)/.test(m) && /(网盘|drive|quark|uc盘|ali|115|pan)/.test(m)) return true;
-  return false;
+  // ★ 2026-09-28：中文网盘名也要算语境 —— 实测百度系蜘蛛的提示是
+  //   `还未登录百度账号,请前往【配置中心】登录`，旧正则里没有「百度」→ 漏判。
+  return driveBindProviderFromText(message) !== null;
+}
+
+/**
+ * ★ 2026-09-28：从**任意文本**判定「这是哪个网盘的登录/授权要求」。
+ *
+ * 实测（用户反馈「部分源正常但放不出来」的一类）：百度系蜘蛛在未绑定时**不抛错**，而是返回
+ * `url=''` + `message='还未登录百度账号,请前往【配置中心】登录'`（`parse:0`）。
+ * 渲染层只认 `parse:1` 才上屏原因 → 表现为「点了播放没反应/黑屏」，用户不知道要绑网盘。
+ * 命中本函数即应翻译成「去绑该网盘」的提示（`parse:1` + `needDriveCookieBind`）。
+ */
+export function driveBindProviderFromText(text?: string | null): string | null {
+  const m = (text || '').trim();
+  if (!m) return null;
+  if (!/(登录|授权|cookie|token|未绑定|绑定)/i.test(m)) return null;
+  const table: Array<[RegExp, string]> = [
+    [/百度|baidu|pan\.baidu|pcs\.baidu/i, 'baidu'],
+    [/夸克|quark/i, 'quark'],
+    [/\buc\b|uc盘|drive\.uc/i, 'uc'],
+    [/115(网盘|账号|\.com|盘)/i, '115'],
+    [/阿里|aliyun|alipan/i, 'ali'],
+  ];
+  for (const [re, prov] of table) if (re.test(m)) return prov;
+  return null;
 }
 
 /**

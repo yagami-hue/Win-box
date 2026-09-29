@@ -8,8 +8,10 @@ import type { Episode, MetaExtra, MetaHit, VodDetail } from '../../shared/types'
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 import { pickCover } from '../lib/coverPick';
 import { formatEpisodeLabel } from '../lib/epName';
+import { makeStaleGuard } from '../lib/staleGuard';
 import HScrollRow from '../components/HScrollRow';
 import HeroBackdrop from '../components/HeroBackdrop';
+import DriveBindModal from '../components/DriveBindModal';
 import { useTheme } from '../lib/theme';
 
 export default function DetailPage({
@@ -20,8 +22,10 @@ export default function DetailPage({
   const { key, id } = useParams<{ key: string; id: string }>();
   const [searchParams] = useSearchParams();
   const nav = useNavigate();
-  /** ★ 2026-09-24：Netflix 皮肤下详情页用「大图背景 + 大标题 + 白色播放键」的影院式排版 */
+  /** ★ 2026-09-24：Netflix 皮肤下详情页用「大图背景 + 大标题 + 白色播放键」的影院式排版
+   *  ★ 2026-09-29：Apple 皮肤用同源剧照背景，但排版走 Apple TV 影片页观感（玻璃信息卡 + 蓝色胶囊播放键） */
   const nf = useTheme() === 'netflix';
+  const ap = useTheme() === 'apple';
   // 从列表页经 URL query 携带的封面（fty 等源 detail 接口偶发不返回 vod_pic，用作兜底）
   const fromListPic = searchParams.get('pic') || '';
   /** ★ 2026-09-24：列表页带过来的片名 —— 「立播」等源详情接口不返回 vod_name，用它兜底 */
@@ -31,9 +35,24 @@ export default function DetailPage({
   const [ep, setEp] = useState(0);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
+  /**
+   * ★ 2026-09-29（用户要求）：解析到**网盘专用链接但未绑定 Cookie** → 直接弹「网盘绑定」窗口（预选该网盘）。
+   * 主进程此时已把这次播放拦下（`parse:1` + `needDriveCookieBind`，不给必失败的直链）。
+   */
+  const [bindProvider, setBindProvider] = useState('');
   /** ★ 2026-09-24：播放（可能含解析/嗅探）进行中 → 按钮上屏进度 */
   const [busy, setBusy] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
+  /**
+   * ★ 2026-09-28 修复「旧解析的超时晚到把新播放窗口顶掉」：解析请求**代数**。
+   *
+   * 慢源（加固壳 / 网盘转存）的 `client.play()` 可挂几十秒到 300s；用户换源 / 换集后再点播放，
+   * 旧请求回来时会无条件 `onPlay()` → 单例播放器窗口被 `player:init` 顶成**旧**内容。
+   * 现在：每次点击播放 / 换线路换集 / 换详情都 ++；晚到的旧结果一律丢弃（不打开窗口、不报错、不动 busy）。
+   */
+  const playGenRef = useRef(makeStaleGuard());
+  /** 本次解析对应的「意图」（源|线路|集）：同一意图的重复点击仍按老行为忽略，避免慢源被连点两次解析 */
+  const playIntentRef = useRef('');
   const memKey = `${decodeURIComponent(key || '')}:${decodeURIComponent(id || '')}`;
   /** ★ 2026-09-24：展示用片名 —— 详情自带优先，缺失时用列表页带入的（立播等源详情不返回 vod_name） */
   const displayName = (detail?.name || fromListName || '').trim();
@@ -46,6 +65,8 @@ export default function DetailPage({
     const i = decodeURIComponent(id);
     setLoading(true);
     setErr('');
+    playGenRef.current.next(); // ★ 换了一部片 → 上一条解析作废（并放开 busy，避免按钮被旧请求卡住）
+    setBusy(false);
     setMetaHit(null);
     setSrcPicBad(false);
     setSrcPicRelay('');
@@ -194,11 +215,15 @@ export default function DetailPage({
   }, [detail, memKey]);
 
   function chooseFlag(f: string) {
+    playGenRef.current.next(); // ★ 换线路 = 播放意图变了 → 上一条解析作废
+    setBusy(false);
     setFlag(f);
     setEp(0);
     uiMem.detail.set(memKey, { flag: f, ep: 0, scrollTop: contentRef.current?.scrollTop ?? 0 });
   }
   function chooseEp(i: number) {
+    playGenRef.current.next(); // ★ 换集 = 播放意图变了 → 上一条解析作废
+    setBusy(false);
     setEp(i);
     uiMem.detail.set(memKey, { flag, ep: i, scrollTop: contentRef.current?.scrollTop ?? 0 });
     schedulePersist();
@@ -209,15 +234,28 @@ export default function DetailPage({
   }
 
   async function play() {
-    if (!detail || !flag || busy) return;
+    if (!detail || !flag) return;
     const eps = detail.episodes[flag] || [];
     const target = eps[ep];
     if (!target) return;
+    // 同一意图（源|线路|集）重复点击：与旧行为一致地忽略，别让慢源被连点两次解析
+    const intent = `${key}|${flag}|${ep}`;
+    if (busy && playIntentRef.current === intent) return;
+    playIntentRef.current = intent;
+    // ★ 2026-09-28：开一代；晚到的旧结果（换源/换集/再点一次之后）一律丢弃 —— 见 playGenRef 注释
+    const gen = playGenRef.current.next();
     setErr('');
     // ★ parse=1 的地址要走「解析接口 → 隐藏窗口嗅探」，可能耗时十几秒 → 按钮上屏进度，别让用户以为没反应
     setBusy(true);
     try {
       const r = await client.play({ key: decodeURIComponent(key!), flag, id: target.url });
+      if (!playGenRef.current.isCurrent(gen)) return; // 过期结果：不要顶掉用户后来选的播放
+      // ★ 2026-09-29：网盘专用链接未绑定 Cookie → 弹绑定窗口（预选该网盘）；绑定成功后自动重播
+      if (r.needDriveCookieBind) {
+        setErr('');
+        setBindProvider(String(r.needDriveCookieBind));
+        return;
+      }
       // parse=1（需网页解析/嗅探）：主进程已尽力（解析接口 → 隐藏窗口嗅探），仍拿不到直连地址才上屏原因
       if (r.parse === 1) {
         setErr(r.message || '该播放地址需要网页解析/嗅探，自动解析未取得直连地址');
@@ -237,9 +275,10 @@ export default function DetailPage({
         flag,
       });
     } catch (e) {
+      if (!playGenRef.current.isCurrent(gen)) return; // 过期失败：不把旧源的报错上屏
       setErr((e as Error).message);
     } finally {
-      setBusy(false);
+      if (playGenRef.current.isCurrent(gen)) setBusy(false); // 已被更新的一代接管 → 不解除新请求的 busy
     }
   }
 
@@ -276,29 +315,39 @@ export default function DetailPage({
    * ★ 2026-09-24（用户定稿）：Netflix 详情页背景 = **和首页一样的横版剧照轮播**（TMDB backdrops 长图）。
    * ★ 2026-09-25：**背景只允许横版图**（用户报「竖版图被裁剪」）——backdrops 取不到时用
    *   `metaHit.backdrop`（TMDB `backdrop_path`，同为横版剧照）；**绝不再退回竖版封面**。
+   * ★ 2026-09-29：Apple 皮肤同样用剧照做头部背景（Apple TV 影片页观感），版式由 apple.css 接管。
    */
   const [nfBgs, setNfBgs] = useState<string[]>([]);
   useEffect(() => {
-    if (!nf || !metaHit?.tmdbId) { setNfBgs([]); return; }
+    if (!(nf || ap) || !metaHit?.tmdbId) { setNfBgs([]); return; }
     let alive = true;
     client
       .metaImages(metaHit.type, metaHit.tmdbId)
       .then((imgs) => { if (alive) setNfBgs((imgs?.backdrops || []).slice(0, 4)); })
       .catch(() => undefined);
     return () => { alive = false; };
-  }, [nf, metaHit?.tmdbId, metaHit?.type]);
+  }, [nf, ap, metaHit?.tmdbId, metaHit?.type]);
   const backdropUrls = nfBgs.length ? nfBgs : metaHit?.backdrop ? [metaHit.backdrop] : [];
 
   return (
     <>
+      {/* ★ 2026-09-29：网盘未绑定 → 自动弹出绑定向导（预选该网盘）；绑定成功即自动重播 */}
+      {bindProvider && (
+        <DriveBindModal
+          siteName={displayName || '当前源'}
+          initialProvider={bindProvider}
+          onClose={() => setBindProvider('')}
+          onSaved={() => { setBindProvider(''); void play(); }}
+        />
+      )}
       <div className="topbar">
         <BackButton fallback="/home" label="返回列表" />
         <span className="muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
       </div>
-      <div className={`content${nf ? ' nf-detail-wrap' : ''}`} ref={contentRef}>
-        {/* Netflix 皮肤：**横版剧照轮播**当全宽背景（同首页 Hero，交叉淡入淡出），内容压在上面 */}
-        {nf && backdropUrls.length > 0 && (
-          <div className="nf-detail-backdrop">
+      <div className={`content${nf ? ' nf-detail-wrap' : ap ? ' ap-detail-wrap' : ''}`} ref={contentRef}>
+        {/* Netflix / Apple 皮肤：**横版剧照轮播**当全宽背景（同首页 Hero，交叉淡入淡出），内容压在上面 */}
+        {(nf || ap) && backdropUrls.length > 0 && (
+          <div className={nf ? 'nf-detail-backdrop' : 'ap-detail-backdrop'}>
             <HeroBackdrop urls={backdropUrls} />
           </div>
         )}

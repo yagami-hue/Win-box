@@ -31,6 +31,8 @@ import { userDataDir, cacheDir, resourcesDir, spiderCacheDir } from '../util/pat
 import { safeStorageDriveCodec } from '../util/driveCodec';
 import {
   driveBindHintFromPlaySources,
+  driveBindProviderFromText,
+  driveProviderLabel,
   looksLikeDriveBindFailure,
   matchDriveCookieProvider,
   wrapPlayUrl,
@@ -53,10 +55,26 @@ import { SearchCache } from '../../engine/vod/searchCache';
 import { classifyHealth } from '../../engine/vod/sourceHealth';
 import { mergeSubscriptions, type MergeInput } from '../../engine/config/mergeSubscriptions';
 import type { AuditItem, SearchAllReport, SearchAllProgressEvent } from '../../shared/types';
+import {
+  describeFailures,
+  disguiseLadder,
+  fetchWithDisguise,
+  looksEncrypted,
+  siteRootOf,
+  sniffBody,
+} from '../../engine/util/fetchWithDisguise';
+import { tryDecryptConfig } from '../net/configDecrypt';
 import { SubtitleStore } from '../subtitle/SubtitleStore';
-import { assrtSearch, assrtFetch, assrtSearchMulti } from '../subtitle/assrtProvider';
-import { buildSearchQuery, normalizeTitle, normalizeSubtitleQuery, titleVariants } from '../../engine/subtitle/normalizeQuery';
-import type { SubtitleCandidate, SubtitleSettings, SubtitleFetchResult } from '../../shared/subtitle';
+import { diagTimer, logPlayDiag, shortHash } from '../util/playDiag';
+import { fetchSubtitle, providerSettingsView, searchSubtitles } from '../subtitle';
+import type { SubtitleSearchContext } from '../subtitle/provider';
+import { buildSearchQuery, normalizeSubtitleQuery, titleVariants } from '../../engine/subtitle/normalizeQuery';
+import type {
+  SubtitleCandidate,
+  SubtitleSettings,
+  SubtitleFetchResult,
+  SubtitleSearchReport,
+} from '../../shared/subtitle';
 import { DanmakuStore } from '../danmaku/DanmakuStore';
 import {
   DanmakuEndpointHealth,
@@ -462,55 +480,41 @@ export class SpiderHost {
     this.resetSpidersAfterDriveChange();
   }
 
-  // ---- 外挂字幕（assrt token + 偏好在 SubtitleStore；检索/抓取见 assrtProvider） ----
+  // ---- 外挂字幕（多源：assrt（需 token）/ SubtitleCat（免 token）；偏好在 SubtitleStore） ----
   subtitleGetSettings(): SubtitleSettings {
     return this.subtitles.settings;
   }
   subtitleSetSettings(patch: Partial<SubtitleSettings>): SubtitleSettings {
     return this.subtitles.update(patch);
   }
-  async subtitleSearch(resourceName: string): Promise<SubtitleCandidate[]> {
-    const token = (this.subtitles.settings.assrtToken || '').trim();
-    if (!token) throw new Error('尚未配置 assrt token，请先在「配置 → 外挂字幕」中填写');
+  /** 各字幕源的开关/可用状态（配置页渲染用） */
+  subtitleProviderView() {
+    return providerSettingsView(this.subtitles.settings);
+  }
+  /** 组装检索上下文（标题 / 关键词候选 / 集号）——各 Provider 共用同一份口径 */
+  private subtitleContext(resourceName: string): SubtitleSearchContext {
     const { title, ep } = normalizeSubtitleQuery(resourceName || '');
-    if (!title) throw new Error('无法从该资源名提取剧名');
-    // 主标题 → 关键词候选中的第一个；ep 单独保留用于回退组合
     const mainKw = buildSearchQuery(resourceName || '');
-    const variants = titleVariants(title);
-    const kws = Array.from(new Set([mainKw, ...variants.map((t) => t + (ep ? ' ' + ep : ''))])).filter(Boolean);
-    try {
-      // 先主关键词拿一批结果，用于反推同剧别名（结果的 title 字段即 assrt 登记的剧名）
-      const first = await assrtSearch(token, mainKw);
-      const aliases = new Set<string>();
-      (first || []).forEach((c) => {
-        const t = c.title || '';
-        if (t && t.toLowerCase() !== title.toLowerCase()) {
-          const alias = normalizeTitle(t);
-          if (alias && alias.length >= 2 && !/^[-\d\s]+$/.test(alias)) aliases.add(alias);
-        }
-      });
-      // 别名 + ep 也加入检索关键词（同剧不同命名时能命中）
-      for (const a of Array.from(aliases).slice(0, 4)) {
-        kws.push(a + (ep ? ' ' + ep : ''));
-      }
-      const list = await assrtSearchMulti(token, kws, { originalTitle: title, concurrency: 3 });
-      return list || [];
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // 服务端常见拒绝透出可执行指引（token 失效 / 词过短），不再显示笼统的"失败"
-      if (/token/i.test(msg)) {
-        throw new Error('assrt token 无效或已过期，请到「配置 → 外挂字幕」重新填写后重试');
-      }
-      if (/词|长度|keyword|101/i.test(msg)) {
-        throw new Error('assrt 要求搜索词至少 3 个字符，当前剧名过短，可手动补充剧集/全名再搜');
-      }
-      throw new Error('assrt 检索失败：' + msg);
+    const variants = titleVariants(title || '');
+    const keywords = Array.from(new Set([mainKw, ...variants.map((t) => t + (ep ? ' ' + ep : ''))])).filter(Boolean);
+    return { title: title || mainKw, keywords, ep, settings: this.subtitles.settings };
+  }
+  async subtitleSearch(resourceName: string): Promise<SubtitleSearchReport> {
+    const ctx = this.subtitleContext(resourceName);
+    if (!ctx.keywords.length) throw new Error('无法从该资源名提取剧名');
+    const report = await searchSubtitles(ctx);
+    // 逐源状态落日志：用户反馈「搜不到字幕」时这是第一手证据（跳过 / 失败 / 命中数）
+    for (const p of report.providers) {
+      this.logger.w(
+        `字幕源 ${p.id}：${p.ok ? `命中 ${p.count}` : p.skipped ? '跳过' : '失败'}${p.reason ? ' — ' + p.reason : ''}`,
+      );
     }
+    return report;
   }
   async subtitleFetch(candidate: SubtitleCandidate): Promise<SubtitleFetchResult> {
-    const token = (this.subtitles.settings.assrtToken || '').trim();
-    if (!token) throw new Error('尚未配置 assrt token');
-    return assrtFetch(token, candidate);
+    if (!candidate || !candidate.file) return { text: '', fileName: '', reason: '字幕候选缺少下载标识' };
+    // 下载只为拿“包内真实文件名/集号提示”，用候选自带的名字重建上下文即可
+    return fetchSubtitle(candidate, this.subtitleContext(candidate.subname || ''));
   }
 
   // ---- 弹幕（★ 2026-09-26 外部接口清单；偏好见 DanmakuStore） ----
@@ -912,9 +916,12 @@ export class SpiderHost {
   async importConfig(source: { url?: string; json?: string; name?: string }, opts: { snapshot?: boolean } = {}): Promise<ParseResult> {
     const snapshot = opts.snapshot !== false;
     let text = source.json || '';
+    this.lastConfigFetchHint = ''; // 粘贴导入不涉及拉取，无分档诊断
     if (source.url) {
       text = await this.fetchConfigText(source.url);
     }
+    /** ★ 2026-09-29：导入失败时把「为什么拉不到」一并上屏（HTML 拦截页 / 疑似加密 / 逐档特征） */
+    const hint = (): string => (this.lastConfigFetchHint ? `｜诊断：${this.lastConfigFetchHint}` : '');
     // ★ 多仓（{urls:[{url,name},...]}）导入：影视仓/多仓盒子订阅格式，逐个子仓取首个可用
     const multi = parseMultiRepo(text);
     if (multi) {
@@ -922,7 +929,12 @@ export class SpiderHost {
     }
     // ★ 从 URL 导入时传基准地址：配置内 `./xxx.jar` 等相对路径需按订阅目录展开
     //   （对齐上游 ApiConfig.fixContentPath）。粘贴 JSON（无 url）保持原样。
-    const result = source.url ? parseSiteConfigWithBase(text, source.url) : parseSiteConfig(text);
+    let result: ParseResult;
+    try {
+      result = source.url ? parseSiteConfigWithBase(text, source.url) : parseSiteConfig(text);
+    } catch (e) {
+      throw new Error(`${(e as Error).message}${hint()}`);
+    }
     /**
      * ★ 2026-09-26（用户报「某份配置导入后一个源都没有、主页/搜索全废」）：
      *   **解析出 0 源时不许静默替换**。此前会直接落库 → 把用户原有的源整个清空，
@@ -930,7 +942,7 @@ export class SpiderHost {
      *   这里直接抛错并**保持原配置不变**，让用户看到真正的原因。
      */
     if (!result.config.sites.length && !result.config.lives.length && !result.config.parses.length) {
-      throw new Error('该订阅里没有任何可用的源（可能是未识别的「多仓」格式，或订阅本身已失效）；已保留原配置不变');
+      throw new Error('该订阅里没有任何可用的源（可能是未识别的「多仓」格式，或订阅本身已失效）；已保留原配置不变' + hint());
     }
     this.report = result.report;
     this.config = result.config;
@@ -965,53 +977,49 @@ export class SpiderHost {
     if (id) this.manager.updateProfileName(id, custom);
   }
 
+  /** ★ 2026-09-29：最近一次订阅拉取的**分档诊断**（导入失败时上屏"为什么"）；空 = 无异常 */
+  private lastConfigFetchHint = '';
+
   /**
-   * ★ 2026-09-24：拉订阅文本（含「按 UA 分流」站点的兜底）。
-   *   不少站点对浏览器 UA 返回**网页落地页**、只对 TVBox 客户端（okhttp）UA 返回订阅 JSON
-   *   （例：http://www.y456y.com —— 浏览器 UA 得到 HTML，okhttp UA 才给 {sites:…}）。
-   *   此前只发默认（浏览器）UA → 拿到 HTML → 解析报「不是有效的 JSON」，与 fty 早期同类的报错。
-   *   策略：先默认 UA；拿到的**不像订阅 JSON** 时，用 okhttp UA 重试一次。
+   * ★ 2026-09-29：拉订阅文本 —— 改用**统一伪装阶梯**（`fetchWithDisguise`）+ **解密兜底**。
    *
-   * ★ 2026-09-25 追加第 3 次尝试（**DoH**）：域名被 DNS 污染时系统 DNS 会解到劫持 IP，
-   *   响应是运营商反诈页之类（同样「不像订阅 JSON」，换 UA 也没用）→ 用 DoH 拿真实 IP 再试。
-   *   三次都拿不到才放弃（并保留第 1 次的结果，让上游报出原始错误文案）。
-   *
-   * ★ 2026-09-26：`quick=true` = **多仓扫描用的快取模式** —— 2 次尝试（默认 UA → okhttp UA）、
-   *   每次 12s、不做 DoH。上千项的多仓若每项都走 90s 三连，导入永远跑不完（见 importMultiRepo）。
+   * 阶梯（常规）：默认 UA → okhttp UA → okhttp+Referer → okhttp+Referer+Cookie → okhttp+DoH，
+   *   全失败后自动**换另一种协议（http↔https）同路径再试一次**；每次尝试的响应特征都写日志。
+   *   `quick=true`（多仓扫描上千子仓）只跑「默认 UA → okhttp UA」两档，避免导入跑不完。
+   * 解密兜底（用户口径「用解密来兜底」）：本地 base64/hex → 第三方解密服务（详见 configDecrypt.ts 的隐私口径）。
+   * 失败时把**分档诊断**记进 `lastConfigFetchHint`，由 importConfig 上屏「为什么导入不了」。
    */
   private async fetchConfigText(url: string, quick = false): Promise<string> {
     const timeoutMs = quick ? 12_000 : 30_000;
-    const attempt = async (opts: { ua?: string; doh?: 0 | 1 }): Promise<string> => {
-      const res = await this.http.request({
-        url,
-        method: 'get',
-        timeoutMs,
-        ...(opts.ua ? { headers: { 'User-Agent': opts.ua } } : {}),
-        ...(opts.doh ? { doh: opts.doh } : {}),
-      });
-      return Array.isArray(res.content) ? Buffer.from(res.content).toString('utf-8') : res.content;
-    };
-    let text = '';
-    try {
-      text = await attempt({});
-    } catch (e) {
-      this.logger.w(`订阅拉取失败（系统 DNS）：${(e as Error).message}`);
+    this.lastConfigFetchHint = '';
+    const isSubJson = (b: Buffer): boolean => looksLikeSubscribeJson(b.toString('utf-8'));
+    const res = await fetchWithDisguise(this.http, url, {
+      accept: isSubJson,
+      attempts: disguiseLadder({ quick, referer: siteRootOf(url) }),
+      timeoutMs,
+      onTry: (t) => {
+        const feat = [t.status ? `HTTP ${t.status}` : '', t.sniff ? `${t.sniff.kind} ${t.sniff.size}B` : '', t.reason || '']
+          .filter(Boolean)
+          .join(' · ');
+        this.logger.i(`订阅尝试「${t.label}」${t.ok ? '命中' : '未命中'}：${feat} ← ${t.url}`);
+      },
+    });
+    if (res.buf) {
+      if (res.used && res.used.label !== '默认 UA') this.logger.i(`订阅按「${res.used.label}」取到内容：${url}`);
+      if (res.altUrl) this.logger.i(`订阅换协议后取到内容（${res.altUrl}）：${url}`);
+      return res.buf.toString('utf-8');
     }
-    if (looksLikeSubscribeJson(text)) return text;
-    const okhttp = 'okhttp/3.12.0';
-    const labels = quick ? (['okhttp UA'] as const) : (['okhttp UA', 'okhttp UA + DoH'] as const);
-    for (const label of labels) {
-      try {
-        const t = await attempt(label.includes('DoH') ? { ua: okhttp, doh: 1 } : { ua: okhttp });
-        if (looksLikeSubscribeJson(t)) {
-          this.logger.i(`订阅按「${label}」重试成功：${url}`);
-          return t;
-        }
-      } catch (e) {
-        this.logger.w(`订阅「${label}」重试失败：${(e as Error).message}`);
-      }
-    }
-    return text;
+    const raw = res.last ? res.last.toString('utf-8') : '';
+    // ★ 解密兜底：本地编码优先，其次第三方解密服务（仅此处、且仅在所有伪装手段失败后）
+    const dec = await tryDecryptConfig(this.http, url, raw, this.logger);
+    if (dec) return dec.text;
+    const encrypted = res.last ? looksEncrypted(res.last) : false;
+    const sn = res.last ? sniffBody(res.last) : null;
+    this.lastConfigFetchHint =
+      (encrypted ? '该地址返回的内容疑似**加密配置**（普通客户端无法直接使用）。' : '') +
+      (sn ? `最后响应为 ${sn.kind}（${sn.size}B）${sn.head ? `，开头是「${sn.head.slice(0, 60)}」` : ''}。` : '所有尝试都没有拿到响应体。') +
+      `已尝试：${describeFailures(res.tries)}`;
+    return raw;
   }
 
   /**
@@ -1481,7 +1489,46 @@ export class SpiderHost {
     this.bridge.resetPool();
   }
 
+  /**
+   * ★ 2026-09-28：`play` 外层只做**诊断埋点**（阶段/耗时/结果/原因），解析逻辑原样在 `playInner`。
+   *
+   * 为什么：用户报「部分源正常但资源落不了盘/放不出来，成功率约 50%」——只有把每次播放的
+   * 结果与耗时按行落盘（`<userData>/logs/play-diag-*.jsonl`），才能分清是「源解析慢/失败」
+   * 还是「网盘落盘/中继失败」，再决定改哪里。
+   */
   async play(key: string, flag: string, id: string): Promise<PlayResult> {
+    const t = diagTimer();
+    try {
+      const r = await this.playInner(key, flag, id);
+      logPlayDiag({
+        kind: 'play',
+        stage: 'done',
+        ok: r.parse === 0 && !!r.url,
+        ms: t.ms(),
+        key,
+        flag,
+        ep: shortHash(id),
+        parse: r.parse,
+        needBind: r.needDriveCookieBind,
+        msg: r.message ? String(r.message).slice(0, 120) : undefined,
+      });
+      return r;
+    } catch (e) {
+      logPlayDiag({
+        kind: 'play',
+        stage: 'failed',
+        ok: false,
+        ms: t.ms(),
+        key,
+        flag,
+        ep: shortHash(id),
+        reason: String((e as Error)?.message ?? e).slice(0, 200),
+      });
+      throw e;
+    }
+  }
+
+  private async playInner(key: string, flag: string, id: string): Promise<PlayResult> {
     const b = this.getSource(key);
     if (!b) throw new Error(`源不存在: ${key}`);
     // ★ 夸克分享型播放（episode 是 pan.quark.cn/s/ 链接或含 sId 的 JSON）且已绑定夸克 →
@@ -1525,6 +1572,24 @@ export class SpiderHost {
       }
     }
     return this.vm.play(b, flag, id, this.vipFlags).then((r) => {
+      // ★ 2026-09-28（诊断实测发现，用户第 6 项的一类）：蜘蛛把「未登录网盘」当成
+      //   **空地址 + 一句提示**返回（`parse:0`），而渲染层只认 `parse:1` 才上屏原因 →
+      //   表现为「点了播放没反应/黑屏」，用户不知道要绑网盘。
+      //   实测原话：`还未登录百度账号,请前往【配置中心】登录`（至臻源 · 百度线路）。
+      //   这里翻译成「去绑定该网盘」的既有通道（parse:1 + needDriveCookieBind + message）。
+      if (!r.url && r.message) {
+        const prov = driveBindProviderFromText(String(r.message));
+        if (prov) {
+          this.markDriveBindNeeded(key);
+          this.logger.w(`play: 蜘蛛返回空地址且提示需登录「${prov}」→ 翻译为绑定提示: ${key}`);
+          return {
+            ...r,
+            parse: 1,
+            needDriveCookieBind: prov,
+            message: `该源播放需要${driveProviderLabel(prov)}账号：请在点播页点「网盘绑定」绑定后重新播放（源提示：${r.message}）`,
+          };
+        }
+      }
       // 仅对单个 http(s) 且非多段（# 连接）的播放地址做中继包装
       const single = /^https?:\/\//i.test(r.url || '') && !(r.url || '').includes('#');
       if (!single || !r.url) return r;
@@ -1540,10 +1605,28 @@ export class SpiderHost {
         //   这样源主页的「网盘绑定」入口不依赖蜘蛛类名清单（摸鱼/fty 类名写法不同、
         //   同一只蜘蛛在不同订阅里 ext 也不同），换任何订阅、任何新蜘蛛都能覆盖。
         this.markDriveBindNeeded(key);
-        r.url = wrapPlayUrl(r.url, prov);
-        // ★ 该「cookie 型」网盘未绑定 → 标记给渲染层，提示去配置页绑定（无 Cookie 取流必失败）
         const tokens = this.driveList() as Record<string, string>;
-        if (!tokens[prov]) r.needDriveCookieBind = prov;
+        /**
+         * ★★ 2026-09-29（用户要求）：**未绑定就拦下这次播放**，让渲染层直接弹「网盘绑定」窗口 ★★
+         *
+         * 旧行为：把（无 Cookie 必然 401 的）网盘直链仍交给播放器 → 用户看到黑屏 + 一句提示，
+         *   还得自己找「点播页 → 网盘绑定」入口；现在改为走既有通道 `parse:1 + needDriveCookieBind`，
+         *   详情页/播放器窗口据此**自动弹出**对应网盘的绑定弹窗（预选该网盘），绑定成功自动重播。
+         * 依据：夸克/UC/百度/115 直链无绑定 Cookie 必失败（见 docs 与 §C 的既有结论）。
+         */
+        if (!tokens[prov]) {
+          this.logger.w(`play: 网盘直链但未绑定「${prov}」→ 拦下本次播放并提示绑定: ${key}`);
+          return {
+            url: '',
+            parse: 1,
+            playUrl: '',
+            flag,
+            jx: 0,
+            needDriveCookieBind: prov,
+            message: `该资源来自「${driveProviderLabel(prov)}」的专用链接，需要先绑定该网盘 Cookie 才能取流播放`,
+          } as PlayResult;
+        }
+        r.url = wrapPlayUrl(r.url, prov);
       }
       return r;
     }).then((r) => this.resolveNeededParse(r)).catch((e) => {

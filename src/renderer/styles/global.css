@@ -129,7 +129,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .nav-ico { width: 20px; text-align: center; font-size: 15px; }
 .side-foot { margin-top: auto; padding: 12px; font-size: 11px; color: #4c5563; line-height: 1.5; }
 .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
-.topbar { min-height: 54px; border-bottom: 1px solid var(--border-soft); display: flex; align-items: center; gap: 10px;
+/* ★ 2026-09-29 缺陷修复（用户报「点播页换源列表被封面遮挡」）：
+   真因 = 层序。`.topbar` 被 backdrop-filter 提升为**堆叠上下文**，但它 position:static、z-index:auto
+   ⇒ 与 `.card-media`（`position: relative`、z-index:auto）**同属「定位元素/堆叠上下文（z-index:auto）」绘制层**，
+   而封面在 DOM 里靠后 ⇒ 后绘制 ⇒ 盖住顶栏里弹出的换源列表（实测弹层内 3 个采样点有 2 个命中封面 IMG）。
+   修：顶栏显式 `position: relative; z-index: 30` → 整棵子树进入**正 z-index 层**，稳定压在内容之上
+   （顶栏与内容不重叠，视觉零变化；顶栏内的弹层/下拉从此都不再被封面压住）。 */
+.topbar { position: relative; z-index: 30; min-height: 54px; border-bottom: 1px solid var(--border-soft); display: flex; align-items: center; gap: 10px;
   padding: 0 18px; background: var(--bg1); backdrop-filter: blur(6px); }
 /* ★ 2026-09-24：顶栏按钮固定「横板」形状 —— 此前长提示文字会把它压成竖排异形（文字折成两三行） */
 .topbar button { flex: 0 0 auto; white-space: nowrap; }
@@ -165,6 +171,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .srcpick-caret { color: var(--text-dim); font-size: 10px; }
 .srcpick-side { margin: 6px 8px 10px; }
 .srcpick-side .srcpick-name { border-radius: var(--radius-sm); max-width: none; width: 100%; justify-content: space-between; }
+/* ★ 2026-09-29 缺陷修复（用户报「侧边换源列表向下展开什么都看不到」）：
+   侧栏的换源入口就在窗口**底部**，向下展开必然被窗口下沿裁掉（实测弹层 bottom 962 > 视口 800）。
+   修：侧栏变体的列表**向上展开**（`top:auto` + `bottom:100%+6px`）。 */
+.srcpick-side .srcpick-pop { top: auto; bottom: calc(100% + 6px); }
 .srcpick-label { color: var(--text-dim); font-size: 11px; }
 .srcpick-pop {
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 60; min-width: 200px; max-width: 320px;
@@ -412,8 +422,14 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 }
 .vplayer:fullscreen { border-radius: 0; }
 /* ★ 2026-09-28（用户要求）：说明页（详细免责声明 + 开源/赞助入口） */
-.about { max-width: 880px; line-height: 1.85; font-size: 13px; padding-bottom: 40px; }
-.about-sec { margin-bottom: 18px; }
+/* ---- 说明页（免责声明）----
+   ★ 2026-09-29（用户报「文本只占半边、还要下滑」）：① **整块居中**；② 宽屏**两列平铺**（左右都铺开、
+   高度近乎减半，1080p 基本一屏放下）；③ 窄屏自动回单列，条款不被跨列断开。 */
+.about { max-width: min(1180px, 94vw); margin: 0 auto; line-height: 1.75; font-size: 13px; padding-bottom: 20px; }
+@media (min-width: 1080px) {
+  .about { column-count: 2; column-gap: 44px; }
+}
+.about-sec { margin-bottom: 14px; break-inside: avoid; }
 .about-sec h3 { font-size: 14px; margin: 0 0 6px; }
 .about-sec p { margin: 0 0 8px; }
 .about-links { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0 10px; }

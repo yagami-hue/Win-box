@@ -1,13 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import { client } from '../api/client';
 import type { SourceBean, VodItem, SearchAllReport, AggVodItem, FilterGroup } from '../../shared/types';
 import { sourceAvailability } from '../../engine/vod/sourceAvailability';
 import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSearch';
-import { uiMem, schedulePersist } from '../lib/uiMemory';
+import { uiMem, schedulePersist, saveUiMemory, type HomeSearchMem } from '../lib/uiMemory';
 import SourcePicker from '../components/SourcePicker';
 import { useTheme } from '../lib/theme';
-import { TOP_NAV_THEMES } from '../lib/themeTokens';
+import { TOP_NAV_THEMES, TOOLBAR_THEMES } from '../lib/themeTokens';
 import { getSessionSort, setSessionSort } from '../lib/sessionSort';
 import { wrapImageUrlForRelay, needsDriveBind } from '../../shared/driveProvider';
 import { pickCover, preloadImage } from '../lib/coverPick';
@@ -19,8 +19,10 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   /**
    * ★ 2026-09-24（用户定稿）：TopNav 皮肤（Netflix / 哔哩哔哩）的顶栏已自带「搜索（全部源搜索）+ 换源」，
    *   点播页顶栏因此**不再放源内搜索与换源入口** —— 避免两处重复；经典皮肤保持原样（含源内搜索）。
+   * ★ 2026-09-29：Apple 皮肤的全宽工具栏同样自带搜索/换源 ⇒ 用 TOOLBAR_THEMES 判定去重
+   *   （它不是 TopNav 布局，但这一排同样重复）。
    */
-  const topNav = TOP_NAV_THEMES.includes(useTheme());
+  const toolbarSkin = TOOLBAR_THEMES.includes(useTheme());
   const [sites, setSites] = useState<SourceBean[]>([]);
   const [key, setKey] = useState('');
   const [classes, setClasses] = useState<SortClassView[]>([]);
@@ -33,6 +35,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const [wd, setWd] = useState('');
   /** ★ 外部入口：/search?agg=<关键词>（详情页演员/推荐、发现页卡片点击跳来）→ 自动执行一次全源搜索 */
   const [searchParams, setSearchParams] = useSearchParams();
+  /** ★ 2026-09-28：用于判断当前是否在 /search 路由（URL 同步搜索词只在该路由做，避免 /home 被改成搜索路由而重挂载） */
+  const location = useLocation();
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
   /** 首页内容由回退产出（蜘蛛无推荐列表 → homeVideoContent/首分类兜底），用于顶部轻提示 */
@@ -361,7 +365,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
      *   或播放器窗口写盘把旧值复活时，`uiMem.home.search` 会留着 →
      *   之后任意一次「详情 → 返回」都会被它拉回上一次的搜索结果页。
      */
-    uiMem.home.search = null;
+    setHomeSearch(null); // ★ 打版本号：进浏览态后，盘上残留的旧搜索态不能再把界面拉回搜索页
     // ★ 2026-09-27：这是「重新浏览某个源」→ 之前的浏览态快照作废（见 browseSnapRef）
     browseSnapRef.current = null;
     keyRef.current = k;
@@ -431,7 +435,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         //   自动跑一次全源搜索。**具体执行在下面的 aggParam effect**（这样「已在搜索页再次搜索」
         //   也能触发：同路由只变 query 不会重挂载，旧实现写在首载 effect 里 → 第二次搜索毫无反应）。
         if (aggParam) {
-          setSearchParams({}, { replace: true });
+          // ★ 2026-09-28：**不再清掉参数** —— 让 URL 保留本次关键词（返回/前进天然正确，见 syncSearchUrl）。
+          //   是否要真正发起搜索由下面的 aggParam effect 决定（内存已有同词结果时只恢复、不重搜）。
           setWd(aggParam);
           setSearchAllSources(true);
           // 先把「搜索前的源」定下来（只置状态、不拉首页数据，搜索视图不需要），
@@ -446,19 +451,12 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         // ★ 搜索 → 详情 → 返回：恢复上次搜索结果界面（不重新浏览首页）
         const memSearch = uiMem.home.search;
         if (memSearch && memSearch.aggMode) {
-          setWd(memSearch.wd);
-          setAgg(memSearch.agg as SearchAllReport | null);
-          setAggMode(true);
-          setAggScope(memSearch.aggScope);
-          setSearchAllSources(memSearch.searchAllSources);
+          applySearchMem(memSearch);
           const pick = pickSource();
           if (pick) {
             setKey(pick);
             keyRef.current = pick;
           }
-          requestAnimationFrame(() => {
-            if (contentRef.current && uiMem.home.scrollTop) contentRef.current.scrollTop = uiMem.home.scrollTop;
-          });
           return;
         }
         if (s.length === 0) {
@@ -505,9 +503,17 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    */
   useEffect(() => {
     if (!aggParam) return;
-    // 先清 URL 参数（返回/重进不重复触发），再显式按「全源」范围搜（setState 是异步的，
-    // 闭包里读 searchAllSources 会是旧值 —— 曾误走单源分支报「当前未选中任何源，无法搜索」）。
-    setSearchParams({}, { replace: true });
+    /**
+     * ★ 2026-09-28（修复「搜索返回栈错乱」）：URL 带词时先看**内存里是不是就是这个词的结果** ——
+     *   是则只恢复、**不重搜**（否则「详情 → 返回」会在 /search?agg=… 上重跑一次全源搜索，
+     *   把 2026-09-27 刚修好的「返回很慢」又带回来）。
+     *   内存不是这个词（换词 / 从别处跳来 / 重启后）才真正发起一次搜索。
+     */
+    const mem = uiMem.home.search;
+    if (mem && mem.aggMode && mem.agg && mem.wd === aggParam) {
+      applySearchMem(mem);
+      return;
+    }
     setWd(aggParam);
     setSearchAllSources(true);
     requestAnimationFrame(() => { void doSearch(false, aggParam, true); });
@@ -619,10 +625,45 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    * - ★ 2026-09-23 三轮：同关键词 5 分钟内再搜 → 主进程直接返回本地缓存（**秒回**）；
    *   `force=true`（「重新搜索」按钮）忽略缓存强制重搜。
    */
-  /** 保存搜索态到 uiMem（搜索 → 详情 → 返回时恢复搜索结果界面） */
+  /**
+   * 更新「上次搜索态」并**打版本号**：`updatedAt` 让更新的那份在跨窗口合并中胜出
+   * （`loadUiMemory` 会被挂载 / 窗口 focus / visibility 触发，旧值不能把新搜索顶掉 —— 见 `HomeMem.updatedAt`）。
+   */
+  function setHomeSearch(next: HomeSearchMem | null) {
+    uiMem.home.search = next;
+    uiMem.home.updatedAt = Date.now();
+  }
+
+  /**
+   * ★ 2026-09-28：把当前搜索词同步进 URL（仅在 `/search` 路由上）。
+   *
+   * 为什么：此前 `?agg=` 被消费后立即清空，返回只能靠内存记忆恢复 —— 一旦内存被旧值覆盖
+   * （焦点回调重读盘上的上一次搜索 / 播放器窗口写回旧快照），「搜 A → 详情 → 搜 B → 详情 → 返回」
+   * 就会退回 A 的结果。让 URL 带上本次关键词后，历史记录本身就携带了正确目标。
+   * 只在 /search 上做：在 /home 上改 query 会把用户从点播页"改路由"，且会触发重挂载。
+   */
+  function syncSearchUrl(term: string) {
+    if (location.pathname !== '/search') return;
+    setSearchParams(term ? { agg: term } : {}, { replace: true });
+  }
+
+  /** 恢复一份保存的搜索态（只读内存，不发起任何请求） */
+  function applySearchMem(mem: HomeSearchMem) {
+    setWd(mem.wd);
+    setAgg(mem.agg as SearchAllReport | null);
+    setAggMode(true);
+    setAggScope(mem.aggScope);
+    setSearchAllSources(mem.searchAllSources);
+    requestAnimationFrame(() => {
+      if (contentRef.current && uiMem.home.scrollTop) contentRef.current.scrollTop = uiMem.home.scrollTop;
+    });
+  }
+
+  /** 保存搜索态到 uiMem（搜索 → 详情 → 返回时恢复搜索结果界面）；同步写 URL 并**立即落盘** */
   function saveSearchMem(term: string, agg: SearchAllReport | null, scope: 'current' | 'all', allScope = searchAllSources) {
-    uiMem.home.search = { wd: term, aggMode: true, aggScope: scope, searchAllSources: allScope, agg };
-    schedulePersist();
+    setHomeSearch({ wd: term, aggMode: true, aggScope: scope, searchAllSources: allScope, agg });
+    syncSearchUrl(term);
+    saveUiMemory(); // 立即落盘：不等 2s 防抖，避免另一窗口 / 焦点回调读到「上一次搜索」
   }
 
   /**
@@ -772,8 +813,9 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     setAggMode(false);
     setAgg(null);
     setAggSrc('');
-    uiMem.home.search = null;
-    schedulePersist();
+    setHomeSearch(null);
+    syncSearchUrl(''); // 退出搜索 → URL 不再带关键词，否则重进/返回又会被拉回搜索态
+    saveUiMemory();
     const k = keyRef.current;
     /**
      * ★ 2026-09-27（用户报「从搜索结果返回很慢」）：**优先恢复搜索前的浏览态**，零网络、零 JVM 调用。
@@ -874,12 +916,13 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         * ★ 2026-09-24（用户定稿）：TopNav 皮肤（Netflix / 哔哩哔哩）的**浏览态不显示这一行** ——
         *   搜索与换源都已在顶栏（🔍 搜索 / 源名），此处再放一遍是重复；整行隐藏让内容网格直接铺满。
         *   仅「全源搜索结果态」保留（需要「返回浏览」出口与条数状态）。
+        * ★ 2026-09-29：Apple 皮肤（工具栏皮肤）同样适用。
         */}
-      {(!topNav || aggMode) && (
+      {(!toolbarSkin || aggMode) && (
       <div className="topbar">
         {/* 经典皮肤：换源改手机 TVBox 式（源名纯文字，长按/右键弹列表），搜索仍走源内 */}
-        {!topNav && <SourcePicker sites={sites} current={key} onPick={chooseSource} disabled={aggMode} />}
-        {!topNav && (
+        {!toolbarSkin && <SourcePicker sites={sites} current={key} onPick={chooseSource} disabled={aggMode} />}
+        {!toolbarSkin && (
           <input
             placeholder={searchAllSources ? '全源搜索：一次搜遍所有源（结果边搜边出）…' : '搜索当前源…'}
             value={wd}
@@ -888,7 +931,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
             style={{ flex: 1, maxWidth: 420 }}
           />
         )}
-        {!topNav && (
+        {!toolbarSkin && (
           <label className="tag" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', userSelect: 'none' }} title="默认只搜当前选中的源（快）；勾选后遍历全部可搜索源（慢）">
             <input
               type="checkbox"
@@ -899,7 +942,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
             全源搜索
           </label>
         )}
-        {!topNav && (
+        {!toolbarSkin && (
           <button className="primary" onClick={() => void doSearch()} disabled={loading || !wd.trim()}>
             {searchAllSources ? '全源搜索' : '搜索'}
           </button>

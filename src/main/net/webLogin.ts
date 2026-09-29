@@ -3,6 +3,7 @@
 // 从根本上规避「扫后即过期」（网页内扫码由网盘自身维护会话）。
 import { BrowserWindow, session } from 'electron';
 import type { Logger } from '../../shared/types';
+import { WEB_LOGIN_PROVIDERS } from '../../shared/driveProvider';
 
 interface WebLoginCfg {
   name: string;
@@ -34,15 +35,25 @@ const CFGS: Record<string, WebLoginCfg> = {
     scope: 'https://pan.baidu.com',
     authCookieContains: ['BDUSS'],
   },
+  // ★ 2026-09-28：115 此前**完全没有登录入口**（只能手贴 cookie）。
+  //   115 的登录态 cookie 名带随机后缀（`UID_<hash>_<n>` / `CID_…` / `SEID_…` / `KID_…`），
+  //   故用**子串**判定（isLoggedIn 走 includes）；取 UID_/SEID_ 任一即可认为已登录。
+  '115': {
+    name: '115 网盘',
+    loginUrl: 'https://115.com/',
+    scope: 'https://115.com',
+    authCookieContains: ['UID_', 'SEID_'],
+  },
 };
 
 /** 哪些 provider 用「网页二维码」作为统一扫码登录入口（可靠、不无故过期） */
 export function webLoginProviders(): string[] {
-  return Object.keys(CFGS);
+  // ★ 2026-09-28：清单的唯一来源在 shared（渲染层 DriveLogin 也用它，避免两处漂移）
+  return [...WEB_LOGIN_PROVIDERS];
 }
 
 export function hasWebLogin(provider: string): boolean {
-  return Object.prototype.hasOwnProperty.call(CFGS, provider.toLowerCase());
+  return WEB_LOGIN_PROVIDERS.includes(provider.toLowerCase());
 }
 
 export interface WebLoginResult {

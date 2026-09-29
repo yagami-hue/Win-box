@@ -12,6 +12,14 @@ import { totalmem } from 'node:os';
 import { join, basename, dirname } from 'node:path';
 import type { EngineHost } from '../ports';
 import { md5Hex } from '../util/md5';
+import { contentHashOf, recordContentKey, tryCloneByContent } from './jarContentIndex';
+import {
+  describeFailures,
+  fetchWithDisguise,
+  siteRootOf,
+  UA_OKHTTP,
+  type DisguiseAttempt,
+} from '../util/fetchWithDisguise';
 import { NullLogger } from '../util/logger';
 import { buildZip, listZipEntries, looksLikeZip, readZipEntries, zipEntrySizes, type ZipEntryData } from '../util/syncZip';
 import { SpiderProcPool, poolEnabled, servePoolKey, WARM_METHOD, type PoolResult } from './SpiderProcPool';
@@ -551,60 +559,75 @@ export class JarSpiderBridge {
   }
 
   private async doConvertStage(jarUrl: string, key: string, target: string): Promise<string> {
-    // 1) 下载 jar（含 classes.dex 的 zip）
-    const res = await this.host!.http.request({ url: jarUrl, method: 'get', timeoutMs: 60000, buffer: 2 });
-    let jarBytes = Buffer.from(Array.isArray(res.content) ? res.content : Buffer.from(String(res.content), 'base64'));
     /**
-     * ★★ 2026-09-28（通解）：**jar 下载也要做「okhttp UA」兜底**（与订阅拉取同款，勿只改一边）★★
+     * 1) 下载 jar（含「按 UA 分流」兜底）
      *
-     * 实测订阅 `https://700sjro44343.vicp.fun/eggp/0211/tv.json` 的 `spider =
-     * http://47.120.41.246:8025/vip/jar/lubin.php`：该站**按 UA 分流** ——
-     * 浏览器/默认 UA 得到「影视仓 & OK影视 - 官方配置分发」HTML 页（17,307 B），
-     * 只有 TVBox/okhttp UA 才返回真 jar（2,081,666 B，PK 魔数、内含 classes.dex）。
-     *
-     * 旧行为：订阅拉取有 UA 兜底、jar 下载没有 ⇒ 17KB HTML 被当成 jar 存盘 →
-     * dex2jar `The source file is not a .dex or .zip file` → 该配置**所有源**一起报
-     * 「jar 转换失败，下载到的可能不是有效的 jar 文件」。
-     *
-     * 判定用**魔数**（zip `PK\x03\x04` / 裸 dex `dex\n`）而不是「像不像 HTML」：
-     * 只认真正的 jar/dex，误判面最小；拿到的本来就是真 jar 时不会多打一次请求。
+     * ★★ 2026-09-29：改用**统一伪装阶梯**（`fetchWithDisguise`，与订阅拉取同源，勿再各写一份）★★
+     *   实测 `http://47.120.41.246:8025/vip/jar/lubin.php`：按 UA 分流 —— 浏览器/默认 UA 得到
+     *   「影视仓 & OK影视 - 官方配置分发」HTML 页（17,307 B），只有 **okhttp UA** 才返回真 jar
+     *   （2,081,666 B，PK 魔数、内含 classes.dex）。
+     *   旧行为：订阅拉取有 UA 兜底、jar 下载没有 ⇒ 17KB HTML 被当成 jar 存盘 →
+     *   dex2jar `The source file is not a .dex or .zip file` → 该配置**所有源**一起报
+     *   「jar 转换失败，下载到的可能不是有效的 jar 文件」。
+     *   判据用**魔数**（zip `PK\x03\x04` / 裸 dex `dex\n`）而不是「像不像 HTML」：误判面最小。
+     *   档位：默认 UA → okhttp UA → okhttp UA + Referer（jar 路径不做 DoH，避免拖长）。
      */
-    if (!isJarOrDex(jarBytes)) {
-      try {
-        const retry = await this.host!.http.request({
-          url: jarUrl,
-          method: 'get',
-          timeoutMs: 60000,
-          buffer: 2,
-          headers: { 'User-Agent': 'okhttp/3.12.0' },
-        });
-        const retryBytes = Buffer.from(Array.isArray(retry.content) ? retry.content : Buffer.from(String(retry.content), 'base64'));
-        if (isJarOrDex(retryBytes)) {
-          this.host?.logger.i(
-            `jvm-bridge jar 下载按「okhttp UA」重试成功（默认 UA 拿到的不是 jar：${jarBytes.length}B）: ${jarUrl}`,
-          );
-          jarBytes = retryBytes;
-        } else {
-          this.host?.logger.w(
-            `jvm-bridge jar「okhttp UA」重试拿到的也不是 jar（${retryBytes.length}B）: ${jarUrl}`,
-          );
-        }
-      } catch (e) {
-        this.host?.logger.w(`jvm-bridge jar「okhttp UA」重试失败: ${(e as Error).message}`);
-      }
+    const attempts: DisguiseAttempt[] = [
+      { label: '默认 UA' },
+      { label: 'okhttp UA', ua: UA_OKHTTP },
+      { label: 'okhttp UA + Referer', ua: UA_OKHTTP, referer: siteRootOf(jarUrl) },
+    ];
+    const got = await fetchWithDisguise(this.host!.http, jarUrl, {
+      accept: (b) => isJarOrDex(b),
+      attempts,
+      timeoutMs: 60000,
+      buffer: 2, // 沿用 jar 路径既有的 base64 语义（由 fetchWithDisguise 归一成 Buffer）
+      onTry: (t) => {
+        const feat = [t.status ? `HTTP ${t.status}` : '', t.sniff ? `${t.sniff.kind} ${t.sniff.size}B` : '', t.reason || '']
+          .filter(Boolean)
+          .join(' · ');
+        this.host?.logger.i(`jvm-bridge jar 下载尝试「${t.label}」${t.ok ? '命中' : '未命中'}：${feat} ← ${jarUrl}`);
+      },
+    });
+    let jarBytes = got.buf ?? got.last ?? Buffer.alloc(0);
+    if (got.buf && got.used && got.used.label !== '默认 UA') {
+      this.host?.logger.i(`jvm-bridge jar 按「${got.used.label}」重试成功（默认 UA 拿到的不是 jar）: ${jarUrl}`);
     }
-    if (jarBytes.length < 100) throw new Error(`jar 下载失败: ${jarUrl} (${res.status})`);
+    if (jarBytes.length < 100) {
+      throw new Error(`jar 下载失败: ${jarUrl}（已尝试：${describeFailures(got.tries)}）`);
+    }
     // 下载是异步的，期间目录仍可能被外部删除 → 再次兜底
     this.ensureCacheDir();
     const rawJar = join(this.cacheDir, `${key}.raw.jar`);
     writeFileSync(rawJar, jarBytes);
+
+    /**
+     * ★ 2026-09-29：**内容哈希复用**（用户报「摸鱼源还要经历大 jar 加载」的正面优化）。
+     *
+     * 缓存键是 URL 的 md5，源站换域名/换文件名/加查询参数就会**重新转换**（大 jar 20s~3min），
+     * 即便 jar 内容一字节没变。这里用「内容 md5 → 已有产物」的索引把这种白白重转直接省掉：
+     * 命中即把已有产物硬链接（跨卷退化为拷贝）成本次 target，**完全跳过 dex2jar**。
+     * 索引由 finishConvert 在任何一次成功转换后写入（含"收编上次会话遗留产物"）。
+     */
+    const contentKey = contentHashOf(jarBytes);
+    {
+      const hit = tryCloneByContent(this.cacheDir, contentKey, key, (p) => this.artifactOk(p));
+      if (hit.reused) {
+        this.host?.logger.i(
+          `jvm-bridge 内容哈希复用：jar 内容未变（${(jarBytes.length / 1048576).toFixed(2)}MB），` +
+            `直接复用已有产物、跳过 dex2jar（${basename(hit.from || '')} → ${basename(target)}）: ${jarUrl}`,
+        );
+        this.finishConvert(jarUrl, target, contentKey);
+        return target;
+      }
+    }
 
     // 2) ★★ 先「收编」上次会话遗留、已经跑完的后台转换（2026-09-27 新增，勿删）★★
     //    场景：关窗/重启时 detached 的转换进程仍在跑并已写出完整产物 → 这里只需
     //    「合并 raw 资源 + 原子改名」，秒级完成，用户不必再等一次 dex2jar。
     if (this.adoptFinishedPart(key, rawJar, target, false)) {
       this.host?.logger.i(`jvm-bridge 已收编后台完成的转换产物（上次会话遗留，无需重转）: ${basename(target)}`);
-      this.finishConvert(jarUrl, target);
+      this.finishConvert(jarUrl, target, contentKey);
       return target;
     }
 
@@ -622,7 +645,7 @@ export class JarSpiderBridge {
           `该 jar 的后台转换仍在进行（已 ${formatDuration(Date.now() - lock.startedAt)}），稍后自动重试`,
         );
       }
-      this.finishConvert(jarUrl, target);
+      this.finishConvert(jarUrl, target, contentKey);
       return target;
     }
     // 锁指向的进程已经不在（或锁过期 = 僵死）→ 清掉残留，按「新转换」处理
@@ -687,17 +710,23 @@ export class JarSpiderBridge {
     }
     // 5) 校验 + 合并 raw 资源 + 原子改名 part → target（strict：本次刚跑完，失败必须报准原因）
     this.adoptFinishedPart(key, rawJar, target, true);
-    this.finishConvert(jarUrl, target);
+    this.finishConvert(jarUrl, target, contentKey);
     return target;
   }
 
-  /** 转换成功后的统一收尾（含原生运行时预热 —— 见 jarNeedsNative） */
-  private finishConvert(jarUrl: string, target: string): void {
+  /**
+   * 转换成功后的统一收尾（含原生运行时预热 —— 见 jarNeedsNative）。
+   *
+   * ★ 2026-09-29：同时把「jar 内容哈希 → 本次产物键」记进内容索引 —— 下次同内容的 jar
+   *   即使换了 URL（缓存键不同）也能直接复用产物、跳过 dex2jar（见 jarContentIndex.ts）。
+   */
+  private finishConvert(jarUrl: string, target: string, contentKey?: string): void {
     // ★ 原生桥：产物内含 .so（加固壳）→ 后台预热 unidbg 运行时（首次约 39MB 下载），
     //   把下载挪到「转换刚完成」这段用户已在等待的窗口，首次调用只需起桥。
     if (this.jarNeedsNative(target)) this.prewarmNativeRuntime();
     this.converted.set(jarUrl, target);
     this.convertFailures.delete(jarUrl);
+    if (contentKey) recordContentKey(this.cacheDir, contentKey, md5Hex(jarUrl));
   }
 
 /**

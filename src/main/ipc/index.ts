@@ -106,9 +106,10 @@ export function registerIpc(host: SpiderHost): void {
   registerHandler(IPC.DRIVE_QR_POLL, (_e: any, provider: string, sid: string) => host.driveQrPoll(provider, sid), log);
   registerHandler(IPC.DRIVE_WEB_LOGIN, (_e: any, provider: string) => host.driveWebLogin(provider), log);
 
-  // 外挂字幕（assrt）
+  // 外挂字幕（多源：assrt（需 token）/ SubtitleCat（免 token））
   registerHandler(IPC.SUBTITLE_GET, () => host.subtitleGetSettings(), log);
   registerHandler(IPC.SUBTITLE_SET, (_e: any, patch: any) => host.subtitleSetSettings(patch || {}), log);
+  registerHandler(IPC.SUBTITLE_PROVIDERS, () => host.subtitleProviderView(), log);
   registerHandler(IPC.SUBTITLE_SEARCH, (_e: any, name: string) => host.subtitleSearch(String(name)), log);
   registerHandler(IPC.SUBTITLE_FETCH, (_e: any, cand: any) => host.subtitleFetch(cand), log);
   // 弹幕（外部接口清单）

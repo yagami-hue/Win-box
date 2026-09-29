@@ -15,6 +15,8 @@ import { danmakuQueryCandidates, parseEpisodeInput, episodeFieldFromName, format
 import { customEndpointsText, mergeEndpoints, pickAnimesForExpand, seasonOf, sortCandidatesByEp } from '../../engine/danmaku/endpoints';
 import { resolvePlayTarget } from '../lib/playTarget';
 import { loadPlayerPrefs, savePlayerPrefs, PLAYER_FITS, type PlayerPrefs, type PlayerFit } from '../lib/playerPrefs';
+import { subtitleEmptyReason, subtitleSourceLabel } from '../lib/subtitleText';
+import DriveBindModal from './DriveBindModal';
 import { driveProviderFromUrl, driveProviderLabel } from '../../shared/driveProvider';
 import {
   DEFAULT_DANMAKU_SETTINGS,
@@ -153,6 +155,8 @@ interface VideoPlayerProps {
   mini?: boolean;
   /** ★ 播放地址属于「cookie 型」网盘且未绑定 → 提示去配置页绑定（值为网盘 provider，如 quark/uc/baidu/115） */
   driveBindProvider?: string | null;
+  /** ★ 2026-09-29：在播放器里完成网盘绑定后回调外层（重新解析当前集，不用手动重开） */
+  onDriveBound?: () => void;
   /** ★ 续播起始时间（秒）：历史记录点开时由外层传入，优先于 uiMem.playTime 恢复。
    *   （历史点开会先重新转存拿新直链 → 新 url 与 uiMem.playTime 的旧键不匹配，须显式带进度） */
   startTime?: number;
@@ -202,6 +206,13 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   // ---- 网盘 cookie 未绑定提示：播放网盘资源但配置页未绑定对应网盘凭据 → 提示去配置页绑定 ----
   const [needBind, setNeedBind] = useState<string | null>(null);
   const bindDismissedRef = useRef(false); // 本次播放会话内已点「知道了」→ 不再打扰（重新进入播放页会重新检测）
+  /**
+   * ★ 2026-09-29（用户要求「解析到网盘资源播放时，若未绑定就弹出绑定窗口」）：
+   *   检出未绑定后**自动打开绑定弹窗**（预选该网盘）。
+   *   ★ 用户口径（2026-09-29 追加）：「原版点播页检测的绑定条不要取消，只是**新增**一个播放时检测弹窗」——
+   *     因此点播页的横幅/入口、本提示条与原「去点播页绑定」按钮**全部保留**，弹窗只作新增路径。
+   */
+  const [bindOpen, setBindOpen] = useState(false);
   useEffect(() => {
     // provider 来源：主进程 play 检出（首选）→ URL 兜底（历史直连等未走 play 解析的路径，解析 /play?ck=）
     const prov = (driveBindProvider && String(driveBindProvider).trim()) || driveProviderFromUrl(url) || '';
@@ -211,10 +222,14 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     void client
       .driveGet()
       .then((tokens) => {
-        if (alive && !tokens[prov]) setNeedBind(prov); // 未绑定才提示；已绑定不打扰
+        if (!alive || tokens[prov]) return; // 未绑定才提示；已绑定不打扰
+        setNeedBind(prov);
+        setBindOpen(true); // ★ 自动弹绑定窗口
       })
       .catch(() => {
-        if (alive) setNeedBind(prov); // 查询失败也提示（宁可提示也别静默卡死）
+        if (!alive) return;
+        setNeedBind(prov); // 查询失败也提示（宁可提示也别静默卡死）
+        setBindOpen(true);
       });
     return () => { alive = false; };
   }, [url, driveBindProvider]);
@@ -496,8 +511,13 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       setSubEnabled(s.enabled);
       setSubFont(s.fontSize || 20);
       setSubBottom(s.bottom || 40);
-      setSubTokenHint(!s.assrtToken);
     }).catch(() => undefined);
+    // ★ 2026-09-28：提示语不再是「缺 assrt token」，而是「**所有**字幕源都不可用」
+    //   （SubtitleCat 等免 token 源可用时不该拦着用户）
+    client
+      .subtitleProviders()
+      .then((list) => setSubTokenHint(!list.some((p) => p.available)))
+      .catch(() => setSubTokenHint(false));
   }, []);
 
   // 切换集时清空旧字幕与候选（subQuery 由 resourceName effect 重填）
@@ -580,10 +600,11 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     setSubMsg('');
     setSubCands([]);
     try {
-      const list = await client.subtitleSearch(name);
+      const report = await client.subtitleSearch(name);
       if (gen !== subGenRef.current) return; // 期间换集/发起新搜索 → 丢弃
-      setSubCands(list || []);
-      if (list && list.length && resourceName) {
+      const list = report?.candidates || [];
+      setSubCands(list);
+      if (list.length && resourceName) {
         // 怪名→真名记忆：用户改写的词命中后记住，下次同资源自动复用（对称弹幕 winbox-dm-mem）
         const auto = buildSearchQuery(resourceName);
         if (name !== auto) {
@@ -592,7 +613,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           saveSubMem(mem);
         }
       }
-      if (!list || !list.length) setSubMsg('未找到匹配字幕');
+      // ★ 2026-09-28：无命中时带上**逐源状态**（跳过 / 失败 / 无匹配），否则用户只知道"没搜到"
+      if (!list.length) setSubMsg(subtitleEmptyReason(report));
     } catch (e) {
       if (gen === subGenRef.current) setSubMsg((e as Error).message);
     } finally {
@@ -1222,10 +1244,26 @@ export default function VideoPlayer(props: VideoPlayerProps) {
             （夸克/UC 请粘贴含 <code>__pus</code> 与 <code>__puus</code> 的完整 Cookie，或用其中的「扫码登录」自动抓取）。
           </div>
           <div className="row" style={{ gap: 10, justifyContent: 'center' }}>
+            {/* ★ 2026-09-29：原按钮保留（跳点播页 → 源主页「网盘绑定」入口），弹窗只是**新增**的第二条路径 */}
             <button className="primary" onClick={() => void client.gotoDriveBind()}>去点播页绑定</button>
-            <button onClick={() => { bindDismissedRef.current = true; setNeedBind(null); }}>知道了</button>
+            <button onClick={() => setBindOpen(true)}>打开绑定窗口</button>
+            <button onClick={() => { bindDismissedRef.current = true; setNeedBind(null); setBindOpen(false); }}>知道了</button>
           </div>
         </div>
+      )}
+      {/* ★ 2026-09-29：未绑定时自动弹出的网盘绑定窗口（预选该网盘；绑定成功 → 外层重新解析播放） */}
+      {bindOpen && needBind && (
+        <DriveBindModal
+          siteName={resourceName || '当前播放源'}
+          initialProvider={needBind}
+          onClose={() => { bindDismissedRef.current = true; setBindOpen(false); }}
+          onSaved={() => {
+            setBindOpen(false);
+            setNeedBind(null);
+            bindDismissedRef.current = false; // 绑定成功 → 允许后续再次检测/提示
+            props.onDriveBound?.();
+          }}
+        />
       )}
       {/* 错误 */}
       {err && (
@@ -1432,7 +1470,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
                 <button className="vsp-btn" title="还原为识别到的剧名" onClick={() => setSubQuery(buildSearchQuery(resourceName || ''))}>还原</button>
               </div>
               {subTokenHint && !subCands.length && (
-                <div className="vsp-hint">尚未配置 assrt token：请到「配置 → 设置 → 外挂字幕（assrt）」填入你的 token 后再搜索。</div>
+                <div className="vsp-hint">当前没有可用的字幕源：到「配置 → 设置 → 外挂字幕」打开一个源（SubtitleCat 免 token，assrt 需自填 token）后再搜索。</div>
               )}
               {subMsg && <div className="vsp-err">{subMsg}</div>}
               {subCands.length > 0 && (
@@ -1442,6 +1480,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
                       <span className="vsp-item-name">{c.subname || '无名称'}</span>
                       <span className="muted">
                         {c.format || ''} {c.lang ? `· ${c.lang}` : ''}
+                        {c.provider ? ` · ${subtitleSourceLabel(c.provider)}` : ''}
                         {c.hitKeyword ? ` · 来源「${c.hitKeyword}」` : ''}
                       </span>
                     </button>

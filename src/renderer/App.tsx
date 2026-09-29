@@ -30,6 +30,60 @@ const NAV = [
 ];
 
 /**
+ * ★ 2026-09-29：Apple 皮肤侧边栏图标 —— SF Symbols 风格**单色线性 SVG**（16px / 1.6 描边）。
+ * 不使用 emoji（emoji 会破坏 macOS 侧边栏观感）；其余皮肤仍用 NAV 里的 emoji。
+ */
+const AP_ICONS: Record<string, React.ReactNode> = {
+  // 发现（主页）= house
+  '/': (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2.6 7.1 8 2.8l5.4 4.3v5.2a.9.9 0 0 1-.9.9H3.5a.9.9 0 0 1-.9-.9V7.1Z" />
+    </svg>
+  ),
+  // 点播（资料库）= play.rectangle
+  '/home': (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
+      <rect x="1.9" y="3.3" width="12.2" height="9.4" rx="2.3" />
+      <path d="M6.7 6.2v3.6l3.2-1.8-3.2-1.8Z" fill="currentColor" stroke="none" />
+    </svg>
+  ),
+  // 历史（继续观看）= clock
+  '/history': (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.5" />
+      <path d="M8 5.1V8l2.1 1.4" />
+    </svg>
+  ),
+  // 直播 = 广播（圆点 + 波纹）
+  '/live': (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+      <circle cx="8" cy="10.6" r="1.5" fill="currentColor" stroke="none" />
+      <path d="M5.1 8.1a4.3 4.3 0 0 1 5.8 0M3 5.9a7.1 7.1 0 0 1 10 0" />
+    </svg>
+  ),
+  // 配置 = 齿轮（近似 gearshape）
+  '/config': (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+      <circle cx="8" cy="8" r="2.1" />
+      <path d="M8 1.9v1.5M8 12.6v1.5M1.9 8h1.5M12.6 8h1.5M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M12.3 3.7l-1.1 1.1M4.8 11.2l-1.1 1.1" />
+    </svg>
+  ),
+  // 说明 = info.circle
+  '/about': (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.6" />
+      <path d="M8 7.3v3.4M8 5.2h.01" />
+    </svg>
+  ),
+};
+
+/** Apple 皮肤侧边栏的**分组**（HIG：侧边栏最多两级、分组标签要简短） */
+const AP_GROUPS: { label: string; items: typeof NAV }[] = [
+  { label: '媒体', items: NAV.filter((n) => ['/', '/home', '/history', '/live'].includes(n.to)) },
+  { label: '其他', items: NAV.filter((n) => ['/config', '/about'].includes(n.to)) },
+];
+
+/**
  * 页面外壳（布局路由）：承载「页面切换过渡动画」。
  * ★ 2026-09-24（用户定稿）：以 pathname 为 key → 切页时容器重建并播放一次入场动画
  *   （淡入 + 轻微上移，苹果 / Netflix 式）。用布局路由 + Outlet 而非嵌套 Routes，
@@ -47,9 +101,38 @@ function PageShell() {
 export default function App() {
   const nav = useNavigate();
   const loc = useLocation();
-  /** ★ 2026-09-24：四套皮肤（经典深/浅 + Netflix + 哔哩哔哩）；Netflix/B 站用「顶部导航」替代侧边栏 */
+  /** ★ 2026-09-24：四套皮肤（经典深/浅 + Netflix + 哔哩哔哩）；Netflix/B 站用「顶部导航」替代侧边栏
+   *  ★ 2026-09-29：新增第五套 Apple（macOS）皮肤，走侧边栏布局 */
   const theme = useTheme();
   const topNav = TOP_NAV_THEMES.includes(theme);
+  /**
+   * ★ 2026-09-29（用户要求「完全改布局」）：Apple 皮肤 = **独立外壳**，不复用经典/Netflix 骨架：
+   *   全宽 Liquid Glass 工具栏（左置交通灯 + 返回箭头 + 页面标题 + 右侧搜索/换源）
+   *   ＋ 玻璃侧边栏（分组：媒体 / 其他，SF 风格线性图标，选中项实心蓝）
+   *   ＋ 内容区（Apple TV 式精选轮播 + 内容栏，见 DiscoverPage / apple.css）。
+   */
+  const apple = theme === 'apple';
+  const [appIcon, setAppIcon] = useState('');
+  useEffect(() => {
+    if (!apple) return;
+    client.appIcon().then((d) => { if (d) setAppIcon(d); }).catch(() => undefined);
+  }, [apple]);
+  /** 工具栏标题（= 当前页面名，macOS 统一工具栏的居中标题位） */
+  const pageTitle =
+    loc.pathname === '/' ? '发现'
+      : loc.pathname.startsWith('/home') ? '点播'
+        : loc.pathname.startsWith('/search') ? '全源搜索'
+          : loc.pathname.startsWith('/detail') ? '影片详情'
+            : loc.pathname.startsWith('/history') ? '观看历史'
+              : loc.pathname.startsWith('/live') ? '直播'
+                : loc.pathname.startsWith('/config') ? '配置'
+                  : loc.pathname.startsWith('/about') ? '说明'
+                    : 'Win-Box';
+  /** 工具栏返回箭头（‹）：macOS 窗口的导航回退 */
+  const goBack = (): void => {
+    if (window.history.length > 1) nav(-1);
+    else nav('/', { replace: true });
+  };
   // 首次启动免责声明弹窗：已同意过（localStorage 标记）则不再弹出
   const [disclaim, setDisclaim] = useState(() => {
     try {
@@ -249,6 +332,80 @@ export default function App() {
     );
   }
 
+  /**
+   * 路由表（★ 2026-09-29：抽成变量 —— Apple 独立外壳与经典/Netflix 外壳**共用同一份**，
+   * 避免两套 return 各写一遍 Routes 而漏改）。
+   * ★ 2026-09-24（用户定稿）：页面切换过渡动画 —— 布局路由 PageShell 以 pathname 为 key，
+   * 切页时容器重建并播放一次「淡入 + 轻微上移」。
+   */
+  const routesNode = (
+    <Routes>
+      <Route element={<PageShell />}>
+        {/* ★ 2026-09-24（用户定稿）：「发现」= 默认首页（软件打开即进这里）；「点播」= 源主页 /home */}
+        <Route path="/" element={<DiscoverPage />} />
+        <Route path="/home" element={<HomePage onOpenDetail={openDetail} />} />
+        {/**
+          * ★ 2026-09-24：全源搜索专用路由 —— 详情页「演员/相关推荐」与发现页卡片点击后跳这里，
+          * 由 HomePage 读 `?agg=<关键词>` 自动执行一次全源搜索。
+          */}
+        <Route path="/search" element={<HomePage onOpenDetail={openDetail} />} />
+        <Route path="/history" element={<HistoryPage />} />
+        <Route path="/detail/:key/:id" element={<DetailPage onPlay={onDetailPlay} />} />
+        <Route path="/live" element={<LivePage />} />
+        <Route path="/config" element={<ConfigPage />} />
+        <Route path="/about" element={<AboutPage />} />
+      </Route>
+    </Routes>
+  );
+
+  /**
+   * ★ 2026-09-29：Apple（macOS / Liquid Glass）专属外壳 —— 窗口结构按 macOS 原生应用重排：
+   *   ① 顶部**全宽统一工具栏**（交通灯左置 → 返回箭头 → 页面标题 → 右侧搜索 + 换源），
+   *      整条可拖拽窗口（-webkit-app-region: drag，交互元素 no-drag）；
+   *   ② 下方为「玻璃侧边栏 + 内容区」双栏（侧边栏分组 + 侧边栏底部当前源）。
+   */
+  if (apple) {
+    return (
+      <div className="app ap-app">
+        {disclaim && DisclaimerModal}
+        <header className="ap-toolbar">
+          <TitleBar variant="mac" />
+          <button className="ap-navbtn" title="返回" aria-label="返回" disabled={loc.pathname === '/'} onClick={goBack}>
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M9.8 3.4 5.2 8l4.6 4.6" />
+            </svg>
+          </button>
+          <span className="ap-toolbar-title">{pageTitle}</span>
+          <span className="ap-spacer" />
+          <SearchPanel />
+          <SourcePicker />
+        </header>
+        <div className="ap-body">
+          <aside className="ap-sidebar">
+            <div className="ap-brand" title="Win-Box">
+              {appIcon ? <img className="ap-brand-ico" src={appIcon} alt="" draggable={false} /> : <span className="ap-brand-dot" />}
+              <span className="ap-brand-name">Win-Box</span>
+            </div>
+            {AP_GROUPS.map((g) => (
+              <div key={g.label} className="ap-group">
+                <div className="ap-group-label">{g.label}</div>
+                {g.items.map((n) => (
+                  <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => 'ap-nav' + (isActive ? ' active' : '')}>
+                    <span className="ap-nav-ico">{AP_ICONS[n.to]}</span>
+                    <span className="ap-nav-txt">{n.label}</span>
+                  </NavLink>
+                ))}
+              </div>
+            ))}
+            <div className="ap-side-spacer" />
+            <SourcePicker variant="sidebar" />
+          </aside>
+          <main className="ap-main">{routesNode}</main>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`app${topNav ? ' nf' : ''} ${theme}`.trim()}>
       {disclaim && DisclaimerModal}
@@ -292,25 +449,7 @@ export default function App() {
         ) : (
           <TitleBar />
         )}
-        <Routes>
-          {/* ★ 2026-09-24（用户定稿）：页面切换过渡动画 —— 布局路由 PageShell 以 pathname 为 key，
-              切页时容器重建并播放一次「淡入 + 轻微上移」（苹果 / Netflix 式）。 */}
-          <Route element={<PageShell />}>
-            {/* ★ 2026-09-24（用户定稿）：「发现」= 默认首页（软件打开即进这里）；「点播」= 源主页 /home */}
-            <Route path="/" element={<DiscoverPage />} />
-            <Route path="/home" element={<HomePage onOpenDetail={openDetail} />} />
-            {/**
-              * ★ 2026-09-24：全源搜索专用路由 —— 详情页「演员/相关推荐」与发现页卡片点击后跳这里，
-              * 由 HomePage 读 `?agg=<关键词>` 自动执行一次全源搜索。
-              */}
-            <Route path="/search" element={<HomePage onOpenDetail={openDetail} />} />
-            <Route path="/history" element={<HistoryPage />} />
-            <Route path="/detail/:key/:id" element={<DetailPage onPlay={onDetailPlay} />} />
-            <Route path="/live" element={<LivePage />} />
-            <Route path="/config" element={<ConfigPage />} />
-            <Route path="/about" element={<AboutPage />} />
-          </Route>
-        </Routes>
+        {routesNode}
       </main>
     </div>
   );

@@ -211,6 +211,10 @@
 .nf-row-title { font-size: 20px; font-weight: 700; margin: 0 0 10px; color: #e5e5e5; }
 .nf-row-scroll { display: flex; gap: 8px; overflow-x: auto; padding: 8px 2px 14px; }
 .nf-row-scroll > * { flex: 0 0 var(--nf-card-w); }
+/* ★ 2026-09-29：行项 min-width:0（缺陷修复）—— 超长片名（`.name` 是 nowrap）会经 flex 项
+   `min-width:auto` 把卡片撑宽（实测 176 → 267px），封面随 2:3 撑高，整行被拉到 455px 留白。
+   经典皮肤同行同因，已在 DiscoverPage 内联 minWidth:0 修掉。 */
+:root[data-theme='netflix'] .nf-row-scroll > * { min-width: 0; }
 .nf-hero h3, .nf-row-title { letter-spacing: 0; }
 
 /* ★ 2026-09-24：详情页「相关推荐」横条 —— 悬停**只做轻微上浮**（不做 scale），

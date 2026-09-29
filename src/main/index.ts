@@ -127,6 +127,18 @@ app.whenReady().then(async () => {
   } catch (e) {
     fileLogger.w('代理设置初始化失败：' + (e as Error).message);
   }
+  // ★ 2026-09-28：播放/落盘诊断落盘（`<userData>/logs/play-diag-*.jsonl`）
+  //   注入式（playDiag 不静态依赖 electron），供「落盘/播放成功率」排查取数。
+  try {
+    const { initPlayDiag } = await import('./util/playDiag');
+    const { userDataDir } = await import('./util/paths');
+    initPlayDiag({
+      logDir: () => join(userDataDir(), 'logs'),
+      log: (m: string) => fileLogger.i(m),
+    });
+  } catch (e) {
+    fileLogger.w('播放诊断初始化失败：' + (e as Error).message);
+  }
   registerIpc(host);
   // 老板键：注入窗口提供者（主窗口 + 播放器窗口）并按上次设置注册全局快捷键
   bossKey.start(() => {

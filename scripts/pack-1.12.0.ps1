@@ -1,22 +1,23 @@
 param([string]$Root = 'E:\WorkBuddy\tvbox2\tvbox-win')
-# pack-1.11.0.ps1 -- Win-Box 1.11.0 / release1.11.0 packaging helper.
-#   pre-flight -> quality gate -> build-main -> vite build -> electron-builder (nsis + portable)
+# pack-1.12.0.ps1 -- Win-Box 1.12.0 / release1.12.0 packaging helper.
+#   pre-flight -> quality gate -> build-main -> vite build -> electron-builder (nsis)
 #   -> incremental -> copy to Desktop -> self-check
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File "E:\WorkBuddy\tvbox2\tvbox-win\scripts\pack-1.11.0.ps1"
-#
-# Reused twice:
-#   1) 2026-09-28 first 1.11.0 release (MINOR bump 1.1.0 -> 1.11.0)
-#   2) 2026-09-28 SAME-VERSION repack after the six user-reported fixes
-#      (multi-source subtitles / netdisk 115 login / search back-stack / play race / history delete /
-#       play diagnostics). No version bump on purpose -> artifacts overwrite the same names.
+#   powershell -ExecutionPolicy Bypass -File "E:\WorkBuddy\tvbox2\tvbox-win\scripts\pack-1.12.0.ps1"
 #
 # Scope (project rules):
-#   * nsis Setup + portable (portable IS built: GitHub Release assets need both)
-#   * no git push / no GitHub Release from this script (handled separately, explicit instruction only)
+#   * nsis Setup + incremental only. Portable is OPTIONAL per iron rule 4 and the user
+#     prefers the installer -- not built here (add "portable" to the builder args if needed).
+#   * no git push / no GitHub Release from this script (explicit instruction only)
 #   * win7-legacy line is frozen, not built
-#   * incremental baseline = release1.1.0\win-unpacked (the released 1.1.0 build)
+#   * incremental baseline = release1.11.0\win-unpacked (the released 1.11.0 build)
+#
+# This round's content (1.11.0 -> 1.12.0):
+#   * Apple skin (fifth theme, macOS Liquid Glass): separate shell (full-width toolbar with
+#     traffic lights + glass sidebar + Apple TV style hero/shelves/detail) -- see 交付说明 1.42
+#   * classic-appearance fixes: sidebar source-picker opens UPWARD; home-page source-picker
+#     list no longer hidden behind poster cards (.topbar gets position:relative; z-index:30)
 #
 # NOTE: ASCII-only ON PURPOSE -- PowerShell 5.1 reads .ps1 as ANSI and mangles CJK literals
 #       (the CJK part of the incremental package name is built from code points below).
@@ -25,14 +26,13 @@ if (-not (Test-Path $Root)) { Write-Host "project dir not found: $Root (pass -Ro
 Set-Location $Root
 
 # U+589E U+91CF U+66F4 U+65B0 = "incremental update"
-$incrName = 'Win-Box Setup 1.11.0 ' + [char]0x589E + [char]0x91CF + [char]0x66F4 + [char]0x65B0
+$incrName = 'Win-Box Setup 1.12.0 ' + [char]0x589E + [char]0x91CF + [char]0x66F4 + [char]0x65B0
 
-$outDir    = 'release1.11.0'
-$setup     = "$outDir\Win-Box Setup 1.11.0.exe"
-$portable  = "$outDir\Win-Box 1.11.0.exe"
+$outDir    = 'release1.12.0'
+$setup     = "$outDir\Win-Box Setup 1.12.0.exe"
 $incrExe   = "release\$incrName.exe"
 $incrZip   = "release\$incrName.zip"
-$oldDir    = 'release1.1.0\win-unpacked'
+$oldDir    = 'release1.11.0\win-unpacked'
 $newDir    = "$outDir\win-unpacked"
 $asar      = "$newDir\resources\app.asar"
 $appExe    = "$newDir\Win-Box.exe"
@@ -51,11 +51,11 @@ $verLine = (Select-String -Path package.json -Pattern '"version"' | Select-Objec
 $outLine = (Select-String -Path package.json -Pattern '"output"' | Select-Object -First 1).Line.Trim()
 Write-Host "root : $Root"
 Write-Host "pkg  : $verLine  /  $outLine"
-if ($verLine -notmatch '1\.11\.0') { Fail "package.json version is not 1.11.0 (bump version AND build.directories.output before packing)" }
-if ($outLine -notmatch 'release1\.11\.0') { Fail "build.directories.output is not release1.11.0" }
+if ($verLine -notmatch '1\.12\.0') { Fail "package.json version is not 1.12.0 (bump version AND build.directories.output before packing)" }
+if ($outLine -notmatch 'release1\.12\.0') { Fail "build.directories.output is not release1.12.0" }
 
-Step 0 'pre-flight: incremental baseline (previous 1.1.0 build) must exist'
-if (-not (Test-Path "$oldDir\Win-Box.exe")) { Fail "baseline $oldDir\Win-Box.exe missing (needed for the 1.1.0 -> 1.11.0 incremental package)" }
+Step 0 'pre-flight: incremental baseline (previous 1.11.0 build) must exist'
+if (-not (Test-Path "$oldDir\Win-Box.exe")) { Fail "baseline $oldDir\Win-Box.exe missing (needed for the 1.11.0 -> 1.12.0 incremental package)" }
 Write-Host ("  baseline ok: {0} (ProductVersion {1})" -f $oldDir, (Get-Item "$oldDir\Win-Box.exe").VersionInfo.ProductVersion)
 
 Step 1 'quality gate: vitest run (must be all green)'
@@ -82,14 +82,13 @@ Step 5 'vite build (renderer)'
 node node_modules\vite\bin\vite.js build
 if ($LASTEXITCODE -ne 0) { Fail "vite build failed (exit $LASTEXITCODE)" }
 
-Step 6 'electron-builder (--win nsis portable --publish never)'
-node node_modules\electron-builder\out\cli\cli.js --win nsis portable --publish never
+Step 6 'electron-builder (--win nsis --publish never)'
+node node_modules\electron-builder\out\cli\cli.js --win nsis --publish never
 if (-not (Test-Path $setup)) { Fail "$setup was not produced (a bare exit 1 is only the missing GH_TOKEN publish notice, artifacts should still exist)" }
-Write-Host ("  produced setup   : {0} ({1} B)" -f $setup, (Get-Item $setup).Length)
-if (-not (Test-Path $portable)) { Fail "$portable (portable) was not produced -- GitHub Release needs it" }
-Write-Host ("  produced portable: {0} ({1} B)" -f $portable, (Get-Item $portable).Length)
+Write-Host ("  produced setup: {0} ({1} B)" -f $setup, (Get-Item $setup).Length)
+if (-not (Test-Path "$newDir\Win-Box.exe")) { Fail "unpacked build missing: $newDir\Win-Box.exe (needed for incremental)" }
 
-Step 7 'incremental update package (baseline = release1.1.0\win-unpacked)'
+Step 7 'incremental update package (baseline = release1.11.0\win-unpacked)'
 node scripts\make-incremental.mjs --old $oldDir --new $newDir --out $incrName
 if ($LASTEXITCODE -ne 0) { Fail "make-incremental failed (exit $LASTEXITCODE)" }
 
@@ -99,7 +98,7 @@ if (-not (Test-Path $desk)) {
   $desk = Join-Path $env:USERPROFILE 'Desktop'
   Write-Host "  C:\Users\WXJ2\Desktop not found, using $desk" -ForegroundColor Yellow
 }
-foreach ($f in @($setup, $portable, $incrExe, $incrZip)) {
+foreach ($f in @($setup, $incrExe, $incrZip)) {
   if (Test-Path $f) {
     Copy-Item $f $desk -Force
     Write-Host ("  copied: {0}" -f (Split-Path -Leaf $f))
@@ -116,19 +115,19 @@ $txt = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($a
 $hasWd = $txt.Contains('watchdog.cjs')
 Write-Host ("  asar contains watchdog.cjs (must be False, win7-only file): {0}" -f $hasWd) -ForegroundColor $(if ($hasWd) { 'Red' } else { 'Green' })
 if ($hasWd) { Fail 'win7-only dist/watchdog.cjs leaked into the main asar' }
-# this round's markers (2026-09-28 same-version repack): multi-source subtitles +
-# 115 web login + play diagnostics. ASCII only (the asar is read as ASCII bytes).
-# NOTE: use literals that survive minification (string literals / IPC names / URLs),
-#       not function names -- `formatCandidateLabel` got renamed by the renderer minifier once.
-$m1 = $txt.Contains('subtitle:providers')   # new IPC channel (preload + main)
-$m2 = $txt.Contains('subtitlecat')          # new token-free subtitle provider id (main)
-$m3 = $txt.Contains('SubtitleCat')          # renderer-side source label (survives minification)
-$m4 = $txt.Contains('[play-diag]')          # play/transfer diagnostics sink (main)
-$m5 = $txt.Contains('UID_')                 # 115 web-login auth cookie detection (main)
-$ok = $m1 -and $m2 -and $m3 -and $m4 -and $m5
-Write-Host ("  asar markers: subtitle-ipc={0} subtitlecat={1} SubtitleCat={2} play-diag={3} 115-login={4}" -f $m1, $m2, $m3, $m4, $m5) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
+# this round's markers (1.11.0 -> 1.12.0). ASCII only (the asar is read as ASCII bytes) and
+# minification-surviving literals only (CSS class names + CSS declarations, not function names).
+$m1 = $txt.Contains('srcpick-side')                 # sidebar picker (upward popup) -- classic fix
+$m2 = $txt.Contains('bottom:calc(100% + 6px)')      # the upward-open declaration itself
+$m3 = $txt.Contains('z-index:30')                   # .topbar stacking fix (popup above posters)
+$m4 = $txt.Contains('ap-toolbar')                   # Apple shell (Liquid Glass toolbar)
+$m5 = $txt.Contains('ap-dot')                       # Apple TV style hero page dots
+$m6 = $txt.Contains('ap-detail-backdrop')           # Apple item-page backdrop banner
+$ok = $m1 -and $m2 -and $m3 -and $m4 -and $m5 -and $m6
+Write-Host ("  asar markers: srcpick-side={0} upward-popup={1} topbar-z30={2} ap-toolbar={3} ap-dot={4} ap-detail={5}" -f $m1, $m2, $m3, $m4, $m5, $m6) -ForegroundColor $(if ($ok) { 'Green' } else { 'Red' })
 if (-not $ok) { Fail 'this round''s changes are NOT in the asar' }
-# java-side fixes live in the bridge jar, which ships under app.asar.unpacked -- compare with the repo build
+$verInAsar = $txt.Contains('"version": "1.12.0"') -or $txt.Contains('"version":"1.12.0"')
+Write-Host ("  asar package.json version 1.12.0: {0}" -f $verInAsar) -ForegroundColor $(if ($verInAsar) { 'Green' } else { 'Yellow' })
 $bridgeRepo = 'resources\jvm\native-bridge\native-bridge.jar'
 $bridgePack = Join-Path $newDir 'resources\app.asar.unpacked\resources\jvm\native-bridge\native-bridge.jar'
 if (Test-Path $bridgePack) {
@@ -140,13 +139,13 @@ if (Test-Path $bridgePack) {
 } else { Fail "packaged native-bridge.jar missing: $bridgePack" }
 if (Test-Path $appExe) {
   $pv = (Get-Item $appExe).VersionInfo.ProductVersion
-  Write-Host ("  Win-Box.exe ProductVersion (expect 1.11.0): {0}" -f $pv)
-  if ($pv -notmatch '^1\.11\.0') { Fail "Win-Box.exe ProductVersion is $pv, expected 1.11.0" }
+  Write-Host ("  Win-Box.exe ProductVersion (expect 1.12.0): {0}" -f $pv)
+  if ($pv -notmatch '^1\.12\.0') { Fail "Win-Box.exe ProductVersion is $pv, expected 1.12.0" }
 } else { Fail "missing $appExe" }
 
 Write-Host ""
 Write-Host "=== sizes / SHA256 (paste this block back into the chat) ===" -ForegroundColor Green
-foreach ($f in @($setup, $portable, $incrExe, $incrZip)) {
+foreach ($f in @($setup, $incrExe, $incrZip)) {
   if (Test-Path $f) {
     $len = (Get-Item $f).Length
     $h = (Get-FileHash $f -Algorithm SHA256).Hash
@@ -155,4 +154,4 @@ foreach ($f in @($setup, $portable, $incrExe, $incrZip)) {
 }
 Write-Host ""
 Write-Host "=== DONE ===" -ForegroundColor Green
-Write-Host "Desktop should hold 4 files. No push, no GitHub Release from this script."
+Write-Host "No push, no GitHub Release from this script."

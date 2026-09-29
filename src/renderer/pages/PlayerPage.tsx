@@ -8,6 +8,7 @@ import TitleBar from '../components/TitleBar';
 import { client } from '../api/client';
 import { uiMem, recordWatch, saveUiMemory, markHistoryOnlyWriter } from '../lib/uiMemory';
 import { formatEpisodeLabel } from '../lib/epName';
+import { makeStaleGuard, acceptInitSeq } from '../lib/staleGuard';
 
 /**
  * ★ 2026-09-26：本页只在**独立播放器窗口**运行（主窗口无 /player 路由）。
@@ -29,6 +30,11 @@ export interface PlayerInitData {
   meta?: { pic?: string; remarks?: string; sourceName?: string; vodId?: string; fromKey?: string; id?: string };
   /** ★ 历史续播：上次播放进度（秒），交给播放器自动 seek（详情页正常播放不传） */
   startTime?: number;
+  /**
+   * ★ 2026-09-28：主进程给每次 `player:init` 打的**单调序号**（见 PlayerWindow.pushInit）。
+   * 渲染层只接受序号更大的那次，丢弃旧解析晚到的 init（否则会把正在播放的新内容顶掉）。
+   */
+  initSeq?: number;
 }
 
 export default function PlayerPage() {
@@ -43,12 +49,17 @@ export default function PlayerPage() {
   /** ★ 2026-09-24：parse=1 且自动解析失败时的原因提示（上屏，替代原来的静默黑屏） */
   const [parseMsg, setParseMsg] = useState('');
   const loadingRef = useRef(false);
+  /** ★ 2026-09-28：解析代数 —— 换集/换源后旧的 client.play 晚到必须作废（不覆盖新集的地址） */
+  const resolveGen = useRef(makeStaleGuard());
+  /** 已应用过的 init 序号（只接受更新的那次） */
+  const initSeqRef = useRef(0);
 
   // 解析并播放指定集
   const resolve = useCallback(async (d: PlayerInitData, idx: number) => {
     const eps = d.episodes;
     if (!eps || idx < 0 || idx >= eps.length) return;
     const target = eps[idx];
+    const gen = resolveGen.current.next(); // ★ 开一代：晚到的旧结果直接丢弃
     // ★ 剧名副名优先用 subtitleTitle（详情页主标题）；回退 title；再回退 resourceName 首段
     //   ★ 2026-09-24：集名统一归一（网盘源文件名 → 「第N集 · 体积」），标题/历史都好看
     const mainTitle = (d.subtitleTitle || d.title || '').trim();
@@ -58,6 +69,7 @@ export default function PlayerPage() {
     setCurName(display);
     try {
       const r = await client.play({ key: d.key, flag: d.flag, id: target.url });
+      if (!resolveGen.current.isCurrent(gen)) return; // 过期结果：不 setActiveUrl、不记历史
       setDriveBind(r.needDriveCookieBind || null);
       if (r.parse === 1) {
         // 主进程已尽力做「解析接口 → 隐藏窗口嗅探」，仍拿不到直连地址：
@@ -69,6 +81,7 @@ export default function PlayerPage() {
       setParseMsg('');
       setActiveUrl(r.url || target.url);
     } catch {
+      if (!resolveGen.current.isCurrent(gen)) return; // 过期失败：不要用旧集的原始地址顶掉新集
       setActiveUrl(target.url);
     }
     // 记录观看历史（url 去重 + 刮削元数据）
@@ -113,6 +126,10 @@ export default function PlayerPage() {
 
   useEffect(() => {
     const offInit = client.playerOnInit((d) => {
+      const incoming = d as PlayerInitData | undefined;
+      // ★ 2026-09-28：只接受序号更大的 init —— 旧解析晚到的那份不能顶掉正在播放的新内容
+      if (!acceptInitSeq(initSeqRef.current, incoming?.initSeq)) return;
+      initSeqRef.current = Math.max(initSeqRef.current, Number(incoming?.initSeq) || 0);
       loadingRef.current = false;
       applyInit(d as PlayerInitData);
     });
@@ -230,6 +247,11 @@ export default function PlayerPage() {
               resourceName={curName}
               danmakuTitle={((init?.subtitleTitle || init?.title) || '').trim()}
               driveBindProvider={driveBind}
+              // ★ 2026-09-29：在播放器里绑定网盘成功后自动重新解析当前集（不必手动重开播放窗口）
+              onDriveBound={() => {
+                setDriveBind(null);
+                if (init) void resolve(init, epIndex);
+              }}
               // ★ 历史续播：进度以历史记录为准（新直链与 playTime 旧键不匹配，须显式传入）
               startTime={init?.startTime || 0}
               canPrev={canPrev}

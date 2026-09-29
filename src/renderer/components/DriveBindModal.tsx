@@ -28,14 +28,22 @@ const PROVIDERS: ReadonlyArray<{ key: string; label: string }> = [
 interface Props {
   /** 当前源名（文案用） */
   siteName: string;
+  /**
+   * ★ 2026-09-29：**预选网盘**（解析到某网盘专用链接、但未绑定时自动弹窗时传入）——
+   *   直接把用户要绑的那家选中，省掉"自己找是哪一家"。
+   */
+  initialProvider?: string;
+  /** 自动弹窗场景的一句上下文（如「该资源来自」），显示在标题下方 */
+  reason?: string;
   onClose: () => void;
   /** 保存成功后通知外层（刷新源主页，让新 cookie 立刻生效） */
   onSaved: () => void;
 }
 
-export default function DriveBindModal({ siteName, onClose, onSaved }: Props) {
+export default function DriveBindModal({ siteName, initialProvider, reason, onClose, onSaved }: Props) {
   const [tokens, setTokens] = useState<Record<string, string>>({});
-  const [provider, setProvider] = useState('quark');
+  const initProv = (initialProvider || '').trim().toLowerCase();
+  const [provider, setProvider] = useState(PROVIDERS.some((p) => p.key === initProv) ? initProv : 'quark');
   const [cookie, setCookie] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
@@ -100,7 +108,10 @@ export default function DriveBindModal({ siteName, onClose, onSaved }: Props) {
         </div>
 
         <div className="muted" style={{ fontSize: 12, lineHeight: 1.7, marginBottom: 10 }}>
-          该源需要网盘 Cookie 才能取流。
+          {initProv
+            ? `检测到该资源来自「${driveProviderLabel(initProv)}」网盘的专用链接，未绑定对应 Cookie 时无法取流。绑定后回到播放页会自动重新解析。`
+            : '该源需要网盘 Cookie 才能取流。'}
+          {reason ? <div style={{ marginTop: 4 }}>{reason}</div> : null}
         </div>
 
         <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>

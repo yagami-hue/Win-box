@@ -12,6 +12,8 @@ import * as iconv from 'iconv-lite';
 import type { SubtitleCandidate, SubtitleFetchResult } from '../../shared/subtitle';
 import { detectArchiveKind, extractArchiveEntries } from './archive';
 import { extOf, epOf, pickSubtitleEntry } from './pickEntry';
+import { providerEnabled, type SubtitleProvider } from './provider';
+import { normalizeSubtitleQuery, normalizeTitle } from '../../engine/subtitle/normalizeQuery';
 
 const agent = new Agent({ connect: { timeout: 20000 } });
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) TVBoxWin/0.1';
@@ -345,3 +347,55 @@ export function textScore(s: string): number {
   }
   return s.length ? score / s.length : -Infinity;
 }
+
+// ---- ★ 2026-09-28：Provider 适配层（多源框架见 provider.ts / index.ts）----
+
+/**
+ * assrt 的字幕源实现（**保留原有行为**）：主关键词先探一批 → 从结果标题反推同剧别名 →
+ * 别名 + 集号一并检索 → 按 "title 是否精确命中主标题" 排序。
+ * 错误按「token 失效 / 词过短 / 其它」翻译成用户可执行的话术后抛出（由聚合层落到报告里）。
+ */
+export const assrtProvider: SubtitleProvider = {
+  id: 'assrt',
+  name: 'assrt（伪射手，需 token）',
+  needsToken: true,
+  available(settings) {
+    if (!providerEnabled(settings, 'assrt')) return { ok: false, reason: '已在字幕设置中关闭' };
+    const token = (settings.assrtToken || '').trim();
+    return token ? { ok: true } : { ok: false, reason: '未配置 assrt token（到「配置 → 外挂字幕」填写）' };
+  },
+  async search(ctx) {
+    const token = (ctx.settings.assrtToken || '').trim();
+    if (!token) throw new Error('尚未配置 assrt token，请先在「配置 → 外挂字幕」中填写');
+    const { title, ep } = normalizeSubtitleQuery(ctx.title || '');
+    const mainKw = ctx.keywords[0] || '';
+    if (!mainKw) throw new Error('无法从该资源名提取剧名');
+    try {
+      // 先主关键词拿一批结果，用于反推同剧别名（结果的 title 字段即 assrt 登记的剧名）
+      const first = await assrtSearch(token, mainKw);
+      const aliases = new Set<string>();
+      (first || []).forEach((c) => {
+        const t = c.title || '';
+        if (t && t.toLowerCase() !== (title || '').toLowerCase()) {
+          const alias = normalizeTitle(t);
+          if (alias && alias.length >= 2 && !/^[-\d\s]+$/.test(alias)) aliases.add(alias);
+        }
+      });
+      const kws = [...ctx.keywords];
+      for (const a of Array.from(aliases).slice(0, 4)) kws.push(a + (ep ? ' ' + ep : ''));
+      const list = await assrtSearchMulti(token, kws, { originalTitle: ctx.title, concurrency: 3 });
+      return (list || []).map((c) => ({ ...c, provider: 'assrt' }));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // 服务端常见拒绝透出可执行指引（token 失效 / 词过短），不再显示笼统的"失败"
+      if (/token/i.test(msg)) throw new Error('assrt token 无效或已过期，请到「配置 → 外挂字幕」重新填写后重试');
+      if (/词|长度|keyword|101/i.test(msg)) throw new Error('assrt 要求搜索词至少 3 个字符，当前剧名过短，可手动补充剧集/全名再搜');
+      throw new Error('assrt 检索失败：' + msg);
+    }
+  },
+  async fetch(candidate, ctx) {
+    const token = (ctx.settings.assrtToken || '').trim();
+    if (!token) return { text: '', fileName: '', reason: '尚未配置 assrt token' };
+    return assrtFetch(token, candidate);
+  },
+};

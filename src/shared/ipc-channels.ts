@@ -10,6 +10,8 @@ export const IPC = {
   SUBTITLE_SET: 'subtitle:set',
   SUBTITLE_SEARCH: 'subtitle:search',
   SUBTITLE_FETCH: 'subtitle:fetch',
+  /** ★ 2026-09-28：各字幕源的开关/可用状态（配置页渲染） */
+  SUBTITLE_PROVIDERS: 'subtitle:providers',
   // 弹幕（外部接口）
   DANMAKU_GET: 'danmaku:get',
   DANMAKU_SET: 'danmaku:set',

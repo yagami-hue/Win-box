@@ -20,7 +20,13 @@ import type {
   FilterGroup,
   BossKeySettings,
 } from '../../shared/types';
-import type { SubtitleCandidate, SubtitleFetchResult, SubtitleSettings } from '../../shared/subtitle';
+import type {
+  SubtitleCandidate,
+  SubtitleFetchResult,
+  SubtitleProviderView,
+  SubtitleSearchReport,
+  SubtitleSettings,
+} from '../../shared/subtitle';
 import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings } from '../../shared/danmaku';
 import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../../shared/types';
 import type { MetaSettings, MetaSettingsView, MetaSuggestion } from '../../shared/meta';
@@ -93,7 +99,10 @@ declare global {
       subtitle: {
         get: () => Promise<IpcResult<SubtitleSettings>>;
         set: (patch: Partial<SubtitleSettings>) => Promise<IpcResult<SubtitleSettings>>;
-        search: (name: string) => Promise<IpcResult<SubtitleCandidate[]>>;
+        /** ★ 2026-09-28：各字幕源的开关/可用状态 */
+        providers: () => Promise<IpcResult<SubtitleProviderView[]>>;
+        /** ★ 2026-09-28：多源聚合检索（返回 { candidates, providers }） */
+        search: (name: string) => Promise<IpcResult<SubtitleSearchReport>>;
         fetch: (cand: SubtitleCandidate) => Promise<IpcResult<SubtitleFetchResult>>;
       };
       danmaku: {
@@ -246,7 +255,12 @@ export const client = {
   liveMeta: () => unwrap(window.api.live.meta()),
   subtitleGet: () => unwrap(window.api.subtitle.get()),
   subtitleSet: (patch: Partial<SubtitleSettings>) => unwrap(window.api.subtitle.set(patch)),
-  subtitleSearch: (name: string) => unwrap(window.api.subtitle.search(name)),
+  /** ★ 2026-09-28：各字幕源的开关/可用状态（配置页渲染） */
+  subtitleProviders: () =>
+    unwrap(window.api.subtitle.providers()) as Promise<SubtitleProviderView[]>,
+  /** ★ 2026-09-28：多源聚合检索 → { candidates, providers }（providers 说明逐源状态，用于空结果提示） */
+  subtitleSearch: (name: string) =>
+    unwrap(window.api.subtitle.search(name)) as Promise<SubtitleSearchReport>,
   /** ★ 2026-09-24：返回 { text, fileName, format, entries, reason } —— 用真实字幕文件名判定格式 */
   subtitleFetch: (cand: SubtitleCandidate) =>
     unwrap(window.api.subtitle.fetch(cand)) as Promise<SubtitleFetchResult>,

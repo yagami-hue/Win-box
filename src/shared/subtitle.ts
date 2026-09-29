@@ -2,11 +2,11 @@
 // 外挂字幕相关共享类型：主进程 Provider 与渲染层字幕面板共用。
 
 export interface SubtitleCandidate {
-  /** assrt 搜索命中项的唯一标识（download 需要它） */
+  /** 命中项的唯一标识（下载需要它；assrt 为字幕 ID，网页源为详情页/直链地址） */
   file: string;
   /** 字幕文件名（如 繁花.S01E01.ass） */
   subname: string;
-  /** 来源标题/剧名（assrt 的每个命中自带 title） */
+  /** 来源标题/剧名（每个命中自带的标题） */
   title?: string;
   /** 语种（简中/繁中/中英双语/英文…） */
   lang?: string;
@@ -16,8 +16,14 @@ export interface SubtitleCandidate {
   detail?: string;
   /** 可直接下载的文本地址（如已内联提供） */
   directUrl?: string;
-  /** 命中的检索关键词（assrtSearchMulti 合并时标注，UI 可显示） */
+  /** 命中的检索关键词（合并时标注，UI 可显示） */
   hitKeyword?: string;
+  /**
+   * ★ 2026-09-28：命中的**字幕源 id**（`assrt` / `subtitlecat` …）。
+   * 渲染层把候选原样回传给 `subtitleFetch`，主进程据此路由到对应 Provider，
+   * 因此它是「多源」能正确分发下载的唯一凭据（缺省按 assrt 处理，兼容旧候选）。
+   */
+  provider?: string;
 }
 
 /**
@@ -41,6 +47,11 @@ export interface SubtitleFetchResult {
 export interface SubtitleSettings {
   /** assrt token（用户自填） */
   assrtToken?: string;
+  /**
+   * ★ 2026-09-28：各字幕源的开关（provider id → 是否启用）。
+   * 缺省视为启用；`assrt` 即使启用、没 token 也会被跳过（见各 Provider 的 available()）。
+   */
+  providers?: Record<string, boolean>;
   /** 字幕是否开启 */
   enabled: boolean;
   /** 当前选中字幕（切换集时若 key 相同则沿用） */
@@ -51,8 +62,39 @@ export interface SubtitleSettings {
   bottom: number;
 }
 
+/** ★ 2026-09-28：多源检索报告（命中 + 每个源的状态，供 UI 说明"为什么没字幕"） */
+export interface SubtitleSearchReport {
+  candidates: SubtitleCandidate[];
+  providers: Array<{
+    id: string;
+    name: string;
+    /** 该源是否拿到了结果 */
+    ok: boolean;
+    count: number;
+    /** 失败/跳过的可读原因（ok 时为空） */
+    reason?: string;
+    /** 是否被跳过（未启用 / 缺 token），与"跑了但失败"区分开 */
+    skipped?: boolean;
+  }>;
+}
+
+/** ★ 2026-09-28：单个字幕源的开关/可用状态（配置页渲染 + 空结果原因说明） */
+export interface SubtitleProviderView {
+  id: string;
+  name: string;
+  /** 需要用户提供 token */
+  needsToken: boolean;
+  /** 用户是否开启（设置里的开关） */
+  enabled: boolean;
+  /** 当前是否可用（开了且 token 等前置条件满足） */
+  available: boolean;
+  /** 不可用原因（available=false 时给出） */
+  reason?: string;
+}
+
 export const DEFAULT_SUBTITLE_SETTINGS: SubtitleSettings = {
   enabled: false,
   fontSize: 20,
   bottom: 40,
+  providers: { assrt: true, subtitlecat: true },
 };

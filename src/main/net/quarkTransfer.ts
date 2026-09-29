@@ -13,6 +13,7 @@
 //   · 删除 = 异步任务（响应 data.task_id）；提交成功判定 = code==0 且 task_id 非空。
 //   · quarkTransfer 全局串行（互斥锁），防并发转存相互污染。
 import type { Logger } from '../../shared/types';
+import { diagTimer, logPlayDiag, redactUrl, shortHash } from '../util/playDiag';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch';
 const REF = 'https://pan.quark.cn/';
@@ -81,7 +82,27 @@ export function quarkTransfer(
   cookie: string,
   opts: { innerFid?: string; stoken?: string; logger?: Logger } = {},
 ): Promise<QuarkTransferResult> {
-  const run = transferChain.then(() => quarkTransferInner(pwdId, cookie, opts));
+  // ★ 2026-09-28：整条转存的**结果与耗时**落一份结构化诊断（失败时带 reason），
+  //   用于统计「落盘成功率约 50%」到底卡在哪一段（见 util/playDiag.ts）。
+  const t = diagTimer();
+  const enqueuedAt = Date.now();
+  let queueMs = 0;
+  const run = transferChain.then(async () => {
+    queueMs = Date.now() - enqueuedAt; // 被串行锁挡住的排队时长
+    const r = await quarkTransferInner(pwdId, cookie, opts);
+    logPlayDiag({
+      kind: 'transfer',
+      stage: 'done',
+      ok: !!r.ok,
+      ms: t.ms(),
+      queuedMs: queueMs,
+      share: shortHash(pwdId),
+      fid: shortHash(opts.innerFid || ''),
+      reason: r.ok ? undefined : r.reason,
+      url: r.ok ? redactUrl(r.url) : undefined,
+    });
+    return r;
+  });
   // 无论成败都让后续转存可以继续；错误只归本次调用方
   transferChain = run.catch(() => undefined);
   return run;

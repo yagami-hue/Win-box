@@ -11,8 +11,10 @@ import HScrollRow from '../components/HScrollRow';
 import HeroBackdrop from '../components/HeroBackdrop';
 import type { DiscoverItem, DiscoverSection, DiscoverGenre } from '../../shared/types';
 
-/** 影片卡（推荐区与分类区共用）：点击 → 全源搜索该片名；onHover 用于让 Hero 跟随鼠标（Netflix 皮肤） */
-function ItemCard({ it, onOpen, onHover }: { it: DiscoverItem; onOpen: () => void; onHover?: () => void }) {
+/** 影片卡（推荐区与分类区共用）：点击 → 全源搜索该片名；onHover 用于让 Hero 跟随鼠标（Netflix / Apple 皮肤）
+   *  playBadge ★ 2026-09-29：仅 Apple 皮肤渲染的「悬停播放徽标」—— 只在 Apple 下渲染元素，
+   *  其余皮肤零痕迹（不依赖别处补 `display:none`）。 */
+function ItemCard({ it, onOpen, onHover, playBadge }: { it: DiscoverItem; onOpen: () => void; onHover?: () => void; playBadge?: boolean }) {
   return (
     <div
       className="card-media"
@@ -24,6 +26,11 @@ function ItemCard({ it, onOpen, onHover }: { it: DiscoverItem; onOpen: () => voi
       <div className="card">
         <div style={{ position: 'relative' }}>
           {it.poster ? <img src={it.poster} loading="lazy" decoding="async" /> : <div className="no-cover">暂无封面</div>}
+          {playBadge && (
+            <span className="ap-card-play" aria-hidden="true">
+              <svg width="13" height="13" viewBox="0 0 16 16"><path d="M4.9 2.9v10.2l8-5.1-8-5.1Z" fill="currentColor" /></svg>
+            </span>
+          )}
         </div>
         <div className="meta">
           <div className="name" title={it.title}>{it.title}</div>
@@ -36,8 +43,12 @@ function ItemCard({ it, onOpen, onHover }: { it: DiscoverItem; onOpen: () => voi
 
 export default function DiscoverPage() {
   const nav = useNavigate();
-  /** ★ 2026-09-24：Netflix 皮肤下用「Hero 大图 + 横向内容行」的影院式布局 */
+  /** ★ 2026-09-24：Netflix 皮肤下用「Hero 大图 + 横向内容行」的影院式布局
+   *  ★ 2026-09-29：Apple 皮肤同样启用 Hero（Apple TV app 的「精选轮播 + 内容栏」），
+   *    但版式与配色走 apple.css（圆角剧照卡 + 页码圆点 + 内容栏），与 Netflix 满屏影院风区分。 */
   const nf = useTheme() === 'netflix';
+  const ap = useTheme() === 'apple';
+  const heroSkin = nf || ap;
   const [sections, setSections] = useState<DiscoverSection[] | null>(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);
@@ -126,7 +137,7 @@ export default function DiscoverPage() {
   const firstRow = sections && sections.length > 0 ? sections[0].items : [];
   const hero = heroItem || firstRow[0] || null;
   useEffect(() => {
-    if (!nf || firstRow.length === 0) return;
+    if (!heroSkin || firstRow.length === 0) return;
     let i = 0;
     const timer = setInterval(() => {
       if (hoveringRef.current) return; // 鼠标停在卡片上时不抢画面
@@ -135,14 +146,14 @@ export default function DiscoverPage() {
     }, 8000);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nf, sections]);
+  }, [heroSkin, sections]);
 
   // ---- Hero 背景剧照：随主推片切换而重取（主进程 24h 缓存）----
   // ★ 2026-09-25：**背景只允许横版图**（用户报「竖版图被裁剪」）——优先 `images.backdrops`，
   //   取不到才用榜单自带的 `backdrop_path`（同样是横版剧照）；**绝不再退回竖版封面**（poster）。
   const [heroBgs, setHeroBgs] = useState<string[]>([]);
   useEffect(() => {
-    if (!nf || !hero) {
+    if (!heroSkin || !hero) {
       setHeroBgs([]);
       return;
     }
@@ -161,7 +172,7 @@ export default function DiscoverPage() {
       })
       .catch(() => { if (alive) setHeroBgs(fallback); });
     return () => { alive = false; };
-  }, [nf, hero?.tmdbId, hero?.mediaType, hero?.backdrop, hero?.poster]);
+  }, [heroSkin, hero?.tmdbId, hero?.mediaType, hero?.backdrop, hero?.poster]);
 
   return (
     <>
@@ -171,24 +182,38 @@ export default function DiscoverPage() {
       >
         {/* ★ 2026-09-24（用户定稿）：原来那排「发现 ……… 【刷新】」整排删除（标题与刷新按钮都属冗余）；
             ★ 2026-09-26（用户指令）：无源时的「还没有导入任何源 —— 去导入源」提示条也整条删除。 */}
-        {/* ---- Netflix Hero：**满屏**横版剧照轮播（保持比例完整显示 + 比例外模糊填充）---- */}
-        {nf && hero && !gSel && (
-          <div className="nf-hero">
-            <HeroBackdrop urls={heroBgs} fit="contain" />
-            <div className="nf-hero-body" key={`${hero.title}-${hero.year || ''}`}>
-              <div className="nf-hero-kicker">WIN-BOX 精选</div>
-              <h1 className="nf-hero-title">{hero.title}</h1>
-              <div className="nf-hero-meta">
-                <span className="nf-hero-match">98% 匹配</span>
+        {/* ---- Hero：Netflix = 满屏横版剧照轮播（保持比例 + 比例外模糊填充）；
+               Apple = Apple TV app 的「精选轮播」（圆角剧照卡 + 标题/按钮 + 页码圆点）---- */}
+        {heroSkin && hero && !gSel && (
+          <div className={nf ? 'nf-hero' : 'ap-hero'}>
+            <HeroBackdrop urls={heroBgs} fit={nf ? 'contain' : 'cover'} />
+            <div className={nf ? 'nf-hero-body' : 'ap-hero-body'} key={`${hero.title}-${hero.year || ''}`}>
+              <div className={nf ? 'nf-hero-kicker' : 'ap-hero-kicker'}>{nf ? 'WIN-BOX 精选' : '精选推荐'}</div>
+              <h1 className={nf ? 'nf-hero-title' : 'ap-hero-title'}>{hero.title}</h1>
+              <div className={nf ? 'nf-hero-meta' : 'ap-hero-meta'}>
+                <span className={nf ? 'nf-hero-match' : 'ap-hero-match'}>98% 匹配</span>
                 {hero.year ? <span>{hero.year}</span> : null}
                 <span>{hero.mediaType === 'tv' ? '剧集' : '电影'}</span>
                 <span>{sections && sections[0] ? sections[0].title : ''}</span>
               </div>
-              <div className="nf-hero-actions">
-                <button className="nf-play-btn" onClick={() => goSearch(hero.title)}>▶ 播放</button>
-                <button onClick={() => goSearch(hero.title)}>更多信息</button>
+              <div className={nf ? 'nf-hero-actions' : 'ap-hero-actions'}>
+                <button className={nf ? 'nf-play-btn' : 'ap-play-btn'} onClick={() => goSearch(hero.title)}>▶ 播放</button>
+                <button className={nf ? undefined : 'ap-btn-2'} onClick={() => goSearch(hero.title)}>更多信息</button>
               </div>
             </div>
+            {/* Apple TV 式页码圆点（可点选切换主推片；自动轮播仍每 8s 前进） */}
+            {ap && firstRow.length > 1 && (
+              <div className="ap-hero-dots">
+                {firstRow.slice(0, 8).map((it, i) => (
+                  <span
+                    key={`${it.title}-${i}`}
+                    className={'ap-dot' + (hero?.title === it.title ? ' active' : '')}
+                    title={it.title}
+                    onClick={() => setHeroItem(it)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
         {/* ---- 分类条（父分类：电影/剧集；子分类：类型标签 —— 父分类未点击前不展示子分类）---- */}
@@ -252,20 +277,23 @@ export default function DiscoverPage() {
           </div>
         ) : (
           (sections || []).map((s) => (
-            <div key={s.id} className={nf ? 'nf-row' : undefined} style={nf ? undefined : { marginBottom: 22 }}>
-              <h3 className={nf ? 'nf-row-title' : undefined} style={nf ? undefined : { margin: '0 0 10px' }}>{s.title}</h3>
+            <div key={s.id} className={nf ? 'nf-row' : ap ? 'ap-row' : undefined} style={nf || ap ? undefined : { marginBottom: 22 }}>
+              <h3 className={nf ? 'nf-row-title' : ap ? 'ap-row-title' : undefined} style={nf || ap ? undefined : { margin: '0 0 10px' }}>{s.title}</h3>
               {/* 横向滚动条：滚轮在行内 → 横向滚动（见 HScrollRow）；行外空白 → 页面上下滚动 */}
               <HScrollRow
-                className={nf ? 'nf-row-scroll' : undefined}
-                style={nf ? undefined : { display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 6 }}
+                className={nf ? 'nf-row-scroll' : ap ? 'ap-row-scroll' : undefined}
+                style={nf || ap ? undefined : { display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 6 }}
               >
                 {s.items.map((it, i) => (
-                  <div key={`${it.title}-${i}`} style={nf ? undefined : { flex: '0 0 132px' }}>
+                  // ★ 2026-09-29：minWidth:0 —— 超长片名（.name 为 nowrap）会经 flex 项 min-width:auto
+                  //   把固定宽度的项撑宽，封面随 2:3 一起变高，整行被拉高留白（Netflix 同因同修，见 netflix.css）。
+                  <div key={`${it.title}-${i}`} style={nf ? undefined : { flex: ap ? '0 0 168px' : '0 0 132px', minWidth: 0 }}>
                     <ItemCard
                       it={it}
+                      playBadge={ap}
                       onOpen={() => goSearch(it.title)}
-                      // Netflix 皮肤：鼠标移到卡片 → Hero 立刻换成这一部（离开后恢复自动轮播）
-                      onHover={nf ? () => { hoveringRef.current = true; setHeroItem(it); } : undefined}
+                      // Netflix / Apple 皮肤：鼠标移到卡片 → Hero 立刻换成这一部（离开后恢复自动轮播）
+                      onHover={heroSkin ? () => { hoveringRef.current = true; setHeroItem(it); } : undefined}
                     />
                   </div>
                 ))}

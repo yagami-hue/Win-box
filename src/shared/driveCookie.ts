@@ -25,6 +25,14 @@ const REQUIRED: Record<string, string[]> = {
 };
 
 /**
+ * ★ 2026-09-28：**前缀型必需**（任一前缀命中即通过）—— 115 的登录态 cookie 名带随机后缀
+ * （`UID_<hash>_<n>` / `SEID_<hash>_<n>`），无法用精确键名表达；缺了它 115 直链必然 401。
+ */
+const REQUIRED_PREFIX_ANY: Record<string, string[]> = {
+  '115': ['UID_', 'SEID_'],
+};
+
+/**
  * cookie 串里是否含指定键（按 `;` 分段、精确比对键名 —— 避免 `__pus` 匹配到 `__puus` 这类子串误判）。
  */
 export function cookieHasKey(cookie: string, key: string): boolean {
@@ -36,10 +44,24 @@ export function cookieHasKey(cookie: string, key: string): boolean {
   });
 }
 
+/**
+ * cookie 串里是否存在**以指定前缀开头**的键（大小写不敏感；115 的键名带随机后缀，只能前缀匹配）。
+ */
+export function cookieHasPrefix(cookie: string, prefix: string): boolean {
+  if (!cookie) return false;
+  const p = prefix.trim().toLowerCase();
+  if (!p) return false;
+  return cookie.split(';').some((seg) => {
+    const eq = seg.indexOf('=');
+    return eq > 0 && seg.slice(0, eq).trim().toLowerCase().startsWith(p);
+  });
+}
+
 /** 网盘 provider 的中文名（仅本模块提示文案用；与 driveProvider 的标签表口径一致） */
 function providerLabel(p: string): string {
   if (p === 'uc') return 'UC 网盘';
   if (p === 'quark') return '夸克网盘';
+  if (p === '115') return '115 网盘';
   return p;
 }
 
@@ -50,7 +72,20 @@ function providerLabel(p: string): string {
 export function checkDriveCookie(provider: string, cookie: string): CookieCheck {
   const p = (provider || '').trim().toLowerCase();
   const need = REQUIRED[p];
-  if (!need) return { ok: true, missing: [], message: '' };
+  if (!need) {
+    // ★ 2026-09-28：前缀型（115）—— 登录态键名带随机后缀，只能“任一前缀命中即通过”
+    const prefixes = REQUIRED_PREFIX_ANY[p];
+    if (!prefixes) return { ok: true, missing: [], message: '' };
+    if (prefixes.some((x) => cookieHasPrefix(cookie, x))) return { ok: true, missing: [], message: '' };
+    return {
+      ok: false,
+      missing: [...prefixes],
+      message:
+        `${providerLabel(p)}需要登录后的 ${prefixes.join(' 或 ')} 开头的 Cookie，当前未检测到。` +
+        `请在浏览器打开 115.com 登录 → F12 → Network → 复制任意请求的完整 Cookie；` +
+        `或在源内「网盘绑定」里点「网页登录」自动抓取。`,
+    };
+  }
   const missing = need.filter((k) => !cookieHasKey(cookie, k));
   if (!missing.length) return { ok: true, missing: [], message: '' };
   const extra = p === 'uc' ? '（UC 非会员取流必需）' : '';

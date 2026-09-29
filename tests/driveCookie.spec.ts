@@ -52,11 +52,27 @@ describe('checkDriveCookie', () => {
     expect(checkDriveCookie('quark', '__pus=1').missing).toEqual(['__puus']);
   });
 
-  it('未收录 provider（baidu/115/ali…）不校验', () => {
-    for (const p of ['baidu', '115', 'ali', '']) {
+  it('未收录 provider（baidu/ali…）不校验', () => {
+    for (const p of ['baidu', 'ali', '']) {
       const r = checkDriveCookie(p, 'whatever');
       expect(r.ok).toBe(true);
       expect(r.message).toBe('');
     }
+  });
+
+  // ★ 2026-09-28：115 的登录态键名带随机后缀（UID_<hash>_<n>），只能前缀匹配、任一命中即通过。
+  it('115：UID_/SEID_ 任一前缀命中 → 通过', () => {
+    expect(checkDriveCookie('115', 'UID_1a2b_1=abc; CID_2c3d_1=def').ok).toBe(true);
+    expect(checkDriveCookie('115', 'SEID_9f8e_3=xyz').ok).toBe(true);
+    expect(checkDriveCookie('115', ' uid_abc_1 = 1 ').ok).toBe(true); // 大小写/空格容忍
+  });
+
+  it('115：都没有 → 报缺并给出获取办法（含「网页登录」）', () => {
+    const r = checkDriveCookie('115', 'foo=1');
+    expect(r.ok).toBe(false);
+    expect(r.missing).toEqual(['UID_', 'SEID_']);
+    expect(r.message).toContain('115 网盘');
+    expect(r.message).toContain('F12');
+    expect(r.message).toContain('网页登录');
   });
 });

@@ -1,6 +1,6 @@
 // tests/driveProvider.spec.ts — 网盘播放 URL → provider 关联（cookie 型网盘）
 import { describe, it, expect } from 'vitest';
-import { matchDriveCookieProvider, wrapPlayUrl, driveUrlHost, wrapImageUrlForRelay } from '../src/shared/driveProvider';
+import { matchDriveCookieProvider, wrapPlayUrl, driveUrlHost, wrapImageUrlForRelay, driveBindProviderFromText, looksLikeDriveBindFailure } from '../src/shared/driveProvider';
 
 // ★ 2026-09-23：源封面防盗链/DNS 污染兜底 —— 源图经本地 /img 中继（DoH + Referer 重试链）
 describe('wrapImageUrlForRelay', () => {
@@ -68,5 +68,27 @@ describe('wrapPlayUrl', () => {
     expect(w).toContain('url=');
     expect(w).toContain('ck=quark');
     expect(w).toContain(encodeURIComponent('https://pan.quark.cn/s/1'));
+  });
+});
+// ★ 2026-09-28：诊断实测发现的一类「能播不出来」——蜘蛛把「未登录网盘」当成空地址 + 一句提示返回
+//   实测原话（至臻源 · 百度线路）：`还未登录百度账号,请前往【配置中心】登录`
+describe('driveBindProviderFromText / looksLikeDriveBindFailure — 登录提示 → 归属网盘', () => {
+  it('识别各网盘的「请登录/授权」提示', () => {
+    expect(driveBindProviderFromText('还未登录百度账号,请前往【配置中心】登录')).toBe('baidu');
+    expect(driveBindProviderFromText('请先登录夸克网盘后重试')).toBe('quark');
+    expect(driveBindProviderFromText('UC 未授权，请扫码登录')).toBe('uc');
+    expect(driveBindProviderFromText('115账号未登录')).toBe('115');
+    expect(driveBindProviderFromText('阿里云盘 token 失效，请重新授权')).toBe('ali');
+  });
+
+  it('非登录语境 / 非网盘 → null（不误报）', () => {
+    expect(driveBindProviderFromText('')).toBeNull();
+    expect(driveBindProviderFromText('资源不存在')).toBeNull();
+    expect(driveBindProviderFromText('登录页面加载失败')).toBeNull(); // 有“登录”但没网盘名
+  });
+
+  it('looksLikeDriveBindFailure 现在也认中文网盘名的登录提示（旧正则只看 网盘/drive/quark/ali/115/pan）', () => {
+    expect(looksLikeDriveBindFailure('还未登录百度账号,请前往【配置中心】登录')).toBe(true);
+    expect(looksLikeDriveBindFailure('普通站点 404')).toBe(false);
   });
 });

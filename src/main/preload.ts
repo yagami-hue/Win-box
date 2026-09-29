@@ -80,6 +80,9 @@ const api = {
   subtitle: {
     get: () => invoke(IPC.SUBTITLE_GET),
     set: (patch: unknown) => invoke(IPC.SUBTITLE_SET, patch),
+    /** ★ 2026-09-28：各字幕源的开关与可用状态（配置页渲染 + 空结果原因说明） */
+    providers: () => invoke(IPC.SUBTITLE_PROVIDERS),
+    // ★ 2026-09-28：返回 { candidates, providers }（多源聚合；providers 说明每个源的状态/原因）
     search: (name: string) => invoke(IPC.SUBTITLE_SEARCH, name),
     // ★ 2026-09-24：返回 { text, fileName, format, entries, reason }（压缩包已在主进程解出并挑好条目）
     fetch: (cand: unknown) => invoke<SubtitleFetchResult>(IPC.SUBTITLE_FETCH, cand),
