@@ -33,8 +33,7 @@ pnpm run dev              # 开发（vite + esbuild watch + electron）
 pnpm run build            # 构建（主进程 + 渲染层）
 ```
 
-运行时依赖（**不入库**，按需自行准备）：JDK / JRE、`stubs.jar` 桥、嵌入式 CPython、shell-shim、unidbg 运行时等；
-构建与维护细节见 [docs/开发历程与关键技术决策.md](docs/开发历程与关键技术决策.md) §7。
+运行时依赖（**不入库**，按需自行准备）：JDK / JRE、`stubs.jar` 桥、嵌入式 CPython、shell-shim、unidbg 运行时等。
 
 ## 目录结构
 
@@ -44,16 +43,8 @@ tvbox-win/
 ├── tests/          # 引擎单测（Vitest）
 ├── scripts/        # 构建与打包脚本
 ├── resources/      # js-lib + jvm 宿主源码（*.java，含 native-bridge 原生桥）
-└── docs/           # 源健康判定 / ext 配置 / 空结果诊断 等内部文档
 ```
 
-## 文档
-
-| 文档 | 内容 |
-|---|---|
-| [docs/README.md](docs/README.md) | 文档总索引（本仓仅含产品内部文档） |
-| `docs/source-health.md` · `docs/config-file.md` | 源健康判定 · ext / 配置约定 |
-| `docs/diagnose-empty.md` | 空结果诊断手册 |
 
 ## 赞助支持（完全自愿）
 
