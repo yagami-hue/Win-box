@@ -420,6 +420,58 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .vp-ctl:disabled { color: rgba(238,238,238,.28); cursor: default; background: none; }
 .vp-time { font-size: 12px; color: #e6e8ee; font-variant-numeric: tabular-nums; }
 .vp-live { color: var(--danger); font-size: 12px; font-weight: 700; letter-spacing: .5px; }
+
+/* ===== ★ 2026-09-30 图片浏览器（图集源：每「集」= 一张图）===== */
+.ivi { display: flex; align-items: center; justify-content: center; touch-action: none; }
+.ivi-img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none;
+  transition: transform .08s linear; will-change: transform; }
+.ivi-bar { position: absolute; left: 10px; right: 10px; bottom: 10px; display: flex; align-items: center;
+  gap: 8px; padding: 6px 10px; border-radius: 8px; background: rgba(0,0,0,.55);
+  backdrop-filter: blur(6px); color: #eee; transition: opacity .25s; }
+.ivi-bar.ivi-hide { opacity: 0; pointer-events: none; }
+.ivi-title { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ivi-page { font-size: 12px; color: #cfd3dd; font-variant-numeric: tabular-nums; }
+.ivi-zoom { font-size: 12px; color: #cfd3dd; font-variant-numeric: tabular-nums; min-width: 40px; text-align: right; }
+.ivi-nav { position: absolute; top: 50%; transform: translateY(-50%); transition: opacity .25s; }
+.ivi-nav.ivi-hide { opacity: 0; pointer-events: none; }
+.ivi-left { left: 8px; }
+.ivi-right { right: 8px; }
+.ivi-nav-btn { all: unset; cursor: pointer; width: 44px; height: 68px; display: flex; align-items: center;
+  justify-content: center; color: #fff; background: rgba(0,0,0,.4); border-radius: 8px; }
+.ivi-nav-btn:hover { background: rgba(0,0,0,.62); }
+.ivi-nav-btn:disabled { opacity: .25; cursor: default; }
+
+/* ===== ★ 2026-09-30 音乐播放器（音频源：mp3/flac/m4a…）===== */
+.aud { display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(120% 120% at 50% 0%, #1d2230 0%, #0b0d12 70%); }
+.aud audio { display: none; }
+.aud-stage { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 18px;
+  width: min(520px, 92%); }
+.aud-cover { width: 132px; height: 132px; border-radius: 50%; overflow: hidden; display: flex;
+  align-items: center; justify-content: center; background: rgba(255,255,255,.07);
+  box-shadow: 0 10px 34px rgba(0,0,0,.5); }
+.aud-cover img { width: 100%; height: 100%; object-fit: cover; }
+.aud-cover.spinning { animation: audspin 14s linear infinite; }
+@keyframes audspin { to { transform: rotate(360deg); } }
+.aud-note { font-size: 46px; color: rgba(255,255,255,.5); }
+.aud-title { font-size: 15px; font-weight: 650; color: #f2f4f8; text-align: center; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aud-sub { font-size: 12px; color: var(--text-dim); min-height: 16px; }
+.aud-err { font-size: 12px; color: var(--danger); text-align: center; }
+.aud-progrow { display: flex; align-items: center; gap: 10px; width: 100%; }
+.aud-time { font-size: 11px; color: #cfd3dd; font-variant-numeric: tabular-nums; min-width: 42px; text-align: center; }
+.aud-progress { position: relative; flex: 1; height: 4px; border-radius: 2px; background: rgba(255,255,255,.18); cursor: pointer; }
+.aud-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--accent); }
+.aud-dot { position: absolute; top: 50%; width: 9px; height: 9px; margin-left: -4.5px; border-radius: 50%;
+  background: var(--accent-2, var(--accent)); transform: translateY(-50%); }
+.aud-ctls { display: flex; align-items: center; gap: 12px; }
+.aud-play { all: unset; cursor: pointer; width: 48px; height: 48px; border-radius: 50%; display: flex;
+  align-items: center; justify-content: center; background: var(--accent); color: #0b0d12; }
+.aud-play:hover { filter: brightness(1.08); }
+.aud-vol { display: inline-flex; align-items: center; gap: 6px; color: #cfd3dd; }
+.aud-vol input { width: 74px; }
+.aud-mini .aud-cover { width: 58px; height: 58px; }
+.aud-mini .aud-stage { gap: 6px; padding: 8px; }
 .vp-rate { background: rgba(255,255,255,.12); color: #fff; border: none; border-radius: 5px; font-size: 11px;
   padding: 2px 4px; cursor: pointer; }
 .vp-rate option { color: #111; }

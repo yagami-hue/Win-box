@@ -17,7 +17,10 @@ import {
   isUpdateAvailable,
   parseLatestRelease,
   pickSetupAsset,
+  rankBySpeed,
+  sampleBps,
   type ReleaseJson,
+  type SpeedSample,
   type UpdateAsset,
   type UpdateCheckResult,
   type UpdateProgress,
@@ -29,15 +32,26 @@ import type { Logger } from '../../shared/types';
 const agent = new Agent({ connect: { timeout: 20000 } });
 const UA = 'Win-Box-Updater';
 
-/** 检查接口候选地址：直连优先，其次加速前缀（容错，任一成功即可） */
+/**
+ * ★ 2026-09-30（用户要求「更新时优先走代理链路，先测速挑最快的下载，别连上 GitHub 就走直连」）：
+ *   检查接口候选地址 = **代理加速优先、直连垫底**，且**全部并发**抢第一个成功响应
+ *   （直连在国内常能连通但极慢；串行试代理会白等 each×8s）。
+ */
 function checkUrls(): string[] {
-  const out = [UPDATE_RELEASES_API];
+  const out: string[] = [];
   for (const p of GH_ACCEL_PREFIXES) {
     const pre = p.endsWith('/') ? p : p + '/';
     out.push(pre + UPDATE_RELEASES_API);
   }
+  out.push(UPDATE_RELEASES_API);
   return out;
 }
+
+/** 测速窗口：单条线路最多测这么久 / 最多收这么多字节（够比较速率即可，别拖时间） */
+const SPEED_TEST_MS = 3500;
+const SPEED_TEST_BYTES = 2 * 1024 * 1024;
+/** 视为「该线路可用」的最小样本字节数（挡住加速站返回的错误页/秒断） */
+const SPEED_MIN_BYTES = 256 * 1024;
 
 export class UpdateService {
   private lastAsset: UpdateAsset | null = null;
@@ -53,34 +67,13 @@ export class UpdateService {
   /**
    * 检查更新。**任何失败都返回 updateAvailable=false**（不锁死软件），并带上 error 说明。
    * updateAvailable=true 的条件：远端版本更高 **且** 找到 Setup 安装包。
+   * ★ 2026-09-30：候选地址（代理优先 + 直连）**并发抢首响**，第一个 200 即用，其余立即放弃。
    */
   async check(): Promise<UpdateCheckResult> {
     const localVersion = app.getVersion();
     const base: UpdateCheckResult = { localVersion, remoteVersion: '', tag: '', updateAvailable: false };
 
-    let json: ReleaseJson | null = null;
-    let lastErr = '';
-    for (const url of checkUrls()) {
-      try {
-        const res = await request(url, {
-          method: 'GET',
-          headers: { 'User-Agent': UA, Accept: 'application/vnd.github+json' },
-          headersTimeout: 8000,
-          bodyTimeout: 8000,
-          dispatcher: dispatchChain(url, agent)[0],
-        });
-        if (res.statusCode !== 200) {
-          await res.body.dump();
-          lastErr = `HTTP ${res.statusCode}`;
-          continue;
-        }
-        json = JSON.parse(await res.body.text()) as ReleaseJson;
-        this.log.i(`更新检查：命中 ${url.replace(/https?:\/\//, '').slice(0, 60)}…`);
-        break;
-      } catch (e) {
-        lastErr = e instanceof Error ? e.message : String(e);
-      }
-    }
+    const { json, lastErr } = await this.fetchLatestRelease();
     if (!json) {
       this.log.w(`更新检查失败（按「无更新」放行）：${lastErr}`);
       return { ...base, error: lastErr || '网络不可达' };
@@ -125,6 +118,155 @@ export class UpdateService {
   }
 
   /**
+   * ★ 2026-09-30：并发抢首响拉最新 Release（代理链路优先 + 直连垫底）。
+   * 全部候选同时发起，谁先回 200 就用谁，其余立刻放弃 —— 既满足「优先走代理」，
+   * 又不会因为某条线路不可达白等（串行时每条 8s，最坏 40s+）。
+   */
+  private async fetchLatestRelease(): Promise<{ json: ReleaseJson | null; lastErr: string }> {
+    const urls = checkUrls();
+    const errors: string[] = [];
+    let settled = false;
+    return new Promise((resolve) => {
+      const finish = (json: ReleaseJson | null, err: string): void => {
+        if (settled) return;
+        settled = true;
+        resolve({ json, lastErr: err });
+      };
+      let pending = urls.length;
+      for (const url of urls) {
+        const host = url.replace(/^https?:\/\//, '').split('/')[0];
+        void (async () => {
+          try {
+            const res = await request(url, {
+              method: 'GET',
+              headers: { 'User-Agent': UA, Accept: 'application/vnd.github+json' },
+              headersTimeout: 8000,
+              bodyTimeout: 8000,
+              dispatcher: dispatchChain(url, agent)[0],
+            });
+            if (res.statusCode !== 200) {
+              await res.body.dump();
+              errors.push(`${host}: HTTP ${res.statusCode}`);
+              return;
+            }
+            const text = await res.body.text();
+            if (settled) return; // 别的线路已经赢了
+            const json = JSON.parse(text) as ReleaseJson;
+            this.log.i(`更新检查：命中 ${host}`);
+            finish(json, '');
+          } catch (e) {
+            errors.push(`${host}: ${e instanceof Error ? e.message : String(e)}`);
+          } finally {
+            pending--;
+            if (pending === 0 && !settled) finish(null, errors.join('；') || '网络不可达');
+          }
+        })();
+      }
+    });
+  }
+
+  /**
+   * ★ 2026-09-30（用户要求「先为代理链路测速，挑下载速度最快的下载」）：
+   *   对每条候选线路做**限时测速**（并发；最多 SPEED_TEST_MS / SPEED_TEST_BYTES），
+   *   按实测速率排序返回下载顺序。测速失败的线路仍排在末尾作回退（不丢候选）。
+   */
+  private async speedTest(urls: string[], onProgress: (p: UpdateProgress) => void): Promise<string[]> {
+    if (urls.length <= 1) return urls;
+    onProgress({
+      phase: 'speedtest',
+      received: 0,
+      total: 0,
+      percent: 0,
+      speed: 0,
+      message: `正在为 ${urls.length} 条下载线路测速…`,
+    });
+    const samples = await this.collectSamples(urls);
+    for (const s of samples) {
+      const host = s.url.replace(/^https?:\/\//, '').split('/')[0];
+      this.log.i(
+        s.ok && s.bytes > 0
+          ? `更新测速：${host} ${Math.round(sampleBps(s) / 1024)} KB/s（${s.bytes}B/${s.ms}ms）`
+          : `更新测速：${host} 不可用（${s.bytes}B）`,
+      );
+    }
+    const ranked = rankBySpeed(samples, SPEED_MIN_BYTES);
+    const best = samples.find((s) => s.url === ranked[0]);
+    onProgress({
+      phase: 'speedtest',
+      received: 0,
+      total: 0,
+      percent: 0,
+      speed: best ? sampleBps(best) : 0,
+      message: best ? `最快线路：${best.url.replace(/^https?:\/\//, '').split('/')[0]}` : '',
+    });
+    return ranked;
+  }
+
+  /**
+   * 并发测速并**限总时长**收集样本：整段最多 SPEED_TEST_MS + 800ms（不该被最慢的线路拖住 ——
+   * 实测直连 GitHub 会超时，串等会让"测速"花 8s+）。到点仍没回样本的线路按不可用记，
+   * 仍保留在候选末尾作回退。
+   */
+  private async collectSamples(urls: string[]): Promise<SpeedSample[]> {
+    const got: Array<SpeedSample | null> = urls.map(() => null);
+    const probes = urls.map((u, i) =>
+      this.probeSpeed(u).then((s) => {
+        got[i] = s;
+        return s;
+      }),
+    );
+    await Promise.race([
+      Promise.all(probes),
+      new Promise((r) => setTimeout(r, SPEED_TEST_MS + 800)),
+    ]);
+    return urls.map((u, i) => got[i] ?? { url: u, bytes: 0, ms: 0, ok: false });
+  }
+
+  /**
+   * 单线路限时测速：带 Range 只取头部，收满 SPEED_TEST_BYTES 或到 SPEED_TEST_MS 即断。
+   * 加速站不支持 Range 时也能用（收到窗口上限就主动 destroy，不整包下载）。
+   */
+  private async probeSpeed(url: string): Promise<SpeedSample> {
+    const ac = new AbortController();
+    const t0 = Date.now();
+    let bytes = 0;
+    let ok = false;
+    try {
+      const res = await request(url, {
+        method: 'GET',
+        headers: { 'User-Agent': UA, Range: `bytes=0-${SPEED_TEST_BYTES - 1}` },
+        // 连接/首字节给 3s（死线路快速出局），body 窗口另算
+        headersTimeout: 3000,
+        bodyTimeout: SPEED_TEST_MS + 500,
+        signal: ac.signal,
+        dispatcher: dispatchChain(url, agent)[0],
+      });
+      if (res.statusCode !== 200 && res.statusCode !== 206) {
+        await res.body.dump();
+        return { url, bytes: 0, ms: Date.now() - t0, ok: false };
+      }
+      ok = true;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => { ac.abort(); resolve(); }, SPEED_TEST_MS);
+        res.body.on('data', (c: Buffer) => {
+          bytes += c.length;
+          if (bytes >= SPEED_TEST_BYTES) {
+            clearTimeout(timer);
+            ac.abort();
+            resolve();
+          }
+        });
+        res.body.on('end', () => { clearTimeout(timer); resolve(); });
+        res.body.on('error', () => { clearTimeout(timer); resolve(); });
+      });
+    } catch {
+      // abort 属预期（测速窗口到）；其它异常按不可用处理
+      return { url, bytes, ms: Date.now() - t0, ok: ok && bytes > 0 };
+    }
+    return { url, bytes, ms: Date.now() - t0, ok };
+  }
+
+  /**
    * 下载上次 check() 选中的安装包到 `cacheDir()/update/<name>`（带进度回调）。
    * 已存在且大小一致 → 直接复用（避免每次启动重下 150MB）。
    * 逐个尝试加速地址，全部失败才报错。
@@ -144,7 +286,14 @@ export class UpdateService {
 
     const part = dest + '.part';
     let lastErr = '下载失败';
-    for (const url of asset.accelUrls) {
+    // ★ 2026-09-30：先并发测速，按实测速率排序后再下载（最快的那条打头，其余仍作回退）
+    let urls = asset.accelUrls;
+    try {
+      urls = await this.speedTest(asset.accelUrls, onProgress);
+    } catch (e) {
+      this.log.w(`更新测速失败（改按原顺序下载）：${(e as Error).message}`);
+    }
+    for (const url of urls) {
       const host = url.replace(/^https?:\/\//, '').split('/')[0];
       try {
         this.log.i(`更新下载：尝试 ${host}`);

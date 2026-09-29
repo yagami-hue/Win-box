@@ -13,7 +13,53 @@ import {
   parseLatestRelease,
   parseVersion,
   pickSetupAsset,
+  rankBySpeed,
+  sampleBps,
+  type SpeedSample,
 } from '../src/shared/update';
+
+describe('★ 2026-09-30 更新测速：rankBySpeed / sampleBps', () => {
+  const s = (url: string, bytes: number, ms: number, ok = true): SpeedSample => ({ url, bytes, ms, ok });
+
+  it('sampleBps：ok=false / 非法耗时 → 0', () => {
+    expect(sampleBps(s('a', 1000, 1000))).toBe(1000);
+    expect(sampleBps(s('a', 1000, 0))).toBe(0);
+    expect(sampleBps(s('a', 0, 100))).toBe(0);
+    expect(sampleBps(s('a', 1000, 1000, false))).toBe(0);
+  });
+
+  it('按实测速率降序排列；样本不足（错误页）的线路垫底但仍保留', () => {
+    const ranked = rankBySpeed([
+      s('slow', 300 * 1024, 3000),
+      s('fast', 900 * 1024, 1000),
+      s('mid', 500 * 1024, 2000),
+    ], 256 * 1024);
+    expect(ranked).toEqual(['fast', 'mid', 'slow']);
+  });
+
+  it('样本字节数不够（< minBytes）视为不可用，排到末尾', () => {
+    const ranked = rankBySpeed([
+      s('tiny', 1024, 100), // 加速站错误页
+      s('ok', 400 * 1024, 2000),
+    ], 256 * 1024);
+    expect(ranked).toEqual(['ok', 'tiny']);
+  });
+
+  it('全部不可用时保持原始顺序（仍作失败回退）', () => {
+    const ranked = rankBySpeed([s('a', 0, 50, false), s('b', 0, 60, false)], 256 * 1024);
+    expect(ranked).toEqual(['a', 'b']);
+  });
+
+  it('空输入 → 空数组', () => {
+    expect(rankBySpeed([], 1)).toEqual([]);
+  });
+
+  it('加速前缀顺序：代理在前、直连垫底（用户要求优先走代理链路）', () => {
+    const urls = buildAccelUrls('https://github.com/o/r/releases/download/x/a.exe');
+    expect(urls[0].startsWith(GH_ACCEL_PREFIXES[0])).toBe(true);
+    expect(urls[urls.length - 1]).toBe('https://github.com/o/r/releases/download/x/a.exe');
+  });
+});
 
 describe('normalizeVersion', () => {
   it('剥离 release / v 前后缀', () => {

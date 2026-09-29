@@ -1468,14 +1468,41 @@ export class JarSpiderBridge {
     `https://registry.npmmirror.com/-/binary/python/${JarSpiderBridge.PY_VER}/python-${JarSpiderBridge.PY_VER}-embed-amd64.zip`,
     `https://www.python.org/ftp/python/${JarSpiderBridge.PY_VER}/python-${JarSpiderBridge.PY_VER}-embed-amd64.zip`,
   ];
-  /** 第三方库 wheel（win_amd64，cp311）。lxml 为 C 扩展 wheel（已静态捆绑 libxml2 .pyd）；requests 族纯 py。 */
-  private static readonly PY_WHEELS: Array<{ name: string; file: string; required: boolean }> = [
-    { name: 'lxml', file: 'lxml-4.9.2-cp311-cp311-win_amd64.whl', required: false },
-    { name: 'requests', file: 'requests-2.31.0-py3-none-any.whl', required: true },
-    { name: 'urllib3', file: 'urllib3-1.26.18-py2.py3-none-any.whl', required: true },
-    { name: 'certifi', file: 'certifi-2023.7.22-py2.py3-none-any.whl', required: true },
-    { name: 'charset_normalizer', file: 'charset_normalizer-3.2.0-py3-none-any.whl', required: true },
-    { name: 'idna', file: 'idna-3.4-py3-none-any.whl', required: true },
+  /**
+   * 第三方库 wheel（win_amd64，cp311）。lxml 为 C 扩展 wheel（已静态捆绑 libxml2 .pyd）；requests 族纯 py。
+   *
+   * ★ 2026-09-30（用户报「部分 py 蜘蛛报 ImportError 第三方库缺失」）：按**实测**补齐 —— 扫描用户
+   *   本地包 211 个 py 蜘蛛的 import，缺失最多的是 Crypto(51)/bs4(47)/pyquery(26)，其后
+   *   cryptography、PIL、chardet、cloudscraper、curl_cffi。
+   *   `name` = **导入名**（也是 wheel 解压后的顶层目录名，用于「是否已装」判定）；
+   *   `pkg` = PyPI 项目名（simple 索引按它取），两者不同者必须都写
+   *   （beautifulsoup4→bs4 / pycryptodome→Crypto / Pillow→PIL / requests-toolbelt→requests_toolbelt）。
+   *   `platform` = 平台/ABI 标签，仅用于「首选版本不在镜像上」时的兜底匹配 —— 二进制包绝不能
+   *   退化成别的平台（会解压出一堆用不了的 .pyd）。
+   *   新增项一律 required:false：单库失败不影响纯 py 源，只在日志留痕。
+   */
+  private static readonly PY_WHEELS: Array<{ name: string; pkg?: string; file: string; platform?: string; required: boolean }> = [
+    { name: 'requests', file: 'requests-2.31.0-py3-none-any.whl', platform: 'py3-none-any', required: true },
+    { name: 'urllib3', file: 'urllib3-1.26.18-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: true },
+    { name: 'certifi', file: 'certifi-2023.7.22-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: true },
+    { name: 'charset_normalizer', file: 'charset_normalizer-3.2.0-py3-none-any.whl', platform: 'py3-none-any', required: true },
+    { name: 'idna', file: 'idna-3.4-py3-none-any.whl', platform: 'py3-none-any', required: true },
+    { name: 'lxml', file: 'lxml-4.9.2-cp311-cp311-win_amd64.whl', platform: 'cp311-cp311-win_amd64', required: false },
+    // ---- ★ 2026-09-30 新增（实测缺得最多的几族）----
+    { name: 'Crypto', pkg: 'pycryptodome', file: 'pycryptodome-3.19.1-cp35-abi3-win_amd64.whl', platform: 'cp35-abi3-win_amd64', required: false },
+    { name: 'bs4', pkg: 'beautifulsoup4', file: 'beautifulsoup4-4.12.3-py3-none-any.whl', platform: 'py3-none-any', required: false },
+    { name: 'soupsieve', file: 'soupsieve-2.5-py3-none-any.whl', platform: 'py3-none-any', required: false },
+    { name: 'pyquery', file: 'pyquery-2.0.0-py3-none-any.whl', platform: 'py3-none-any', required: false },
+    { name: 'cssselect', file: 'cssselect-1.2.0-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: false },
+    { name: 'PIL', pkg: 'Pillow', file: 'pillow-10.2.0-cp311-cp311-win_amd64.whl', platform: 'cp311-cp311-win_amd64', required: false },
+    { name: 'cryptography', file: 'cryptography-41.0.7-cp37-abi3-win_amd64.whl', platform: 'cp37-abi3-win_amd64', required: false },
+    { name: 'chardet', file: 'chardet-5.2.0-py3-none-any.whl', platform: 'py3-none-any', required: false },
+    { name: 'cloudscraper', file: 'cloudscraper-1.2.71-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: false },
+    { name: 'requests_toolbelt', pkg: 'requests-toolbelt', file: 'requests_toolbelt-1.0.0-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: false },
+    { name: 'pyparsing', file: 'pyparsing-3.1.1-py3-none-any.whl', platform: 'py3-none-any', required: false },
+    { name: 'curl_cffi', file: 'curl_cffi-0.7.4-cp38-abi3-win_amd64.whl', platform: 'cp38-abi3-win_amd64', required: false },
+    { name: 'cffi', file: 'cffi-1.16.0-cp311-cp311-win_amd64.whl', platform: 'cp311-cp311-win_amd64', required: false },
+    { name: 'pycparser', file: 'pycparser-2.21-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: false },
   ];
   /** PyPI simple 镜像根（回退到带 `simple/` 的路径，由其索引解析 wheel 真实地址） */
   private static readonly PY_WHEEL_SIMPLE = [
@@ -1706,8 +1733,10 @@ export class JarSpiderBridge {
    * wheel URL 不做假设：先从 PyPI simple 索引页（PEP 503）读取该文件名的 href，
    * 由 href（形如 `../../packages/<hash>/<file>`）按 simple 页基址解析出真实地址；
    * 依次尝试各镜像，全部失败抛错（保底提示）。
+   * ★ 2026-09-30：索引页按 **PyPI 项目名**（`pkg`，缺省取 `name`）访问；首选文件名缺失时
+   *   只接受**同平台标签**的 wheel（`platform`）—— 否则二进制包会退化成别的平台（解压出用不了的 .pyd）。
    */
-  private async downloadWheel(dir: string, w: { name: string; file: string }): Promise<boolean> {
+  private async downloadWheel(dir: string, w: { name: string; pkg?: string; file: string; platform?: string }): Promise<boolean> {
     const sp = join(dir, 'Lib', 'site-packages');
     mkdirSync(sp, { recursive: true });
     const fs = require('node:fs') as typeof import('node:fs');
@@ -1720,17 +1749,19 @@ export class JarSpiderBridge {
         fs.writeFileSync(clean, e.bytes);
       }
     };
+    const project = w.pkg || w.name;
     for (const simpleBase of JarSpiderBridge.PY_WHEEL_SIMPLE) {
       try {
         // 1) 索引页 → 找目标文件 href（HttpClient buffer:2 返回 base64 字符串，先解码）
-        const idx = await this.host!.http.request({ url: `${simpleBase}${w.name}/`, method: 'get', timeoutMs: 60000, buffer: 2 });
+        const idx = await this.host!.http.request({ url: `${simpleBase}${project}/`, method: 'get', timeoutMs: 60000, buffer: 2 });
         const idxBuf = Buffer.from(Array.isArray(idx.content) ? idx.content as unknown as number[] : Buffer.from(String(idx.content), 'base64'));
         const html = idxBuf.toString('utf8');
-        // 精确文件名优先（首选版本）；镜像清理旧版时退化为该包任一可用 wheel（版本无关）
+        // 精确文件名优先（首选版本）；镜像清理旧版时退化为**同平台标签**的任一 wheel（版本无关）
         let href = html.match(new RegExp(`href="([^"]*${escapeRegExp(w.file)}[^"]*)"`))?.[1];
-        if (!href) {
-          const anyWhl = html.match(/href="([^"]+\.whl[^"]*)"/);
-          href = anyWhl?.[1];
+        if (!href && w.platform) {
+          const tag = w.platform;
+          const all = [...html.matchAll(/href="([^"]+\.whl[^"]*)"/g)].map((m) => m[1]);
+          href = all.find((h) => h.includes(tag));
         }
         if (!href) continue;
         // href 形如 `../../packages/<hash>/<file>` → 相对 simpleBase 解析
@@ -2108,7 +2139,7 @@ export function isSpiderClassMissing(reason: string): boolean {
 export function translateSpiderLog(log: string): string {
   const s = (log || '').trim();
   if (!s) return '';
-  const rules: Array<[RegExp, string]> = [
+  const rules: Array<[RegExp, string | ((m: RegExpMatchArray) => string)]> = [
     [/Connect timed out/i, '连接源站超时，站点可能已停服或网络不通'],
     [/SocketTimeoutException|Read timed out|timeout/i, '请求源站超时，站点响应过慢或不可达'],
     [/UnknownHostException/i, '源站域名无法解析，站点可能已更换网址'],
@@ -2121,8 +2152,11 @@ export function translateSpiderLog(log: string): string {
     // ---- ★ .py 蜘蛛（嵌入式 CPython3）专属 ----
     [/SyntaxError|invalid syntax|f-string|EOL while scanning|unexpected EOF|IndentationError/i,
       'python 蜘蛛脚本本身有语法/编码错误（Python3 解析失败），请检查源脚本'],
-    [/ImportError|No module named/i,
-      '该 python 蜘蛛依赖未随运行时内置的第三方库（lxml/requests/urllib3 已内置；其余需在嵌入式 Python 中安装）'],
+    // ★ 2026-09-30：报错必须**点出缺哪个库**（此前一律给同一句泛泛的说明，用户无法判断该不该反馈）。
+    //   内置库清单见 JarSpiderBridge.PY_WHEELS（首次用到会自动从 PyPI 镜像补齐）。
+    [/No module named\s+'?"?([A-Za-z_][\w.]*)/i,
+      (m) => `该 python 蜘蛛缺少第三方库「${m[1]}」—— 常用库（requests/urllib3/lxml/bs4/pyquery/Crypto/PIL…）会在首次使用时自动补齐，若持续报此错请反馈该库名`],
+    [/ImportError/i, '该 python 蜘蛛导入依赖失败（库名未在报错里给出，请反馈该源）'],
     // ---- 桌面端架构性不兼容（对齐安卓原生能力缺失）----
     // 这一类必须排在通用的 ClassNotFound/NoSuchField 规则之前，否则会被后者吞掉，
     // 用户拿到的是一句"依赖缺失请反馈"，看不出「这个源在桌面端根本不成立」。
@@ -2159,7 +2193,11 @@ export function translateSpiderLog(log: string): string {
     [/crawler\.Spider\.init\(android\.content\.Context|守卫内层蜘蛛为空|加固壳内部蜘蛛未就绪/,
       '加固壳内部蜘蛛未就绪（原生解密未产出加载器）—— 已自动改用内置真实实现；仍失败请重进该源或反馈'],
   ];
-  for (const [re, human] of rules) if (re.test(s)) return human;
+  for (const [re, human] of rules) {
+    const m = s.match(re);
+    if (!m) continue;
+    return typeof human === 'function' ? human(m) : human;
+  }
   return s.slice(0, 120);
 }
 

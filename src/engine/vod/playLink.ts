@@ -16,7 +16,7 @@
 // ★ 后续（用户已列为清单下一项）：内置 BT 引擎（aria2c sidecar）后，`magnet` 也会变成可播 ——
 //   届时把这里返回的 `externalLink` 交给下载引擎即可，本模块的识别结论可直接复用。
 
-export type PlayLinkKind = 'http' | 'magnet' | 'ed2k' | 'ftp' | 'other';
+export type PlayLinkKind = 'http' | 'magnet' | 'ed2k' | 'ftp' | 'rtmp' | 'other';
 
 export interface PlayLinkInfo {
   kind: PlayLinkKind;
@@ -33,6 +33,12 @@ export interface PlayLinkInfo {
 const UNSUPPORTED_MAGNET = '磁力链接需要 BT 播放引擎（内置引擎不可用）';
 const UNSUPPORTED_ED2K = '电驴（ed2k）链接需要 eMule 类工具：链接已复制到剪贴板';
 const UNSUPPORTED_FTP = 'FTP 直链桌面播放器不支持（Chromium 已移除 ftp 支持）';
+/**
+ * ★ 2026-09-30（用户报「包里的直播源播不了」）：直播地址里混着 rtmp/rtsp —— Chromium 已完全移除
+ * 这两个协议（`<video>` 只会静默失败），此前一律原样透传 ⇒ 用户看到黑屏无提示。
+ * 这里与 ftp 同口径：给人话原因 + 把链接复制到剪贴板（可粘进 PotPlayer/VLC/ffplay 播放）。
+ */
+const UNSUPPORTED_RTMP = '该地址是 rtmp/rtsp 直播流，浏览器内核不支持（Chromium 已移除）：链接已复制到剪贴板，可粘贴到 PotPlayer / VLC 播放';
 
 /**
  * `thunder://` 解码：base64 → 去掉包裹的 `AA` / `ZZ` → 内层地址。
@@ -67,6 +73,8 @@ export function classifyPlayLink(raw: string): PlayLinkInfo {
   if (/^magnet:/i.test(s)) return { kind: 'magnet', url: '', unsupported: UNSUPPORTED_MAGNET, externalLink: s };
   if (/^ed2k:\/\//i.test(s)) return { kind: 'ed2k', url: '', unsupported: UNSUPPORTED_ED2K, externalLink: s };
   if (/^ftp:\/\//i.test(s)) return { kind: 'ftp', url: '', unsupported: UNSUPPORTED_FTP };
+  // ★ 2026-09-30：rtmp / rtsp / mms（含 rtmps、rtspu、mmsh）——直播源常见，Chromium 无载体
+  if (/^(rtmps?|rtspu?|mmsh?):\/\//i.test(s)) return { kind: 'rtmp', url: '', unsupported: UNSUPPORTED_RTMP, externalLink: s };
 
   // 其它（裸 id / ws: / 解析站地址 / 多段 # 拼接…）→ 原样透传，不新增行为
   return { kind: 'other', url: s };

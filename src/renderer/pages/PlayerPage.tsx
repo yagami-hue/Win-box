@@ -279,6 +279,10 @@ export default function PlayerPage() {
               onPrev={() => goEp(epIndex - 1)}
               onNext={() => goEp(epIndex + 1)}
               mini={mini}
+              // ★ 2026-09-30：图集源（每「集」= 一张图）/ 音乐源 → 图片浏览器 / 音乐播放器显示页码与封面
+              epIndex={epIndex}
+              epTotal={eps.length}
+              cover={init?.meta?.pic}
             />
           ) : (
             <div className="empty">等待播放…</div>

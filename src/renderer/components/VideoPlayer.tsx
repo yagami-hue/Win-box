@@ -14,6 +14,10 @@ import { parseDanmakuResponse } from '../../engine/danmaku/parseDanmakuXml';
 import { danmakuQueryCandidates, parseEpisodeInput, episodeFieldFromName, formatCandidateLabel } from '../../engine/danmaku/normalizeQuery';
 import { customEndpointsText, mergeEndpoints, pickAnimesForExpand, seasonOf, sortCandidatesByEp } from '../../engine/danmaku/endpoints';
 import { resolvePlayTarget } from '../lib/playTarget';
+// ★ 2026-09-30（用户要求）：图片/音乐分流 + 直播态判定（纯函数，见 lib/mediaKind.ts）
+import { detectMediaKind, isLikelyLive } from '../lib/mediaKind';
+import ImageViewer from './ImageViewer';
+import AudioPlayer from './AudioPlayer';
 // ★ 2026-09-29 DLNA 投屏（SSDP 发现 + AVTransport 三动作；对位 CatClaw Dlna.cs）
 import { parseCastTarget, type DlnaDevice } from '../../shared/dlna';
 import { loadPlayerPrefs, savePlayerPrefs, PLAYER_FITS, type PlayerPrefs, type PlayerFit } from '../lib/playerPrefs';
@@ -242,6 +246,12 @@ interface VideoPlayerProps {
   /** ★ 续播起始时间（秒）：历史记录点开时由外层传入，优先于 uiMem.playTime 恢复。
    *   （历史点开会先重新转存拿新直链 → 新 url 与 uiMem.playTime 的旧键不匹配，须显式带进度） */
   startTime?: number;
+  /** ★ 2026-09-30：当前是第几「集」（图集源里就是第几张图）——图片/音乐播放器显示页码用 */
+  epIndex?: number;
+  /** 共几集（图集/歌单总数） */
+  epTotal?: number;
+  /** ★ 2026-09-30：音乐播放器封面（详情页海报） */
+  cover?: string;
 }
 
 /** ★ 2026-09-28（用户要求）：控制条图标的「长按开面板」手势状态 */
@@ -251,6 +261,16 @@ const LONG_PRESS_MS = 450;
 
 export default function VideoPlayer(props: VideoPlayerProps) {
   const { url, canPrev, canNext, onPrev, onNext, resourceName, danmakuTitle, mini = false, driveBindProvider = null } = props;
+  /**
+   * ★ 2026-09-30（用户要求「图片和音乐要有独立的播放器」）：先判型再分流 ——
+   *   图片（图集源的每一「集」= 一张图）与音频（mp3/flac…）分别由 ImageViewer / AudioPlayer 接管，
+   *   不再喂给 `<video>`（此前图片必黑屏、音频只闻其声不见其形）。
+   *   判定见 lib/mediaKind.ts（只认协议/扩展名，判不准仍回落视频，不臆造）。
+   */
+  const mediaKind = detectMediaKind(url);
+  const isImage = mediaKind === 'image';
+  const isAudio = mediaKind === 'audio';
+  const liveHint = isLikelyLive(url);
   const ref = useRef<HTMLVideoElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -288,6 +308,12 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const [loading, setLoading] = useState(true);
   const [ui, setUi] = useState(true);
   const [isLive, setIsLive] = useState(false);
+  /**
+   * ★ 2026-09-30：**当前流的直播结论**（由引擎给出，不是靠时长猜）——
+   *   HLS 由 `LEVEL_LOADED.details.live` 写、flv/ts 在建播放器时按形态写（天生直播）；
+   *   `onDuration` 只读它（+ 原生直连的 Infinity 兜底），避免被 hls 直播的有限时长纠正成点播。
+   */
+  const liveKindRef = useRef(false);
   // ---- 实时网速（加载/缓冲时显示；不加载时不显示）----
   const [netSpeed, setNetSpeed] = useState<number | null>(null);
   // 中继层真实转发测速（主进程 /play 统计字节推过来，最可靠；普通直连/hls/flv 用 netSpeed）
@@ -812,12 +838,16 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     const v = ref.current;
     if (!v || !url) return;
+    // ★ 2026-09-30：图片/音频不走 <video> 通道（由 ImageViewer / AudioPlayer 接管）→ 不建 hls/mpegts、不置 src
+    if (isImage || isAudio) return;
     setErr('');
     setLoading(true);
     setPaused(true);
     setCur(0);
     setDur(0);
-    setIsLive(false);
+    setIsLive(liveHint);
+    // ★ 2026-09-30：形态预判交给 liveKindRef（flv/ts 一定是直播；m3u8 由 LEVEL_LOADED 定论）
+    liveKindRef.current = liveHint;
     setNetSpeed(null);
     setRelaySpeed(null);
     setBuffering(false);
@@ -884,8 +914,11 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     setLoading(false);
   };
   const onDuration = () => {
-    setDur(Number.isFinite(v.duration) ? v.duration : 0);
-    if (v.duration === Infinity) setIsLive(true);
+    const d = v.duration;
+    setDur(Number.isFinite(d) ? d : 0);
+    // ★ 2026-09-30：直播判定以「引擎给出的结论」为准（HLS = details.live；flv/ts 天生直播），
+    //   时长只作兜底（原生直连的 Infinity）；否则会被 hls 直播流的有限时长纠正成点播。
+    setIsLive(liveKindRef.current || d === Infinity);
     tryRestore(); // duration 就绪即尝试恢复（hls/mpegts 的 duration 出现晚于首个 timeupdate）
   };
   const onPlay = () => {
@@ -942,6 +975,19 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         hls.loadSource(url);
         hls.attachMedia(v);
         hls.on(Hls.Events.MANIFEST_PARSED, () => start());
+        /**
+         * ★★ 2026-09-30（用户报「直播不会被识别到直播里」）★★
+         *   直播判定必须用 **hls 的 `details.live`**：hls.js 默认 `liveDurationInfinity=false`，
+         *   直播流的 `video.duration` 是「当前播放列表总时长」（实测一个无 ENDLIST 的直播清单
+         *   报 duration=12s 的**有限值**）→ 只认 `duration === Infinity` 会把直播当成点播
+         *   （控制条挂着假进度、时长，也没有「● 直播」标识）。
+         */
+        hls.on(Hls.Events.LEVEL_LOADED, (_e, d) => {
+          const info = d as unknown as { details?: { live?: boolean } };
+          const live = !!info?.details?.live;
+          liveKindRef.current = live;
+          setIsLive(live);
+        });
         // ★ 实时网速：分片加载完成后统计（loaded 字节 / loading 耗时）
         hls.on(Hls.Events.FRAG_LOADED, (_e, d) => {
           const s = (d as { stats?: { loading: number; loaded: number } }).stats;
@@ -1359,6 +1405,44 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const onVolMove = (e: React.PointerEvent) => {
     if (volDragRef.current) setVolFromClientY(e.clientY);
   };
+
+  /**
+   * ★ 2026-09-30：图片 / 音频分流（所有 hooks 都在上方，早返回不破坏 hooks 顺序）。
+   *   图集源把每张图当一「集」传进来 → 图片浏览器按「集」翻页；
+   *   音乐源同理 → 音乐播放器按「曲」切歌。
+   */
+  if (isImage) {
+    return (
+      <ImageViewer
+        url={url}
+        name={resourceName}
+        index={(props.epIndex ?? 0) + 1}
+        total={props.epTotal}
+        canPrev={canPrev}
+        canNext={canNext}
+        onPrev={onPrev}
+        onNext={onNext}
+        mini={mini}
+      />
+    );
+  }
+  if (isAudio) {
+    return (
+      <AudioPlayer
+        url={url}
+        name={resourceName}
+        cover={props.cover}
+        index={(props.epIndex ?? 0) + 1}
+        total={props.epTotal}
+        canPrev={canPrev}
+        canNext={canNext}
+        onPrev={onPrev}
+        onNext={onNext}
+        startTime={props.startTime}
+        mini={mini}
+      />
+    );
+  }
 
   return (
     <div

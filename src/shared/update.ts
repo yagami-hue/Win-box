@@ -91,7 +91,7 @@ export interface UpdateCheckResult {
 
 /** 更新进度（主进程 → 渲染层推送） */
 export interface UpdateProgress {
-  phase: 'checking' | 'downloading' | 'done' | 'launching' | 'error';
+  phase: 'checking' | 'speedtest' | 'downloading' | 'done' | 'launching' | 'error';
   received: number;
   total: number;
   percent: number;
@@ -100,6 +100,38 @@ export interface UpdateProgress {
   message?: string;
   error?: string;
 }
+
+/**
+ * ★ 2026-09-30（用户要求「先为代理链路测速，挑下载速度最快的下载」）：单条线路的测速样本。
+ *   `bytes`/`ms` 是「限时窗口内实际收到的字节数与耗时」，`bps` = bytes*1000/ms。
+ */
+export interface SpeedSample {
+  url: string;
+  bytes: number;
+  ms: number;
+  ok: boolean;
+}
+
+/** 单条线路实测速率（字节/秒）；ms 非正或 ok=false → 0 */
+export function sampleBps(s: SpeedSample): number {
+  if (!s.ok || s.ms <= 0 || s.bytes <= 0) return 0;
+  return Math.round((s.bytes * 1000) / s.ms);
+}
+
+/**
+ * 测速结果排序 → 下载候选顺序：
+ *   ① 测速成功且够快的，按速率从高到低；② 其余保持原始顺序垫底（仍作为失败回退）。
+ *   纯函数（便于单测）：不改变不可用线路的语义，只是把它们挪到后面。
+ */
+export function rankBySpeed(samples: SpeedSample[], minBytes = 0): string[] {
+  const good = samples
+    .filter((s) => s.ok && s.bytes >= minBytes)
+    .sort((a, b) => sampleBps(b) - sampleBps(a))
+    .map((s) => s.url);
+  const rest = samples.filter((s) => !(s.ok && s.bytes >= minBytes)).map((s) => s.url);
+  return [...good, ...rest];
+}
+
 
 /** 去掉 tag 的 `release` / `v` 前后缀，只留版本主体（`release1.13.0` → `1.13.0`） */
 export function normalizeVersion(input: string): string {

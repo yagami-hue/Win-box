@@ -405,19 +405,38 @@ describe('UserConfigManager — ★ 2026-09-30 换源弹层数据与本地直播
     return { name, url, api: '', type: '0', jar: '', ext: '', epg: '', playerType: '', timeout: 15 };
   }
 
-  it('profileSitesView：当前档案取运行期真实源（含手动加的源）；其它档案取存档 JSON', () => {
+  it('profileSitesView：当前档案取运行期真实源；其它档案取存档 JSON（已与运行期对齐）', () => {
     const dir = tmpDir();
     const m = newManager(dir);
     m.replaceFromImport(fullConfig([bean('a1'), bean('a2')]), 'https://host/a.json'); // 建档：json = a1/a2
     const aId = m.activeProfileId();
-    m.addSource(bean('a3')); // 手动加源（只进运行期，不回写 A 的存档 json）
+    m.addSource(bean('a3')); // 手动加源 → ★ 2026-09-30 起同步写回 A 的存档 json（内容变更即对齐）
     const pb = m.saveAsProfile('配置B'); // 快照当前（a1/a2/a3）为新档案并切换过去
 
     const view = m.profileSitesView();
     expect(view.activeId).toBe(pb.id);
     expect(view.profiles.find((p) => p.id === pb.id)!.sites.map((s) => s.key)).toEqual(['a1', 'a2', 'a3']);
-    // 非当前档案：来自其存档 JSON（没有手动加的 a3）——弹层切到该订阅时如实展示
-    expect(view.profiles.find((p) => p.id === aId)!.sites.map((s) => s.key)).toEqual(['a1', 'a2']);
+    // ★ 2026-09-30：非当前档案同样含 a3 —— 存档 json 与运行期一致，
+    //   否则「切到别的订阅再切回来」会用旧 json 重建 → 手动删掉的源又冒出来（用户报的"残留"）
+    expect(view.profiles.find((p) => p.id === aId)!.sites.map((s) => s.key)).toEqual(['a1', 'a2', 'a3']);
+  });
+
+  it('★ 2026-09-30：手动改过的源列表在「切走再切回」后保持不变（档案 json 与运行期同步）', () => {
+    const dir = tmpDir();
+    const m = newManager(dir);
+    m.replaceFromImport(fullConfig([bean('a1'), bean('a2'), bean('a3')]), 'https://h/a.json');
+    const aId = m.activeProfileId();
+    const pb = m.saveAsProfile('B'); // B 快照当前 3 源并成为生效档案
+    m.activateProfile(aId); // 切回 A
+    m.deleteSource('a2'); // 手动删源（旧行为下只落运行期，A 的 json 仍带 a2）
+    m.addSource(bean('a9')); // 手动加源
+
+    m.activateProfile(pb.id); // 切到 B
+    m.activateProfile(aId); // 再切回 A
+    expect(m.snapshot().sources.map((s) => s.key)).toEqual(['a1', 'a3', 'a9']);
+    // 存档 json 也应是一致的（换源弹层「左订阅/右源」直接读它）
+    const p = m.rawProfiles().find((x) => x.id === aId)!;
+    expect((JSON.parse(p.json) as { sites: Array<{ key: string }> }).sites.map((s) => s.key)).toEqual(['a1', 'a3', 'a9']);
   });
 
   it('activateProfile(id, pickKey)：一步切换档案 + 选中源；非法 pickKey 不硬塞', () => {

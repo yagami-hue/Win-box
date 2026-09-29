@@ -490,10 +490,37 @@ export class UserConfigManager {
 
   // ---------------------------------------------------------------
   private apply(next: UserConfig, kind: ConfigChangeKind = 'content'): void {
-    this.snap = next;
+    // ★ 2026-09-30：内容型变更必须把「当前生效档案」的存档 json 一起对齐（见 withActiveProfileSynced）
+    this.snap = kind === 'content' ? this.withActiveProfileSynced(next) : next;
     this.loaded = true;
     this.persist();
     this.onChange?.(this.snapshot(), kind);
+  }
+
+  /**
+   * ★ 2026-09-30（用户报「切换订阅时，源列表里偶尔会残留上一个订阅的部分源」）：
+   *   档案存档 json 与**运行期源列表必须始终一致**。
+   *
+   *   此前只在「导入 / 存为新配置 / 激活档案」时写 json，之后用户手动增删改/排序源只落在
+   *   `snap.sources`；一旦切到别的订阅再切回来，`activateProfile` 会用**旧 json 重建**
+   *   → 手动删掉的源又冒出来、手动加的源消失（用户观感 = 列表里混着上一份订阅的源）。
+   *   这里每次内容型变更都把生效档案的 json 重新序列化（幂等：activateProfile 从 json 重建后
+   *   再序列化结果相同，不会来回抖动）。
+   */
+  private withActiveProfileSynced(next: UserConfig): UserConfig {
+    const id = next.activeProfileId;
+    if (!id || !next.profiles.some((p) => p.id === id)) return next;
+    const json = serializeImport({
+      sites: next.sources,
+      lives: next.lives,
+      spider: next.global.spider,
+      flags: next.global.flags,
+      parses: next.parses,
+    } as SiteConfig);
+    return {
+      ...next,
+      profiles: next.profiles.map((p) => (p.id === id ? { ...p, json, sourceCount: next.sources.length } : p)),
+    };
   }
 
   private persist(): void {

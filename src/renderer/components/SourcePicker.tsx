@@ -46,6 +46,9 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
   /** 弹层右锚（顶栏右侧入口左锚会把宽弹层推出窗口） */
   const [popRight, setPopRight] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const srcColRef = useRef<HTMLDivElement | null>(null);
+  /** ★ 2026-09-30：档案视图请求代次 —— 只认最后一次请求的响应（慢响应不得覆盖新数据） */
+  const viewSeqRef = useRef(0);
   const timerRef = useRef<number | null>(null);
   const startRef = useRef<{ x: number; y: number } | null>(null);
   const firedRef = useRef(false);
@@ -62,15 +65,27 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
       .catch(() => undefined);
   };
 
-  /** 拉取「每份订阅的源清单」；paneId 失效（档案被删）时回落到当前生效订阅 */
-  const loadViews = (): void => {
+  /**
+   * 拉取「每份订阅的源清单」。
+   * ★ 2026-09-30（用户报「切换订阅时源列表偶尔残留上一个订阅的源」）：
+   *   ① 代次守卫：只采纳最后一次请求的响应 —— 旧的慢响应回来时整包丢弃（否则会把右栏
+   *      改回上一次打开弹层时的快照，看起来就是"混着上一个订阅的源"）；
+   *   ② `alignActive=true`（每次打开弹层）时把左栏对齐到**当前生效订阅** —— 不再沿用上次
+   *      浏览过的那份订阅，避免打开瞬间右栏还是别人家的源。
+   */
+  const loadViews = (alignActive = false): void => {
+    const seq = ++viewSeqRef.current;
     client
       .cfgProfileSites()
       .then((v) => {
+        if (seq !== viewSeqRef.current) return; // 过期响应丢弃
         setViews(v);
-        setPaneId((cur) => (cur && v.profiles.some((p) => p.id === cur) ? cur : v.activeId));
+        setPaneId((cur) => (alignActive || !(cur && v.profiles.some((p) => p.id === cur)) ? v.activeId : cur));
       })
-      .catch(() => setViews(null));
+      .catch(() => {
+        if (seq !== viewSeqRef.current) return;
+        setViews(null);
+      });
   };
 
   useEffect(() => {
@@ -92,13 +107,31 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selfLoad]);
 
-  // 打开时：拉档案视图 + 复位检索词（订阅可能在配置页改过）
+  // 打开时：**先作废旧快照**再拉档案视图 + 复位检索词（订阅可能在配置页改过）
+  // ★ 2026-09-30：views 置 null 是关键 —— 否则弹层会先按「上一次打开时的快照」渲染，
+  //   用户看到的就是**上一个订阅的源列表**（用户报的"残留"）。
   useEffect(() => {
     if (!open) return;
     setQ('');
-    loadViews();
+    setViews(null);
+    setPaneId('');
+    loadViews(true);
+    // 弹层打开期间配置变了（配置页导入/删源/切档案、跨订阅换源）→ 立即重拉，保持与真实配置一致
+    const onCfgChanged = (): void => loadViews();
+    window.addEventListener('winbox:sources-changed', onCfgChanged);
+    window.addEventListener('winbox:profile-changed', onCfgChanged);
+    return () => {
+      window.removeEventListener('winbox:sources-changed', onCfgChanged);
+      window.removeEventListener('winbox:profile-changed', onCfgChanged);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // ★ 2026-09-30：换订阅 / 改检索词后右栏回到顶部 —— 否则沿用上一份订阅的滚动位置，
+  //   看上去像"列表里混着别的源"。
+  useEffect(() => {
+    srcColRef.current?.scrollTo({ top: 0 });
+  }, [paneId, q, views]);
 
   // 打开时外部点击 / Esc 关闭
   useEffect(() => {
@@ -237,7 +270,9 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
           role="listbox"
         >
           <div className="srcpick-pop-tip">
-            长按/右键切换源 · 共 {filtered.length} 个{multi && views ? ` · ${views.profiles.length} 份订阅` : ''}
+            {views
+              ? `长按/右键切换源 · 共 ${filtered.length} 个${multi ? ` · ${views.profiles.length} 份订阅` : ''}`
+              : '正在加载订阅…'}
           </div>
           <input
             className="srcpick-search"
@@ -265,7 +300,7 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
                 ))}
               </div>
             )}
-            <div className="srcpick-col-src">
+            <div className="srcpick-col-src" ref={srcColRef}>
               {filtered.length === 0 && (
                 <div className="srcpick-item muted">{paneSites.length === 0 ? '（未导入源）' : '（无匹配源）'}</div>
               )}

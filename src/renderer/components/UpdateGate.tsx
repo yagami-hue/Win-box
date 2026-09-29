@@ -63,7 +63,8 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
         const r = await client.updateCheck();
         if (!r.updateAvailable || !r.asset) return; // 已是最新 / 检查失败 → 放行
         setInfo(r);
-        setProgress({ phase: 'downloading', received: 0, total: r.asset.size, percent: 0, speed: 0 });
+        // ★ 2026-09-30：先进入「测速」阶段文案（主进程测完会推最快线路，再进下载阶段）
+        setProgress({ phase: 'speedtest', received: 0, total: r.asset.size, percent: 0, speed: 0 });
         void downloadAndInstall();
       } catch {
         /* 检查失败：不锁死软件 */
@@ -78,11 +79,15 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
   const received = progress?.received || 0;
   const percent = progress?.phase === 'done' || progress?.phase === 'launching' ? 100 : progress?.percent || 0;
   const launching = progress?.phase === 'launching';
+  /** ★ 2026-09-30：下载前会先给各代理线路测速（挑最快的），此阶段不显示字节进度 */
+  const speedtest = progress?.phase === 'speedtest';
   const statusText = error
     ? '下载失败'
     : launching
       ? '安装程序已启动，即将退出本程序…'
-      : `正在下载 ${info.asset?.name || ''}`;
+      : speedtest
+        ? progress?.message || '正在测速选择最快的下载线路…'
+        : `正在下载 ${info.asset?.name || ''}`;
 
   return (
     <>
@@ -107,10 +112,10 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
               <div className="upd-status">
                 <span className="muted">{statusText}</span>
                 <span className="muted">
-                  {launching ? '' : `${formatBytes(received)} / ${formatBytes(total)} · ${percent}%`}
+                  {launching || speedtest ? '' : `${formatBytes(received)} / ${formatBytes(total)} · ${percent}%`}
                 </span>
               </div>
-              {!launching && !!progress?.speed && (
+              {!launching && !speedtest && !!progress?.speed && (
                 <div className="muted upd-speed">{formatBytes(progress.speed)}/s</div>
               )}
             </>

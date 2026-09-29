@@ -88,6 +88,31 @@ describe('classifyPlayLink — 协议识别结论', () => {
     expect(r.externalLink).toBeUndefined();
   });
 
+  // ★ 2026-09-30（用户报「包里的直播源播不了」）：rtmp/rtsp 直播流此前原样透传 ⇒ `<video>` 黑屏无提示
+  it('rtmp / rtsp / mms → 上屏原因 + 复制链接（Chromium 无载体）', () => {
+    for (const raw of [
+      'rtmp://live.test/app/stream',
+      'rtmps://live.test/app/stream',
+      'rtsp://10.0.0.2:554/live',
+      'rtspu://10.0.0.2/live',
+      'mms://live.test/ch',
+      'mmsh://live.test/ch',
+    ]) {
+      const r = classifyPlayLink(raw);
+      expect(r.kind).toBe('rtmp');
+      expect(r.url).toBe('');
+      expect(r.unsupported).toContain('rtmp/rtsp');
+      expect(r.externalLink).toBe(raw); // 供主进程复制剪贴板 → 可粘进 PotPlayer/VLC
+    }
+  });
+
+  it('rtmp 被 thunder 包裹 → 同样给出「无载体」结论（不透传黑屏）', () => {
+    const r = classifyPlayLink(thunder('rtmp://live.test/app/stream'));
+    expect(r.kind).toBe('rtmp');
+    expect(r.unsupported).toContain('rtmp/rtsp');
+    expect(r.externalLink).toBe('rtmp://live.test/app/stream');
+  });
+
   it('thunder 解码失败 → 明确报「解码失败」', () => {
     const r = classifyPlayLink('thunder://' + Buffer.from('not-wrapped').toString('base64'));
     expect(r.unsupported).toContain('thunder 链接解码失败');
