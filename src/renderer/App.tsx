@@ -17,8 +17,8 @@ import AboutPage from './pages/AboutPage';
 /** ★ 2026-09-29：启动强制更新门禁（本地版本低于 GitHub 最新 Release 时遮挡全界面） */
 import UpdateGate from './components/UpdateGate';
 import { loadUiMemory, saveUiMemory } from './lib/uiMemory';
+import { useShowDiscover } from './lib/uiPrefs';
 import { useTheme } from './lib/theme';
-import { TOP_NAV_THEMES } from './lib/themeTokens';
 import { client } from './api/client';
 import type { Episode } from '../shared/types';
 
@@ -99,8 +99,7 @@ const AP_GROUPS: { label: string; items: typeof NAV }[] = [
 
 /**
  * 页面外壳（布局路由）：承载「页面切换过渡动画」。
- * ★ 2026-09-24（用户定稿）：以 pathname 为 key → 切页时容器重建并播放一次入场动画
- *   （淡入 + 轻微上移，苹果 / Netflix 式）。用布局路由 + Outlet 而非嵌套 Routes，
+ * ★ 2026-09-24（用户定稿）：以 pathname 为 key → 切页时容器重建并播放一次入场动画（淡入 + 轻微上移，苹果 / Netflix 式）。用布局路由 + Outlet 而非嵌套 Routes，
  *   避免相对路径解析问题；query 变化（如 HomePage 清 `?agg=`）不改 pathname → 不重播动画。
  */
 function PageShell() {
@@ -123,10 +122,9 @@ export default function App() {
 function AppShell() {
   const nav = useNavigate();
   const loc = useLocation();
-  /** ★ 2026-09-24：四套皮肤（经典深/浅 + Netflix + 哔哩哔哩）；Netflix/B 站用「顶部导航」替代侧边栏
-   *  ★ 2026-09-29：新增第五套 Apple（macOS）皮肤，走侧边栏布局 */
+  /** ★ 2026-09-30（用户要求）：三套皮肤 —— 网飝 / 哔哔（都是「顶部导航一体化」外壳）+ 大果（独立外壳，见下）。
+   *  两个经典主题（经典深/浅）与 sidebar 版式已删除。 */
   const theme = useTheme();
-  const topNav = TOP_NAV_THEMES.includes(theme);
   /**
    * ★ 2026-09-29（用户要求「完全改布局」）：Apple 皮肤 = **独立外壳**，不复用经典/Netflix 骨架：
    *   全宽 Liquid Glass 工具栏（左置交通灯 + 返回箭头 + 页面标题 + 右侧搜索/换源）
@@ -134,6 +132,21 @@ function AppShell() {
    *   ＋ 内容区（Apple TV 式精选轮播 + 内容栏，见 DiscoverPage / apple.css）。
    */
   const apple = theme === 'apple';
+  /**
+   * ★ 2026-09-30（用户要求）：配置页可关掉「发现」页（默认展示）。
+   *   关掉后：导航里不出现「发现」；默认落地页从 `/` 改为 `/home`（源主页）。
+   */
+  const showDiscover = useShowDiscover();
+  const navItems = showDiscover ? NAV : NAV.filter((n) => n.to !== '/');
+  const apGroups = AP_GROUPS
+    .map((g) => ({ ...g, items: g.items.filter((n) => showDiscover || n.to !== '/') }))
+    .filter((g) => g.items.length > 0);
+  /** 返回/回退的落点：发现被关掉时回「点播」 */
+  const backHome = showDiscover ? '/' : '/home';
+  useEffect(() => {
+    if (!showDiscover && loc.pathname === '/') nav('/home', { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showDiscover, loc.pathname]);
   const [appIcon, setAppIcon] = useState('');
   useEffect(() => {
     if (!apple) return;
@@ -153,7 +166,7 @@ function AppShell() {
   /** 工具栏返回箭头（‹）：macOS 窗口的导航回退 */
   const goBack = (): void => {
     if (window.history.length > 1) nav(-1);
-    else nav('/', { replace: true });
+    else nav(backHome, { replace: true });
   };
   // 首次启动免责声明弹窗：已同意过（localStorage 标记）则不再弹出
   const [disclaim, setDisclaim] = useState(() => {
@@ -172,10 +185,10 @@ function AppShell() {
       if (typing) return;
       const altLeft = e.altKey && e.key === 'ArrowLeft';
       const backspace = e.key === 'Backspace';
-      if ((altLeft || backspace) && loc.pathname !== '/') {
+      if ((altLeft || backspace) && loc.pathname !== backHome) {
         e.preventDefault();
         if (window.history.length > 1) nav(-1);
-        else nav('/', { replace: true });
+        else nav(backHome, { replace: true });
       }
     };
     window.addEventListener('keydown', onKey);
@@ -186,6 +199,10 @@ function AppShell() {
   // 初始化加载历史记录
   useEffect(() => {
     loadUiMemory();
+    // ★ 2026-09-30（用户要求「软件关闭后，所有的墓碑机制都应该脱钩」）：
+    //   页面状态类记忆（搜索态/浏览态/详情态）的**脱钩在 renderer/main.tsx 挂载前完成** ——
+    //   必须早于首屏渲染，否则 HomePage 会先从 uiMem 恢复出上一次的搜索界面（用户报的现象）。
+    //   会话凭据 = 主进程 sessionId（每次启动必变）；观看历史/播放进度照常跨启动保留。
     // ★ 持久化兜底：Electron 关闭窗口/刷新可能不触发 React 卸载 cleanup，
     //   这里监听确定性退出信号立即写盘，保证重启后历史/进度仍在。
     const flush = () => saveUiMemory();
@@ -410,7 +427,7 @@ function AppShell() {
               {appIcon ? <img className="ap-brand-ico" src={appIcon} alt="" draggable={false} /> : <span className="ap-brand-dot" />}
               <span className="ap-brand-name">Win-Box</span>
             </div>
-            {AP_GROUPS.map((g) => (
+            {apGroups.map((g) => (
               <div key={g.label} className="ap-group">
                 <div className="ap-group-label">{g.label}</div>
                 {g.items.map((n) => (
@@ -431,48 +448,24 @@ function AppShell() {
   }
 
   return (
-    <div className={`app${topNav ? ' nf' : ''} ${theme}`.trim()}>
+    <div className={`app nf ${theme}`.trim()}>
       {disclaim && DisclaimerModal}
-      {/* Netflix / 哔哩哔哩皮肤：**无侧边栏**（导航移到顶部的 .nf-nav），经典主题保持原侧边栏 */}
-      {!topNav && (
-        <aside className="sidebar">
-          <div className="logo">Win-Box</div>
-          {NAV.map((n) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={n.end}
-              className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
-            >
-              <span className="nav-ico">{n.ico}</span>
-              <span className="nav-txt">{n.label}</span>
+      <main className="main">
+        {/* ★ 2026-09-24：**一体化顶栏** —— 网飝 / 哔哔把标题栏（窗口控制）并进导航条同一行，
+            不再单独占一行（此前隐藏标题文字后 space-between 把按钮挤到左上，且看起来像两行） */}
+        <nav className="nf-nav">
+          <span className="nf-logo">WIN-BOX</span>
+          {navItems.map((n) => (
+            <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => 'nf-link' + (isActive ? ' active' : '')}>
+              {n.label}
             </NavLink>
           ))}
-          <div style={{ flex: 1 }} />
-          {/* ★ 2026-09-24：经典皮肤侧栏底部常驻「当前源」（纯文字，长按/右键弹列表换源） */}
-          <SourcePicker variant="sidebar" />
-        </aside>
-      )}
-      <main className="main">
-        {/* ★ 2026-09-24：**一体化顶栏** —— 顶部导航皮肤把标题栏（窗口控制）并进导航条同一行，
-            不再单独占一行（此前隐藏标题文字后 space-between 把按钮挤到左上，且看起来像两行） */}
-        {topNav ? (
-          <nav className="nf-nav">
-            <span className="nf-logo">WIN-BOX</span>
-            {NAV.map((n) => (
-              <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => 'nf-link' + (isActive ? ' active' : '')}>
-                {n.label}
-              </NavLink>
-            ))}
-            <span className="nf-spacer" />
-            {/* ★ 2026-09-24：右上角搜索按钮（面板含热搜 + 自动联想）与「源名纯文字」换源入口 */}
-            <SearchPanel />
-            <SourcePicker />
-            <TitleBar />
-          </nav>
-        ) : (
+          <span className="nf-spacer" />
+          {/* ★ 2026-09-24：右上角搜索按钮（面板含热搜 + 自动联想）与「源名纯文字」换源入口 */}
+          <SearchPanel />
+          <SourcePicker />
           <TitleBar />
-        )}
+        </nav>
         {routesNode}
       </main>
     </div>

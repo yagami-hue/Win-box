@@ -36,7 +36,9 @@ import type {
   LiveEpgResult,
 } from '../../shared/types';
 import type { EngineHost } from '../../engine/ports';
-import { userDataDir, cacheDir, resourcesDir, spiderCacheDir } from '../util/paths';
+// ★★ 2026-09-30：JS 沙箱改在 worker 线程执行（同步 req 不再冻主进程，见 engine/js/worker/protocol.ts）
+import { createPooledSandboxFactory } from '../../engine/js/worker/JsWorkerPool';
+import { userDataDir, cacheDir, resourcesDir, spiderCacheDir, distDir } from '../util/paths';
 import { safeStorageDriveCodec } from '../util/driveCodec';
 import {
   driveBindHintFromPlaySources,
@@ -285,6 +287,16 @@ export class SpiderHost {
       jsLibDir: join(resourcesDir(), 'js-lib'),
       driveTokens: () => this.drives.list(),
     };
+    // ★★ 2026-09-30（用户报「另一台设备用此本地包搜索时卡死」）：JS 蜘蛛改在 **worker 线程**里跑 ——
+    //   实测根因：JS 源的同步 `req()` 由 spawnSync 实现，会把主进程冻住 0.4~1.5s/次，
+    //   指向本机回环（`/pkg/…` 自家本地代理）时更会与主进程互等死锁（实测 11.6s，界面假死）。
+    //   搬进 worker 后：阻塞只卡该 worker，超时 `terminate()` 重建。
+    //   worker 产物 `dist/js-worker.cjs` 随主进程一起构建（scripts/build-main.mjs）；
+    //   打包态在 app.asar 内 —— 父进程 readFileSync 取码 + `new Worker(code, {eval:true})`，无需解包。
+    //   （host 建好后再挂，避免自引用）
+    host.jsSandboxFactory = createPooledSandboxFactory(host, join(distDir(), 'js-worker.cjs'));
+    // ★ 宿主单例（见 get host() 注释）：vm/桥/预备探测共用 —— 不能是「每次访问 new 一个」
+    this.engineHost = host;
     // JVM 桥（等效 DexClassLoader）：resources/jvm 内嵌 jre+d2j+stubs+libs
     this.bridge = new JarSpiderBridge(
       {
@@ -401,14 +413,19 @@ export class SpiderHost {
     if (s.danmaku) this.danmakuStore.settings = s.danmaku;
   }
 
+  /**
+   * ★★ 2026-09-30（用户报「另一台设备搜索时软件卡死」的**真根因**）：
+   *   此前 `get host()` 每次访问都**新建**一个只带 http/kv/logger/driveTokens 的对象 ——
+   *   而 `searchAll` 的预备探测（runtimeState/warmup/prewarm）用 `this.host` 调
+   *   `spiderFactory.getCSP()` **首次**构造蜘蛛，SpiderFactory 按 key+api+ext 缓存（不含 host），
+   *   于是 JS 蜘蛛拿到的是**没有 jsSandboxFactory / jsLibDir 的宿主**，之后 `vm.search` 复用的
+   *   就是这批实例 → 全部退回「进程内 node:vm + spawnSync 同步 req」→ 主进程照样被冻
+   *   （实测 400ms~1.5s/次，回环 URL 互等 10.9s）。宿主必须**单例**且带全部扩展字段。
+   */
+  private readonly engineHost: EngineHost;
+  /** 宿主单例（vm/桥/预备探测/warmup 共用同一对象，避免「同源两套宿主」再犯） */
   get host(): EngineHost {
-    return {
-      http: this.http,
-      kv: this.kv,
-      logger: this.logger,
-      // 网盘绑定凭据 → 引擎注入（jar 蜘蛛 init 时并入 ext；js 沙箱如用到同样可取）
-      driveTokens: () => this.drives.list(),
-    };
+    return this.engineHost;
   }
 
   // ---------------------------- 用户配置管理（任务 B） ----------------------------
@@ -1698,7 +1715,7 @@ export class SpiderHost {
     }
   }
 
-  private async playInner(key: string, flag: string, id: string): Promise<PlayResult> {
+  private async playInner(key: string, flag: string, id: string, retried = false): Promise<PlayResult> {
     const b = this.getSource(key);
     if (!b) throw new Error(`源不存在: ${key}`);
     // ★ 2026-09-29（用户报「部分资源夸克网盘播放还是存在播放失败」）：
@@ -1775,10 +1792,30 @@ export class SpiderHost {
       //   表现为「点了播放没反应/黑屏」，用户不知道要绑网盘。
       //   实测原话：`还未登录百度账号,请前往【配置中心】登录`（至臻源 · 百度线路）。
       //   这里翻译成「去绑定该网盘」的既有通道（parse:1 + needDriveCookieBind + message）。
+      //   ★★ 2026-09-30（用户报「潇洒/摸鱼这类配置，网盘资源播不了、已绑定还每次都弹绑定窗」）：
+      //     **必须先看本地绑定态** —— 已绑定却收到「需登录」的提示，说明是**常驻蜘蛛的旧状态**
+      //     （cookie 文件在它 init 之后才写入 / `%TEMP%` 被系统清理过 / 绑定前的实例仍被复用）；
+      //     此时正确动作是「重置蜘蛛池并重试一次」而不是让用户去绑定（他会看到永远弹的绑定窗）。
       if (!r.url && r.message) {
         const prov = driveBindProviderFromText(String(r.message));
         if (prov) {
           this.markDriveBindNeeded(key);
+          const bound = !!String((this.driveList() as Record<string, string>)[prov] || '').trim();
+          if (bound && !retried) {
+            this.logger.w(`play: 蜘蛛称「需登录${prov}」但本地已绑定 → 重置蜘蛛池并重试一次: ${key}`);
+            this.resetSpidersAfterDriveChange();
+            return this.playInner(key, flag, id, true);
+          }
+          if (bound) {
+            this.logger.w(`play: 重试后蜘蛛仍称需登录「${prov}」→ 如实上屏（不再弹绑定窗）: ${key}`);
+            return {
+              ...r,
+              parse: 1,
+              message:
+                `该源取流失败（「${driveProviderLabel(prov)}」已绑定，无需重复绑定）：` +
+                `${String(r.message).slice(0, 100)}。多为源侧分享失效/该集已不在分享内，建议换线路或换源。`,
+            };
+          }
           this.logger.w(`play: 蜘蛛返回空地址且提示需登录「${prov}」→ 翻译为绑定提示: ${key}`);
           return {
             ...r,
@@ -1866,14 +1903,19 @@ export class SpiderHost {
       const msg = String((e as Error)?.message ?? e);
       if (looksLikeDriveBindFailure(msg)) {
         this.markDriveBindNeeded(key);
-        this.logger.w(`play 判定需要网盘 Cookie（已记入绑定清单）: ${key} — ${msg}`);
+        // ★ 2026-09-30：已绑定该网盘时不再引导「去绑定」（否则用户会以为绑定没生效）
+        const prov = driveBindProviderFromText(msg) || '';
+        const bound = !!String((this.driveList() as Record<string, string>)[prov] || '').trim();
+        this.logger.w(`play 判定需要网盘 Cookie（已记入绑定清单${bound ? '；该网盘已绑定' : ''}）: ${key} — ${msg}`);
         return {
           url: '',
           parse: 1,
           playUrl: '',
           flag,
           jx: 0,
-          message: '该源播放需要网盘 Cookie：请在点播页点「网盘绑定」填写账号（夸克 / UC / 百度 / 115）后重新播放',
+          message: bound
+            ? `该源取流失败（「${driveProviderLabel(prov)}」已绑定，无需重复绑定）：${msg.slice(0, 120)}`
+            : '该源播放需要网盘 Cookie：请在点播页点「网盘绑定」填写账号（夸克 / UC / 百度 / 115）后重新播放',
         } as PlayResult;
       }
       throw e;

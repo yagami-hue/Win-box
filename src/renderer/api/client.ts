@@ -61,7 +61,7 @@ interface ImportReturn {
 declare global {
   interface Window {
     api: {
-      system: { ping: () => Promise<IpcResult<string>>; icon: () => Promise<IpcResult<string>>; setTheme: (t: string) => Promise<IpcResult<void>>; quit: () => Promise<IpcResult<void>>; dataDir: () => Promise<IpcResult<DataDirInfo>> };
+      system: { ping: () => Promise<IpcResult<string>>; icon: () => Promise<IpcResult<string>>; setTheme: (t: string) => Promise<IpcResult<void>>; quit: () => Promise<IpcResult<void>>; dataDir: () => Promise<IpcResult<DataDirInfo>>; sessionId: () => Promise<IpcResult<string>> };
       config: {
         import: (a: { url?: string; json?: string }) => Promise<IpcResult<ImportReturn>>;
         listSites: () => Promise<IpcResult<SourceBean[]>>;
@@ -113,6 +113,9 @@ declare global {
         /** ★ 聚合搜索逐源进度（边搜边出）：返回退订函数 */
         onSearchAllProgress: (cb: (ev: SearchAllProgressEvent) => void) => () => void;
         play: (a: { key: string; flag: string; id: string }) => Promise<IpcResult<PlayResult>>;
+        /** ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定）——探测本机播放器 / 用当前地址拉起 */
+        detectPlayers: () => Promise<IpcResult<Array<{ id: string; name: string; path: string }>>>;
+        openExternal: (a: { url: string; path?: string }) => Promise<IpcResult<{ ok: boolean; player?: string; error?: string }>>;
       };
       live: {
         load: (index: number) => Promise<IpcResult<{ groups: LiveGroup[]; liveName: string }>>;
@@ -188,6 +191,9 @@ declare global {
         maximize: () => Promise<IpcResult<void>>;
         close: () => Promise<IpcResult<void>>;
         isMaximized: () => Promise<IpcResult<boolean>>;
+        // ★ 2026-09-30（用户要求）：播放器置顶按钮
+        setAlwaysOnTop: (on: boolean) => Promise<IpcResult<boolean>>;
+        isAlwaysOnTop: () => Promise<IpcResult<boolean>>;
       };
       net: {
         onSpeed: (cb: (kbs: number) => void) => () => void;
@@ -197,6 +203,8 @@ declare global {
       player: {
         open: (init: unknown) => Promise<IpcResult<void>>;
         switchEp: (epIndex: number) => Promise<IpcResult<void>>;
+        /** ★ 2026-09-30：订阅就绪 → 主进程重发最新 init（新窗口首推与订阅的竞态） */
+        ready: () => Promise<IpcResult<{ ok: boolean }>>;
         isOpen: () => Promise<IpcResult<{ open: boolean }>>;
         close: () => Promise<IpcResult<void>>;
         setMini: (isMini: boolean) => Promise<IpcResult<{ mini: boolean }>>;
@@ -292,9 +300,16 @@ export const client = {
   winMaximize: () => unwrap(window.api.win.maximize()),
   winClose: () => unwrap(window.api.win.close()),
   winIsMaximized: () => unwrap(window.api.win.isMaximized()),
+  // ★ 2026-09-30（用户要求）：播放器「置顶」按钮
+  winSetAlwaysOnTop: (on: boolean) => unwrap(window.api.win.setAlwaysOnTop(on)),
+  winIsAlwaysOnTop: () => unwrap(window.api.win.isAlwaysOnTop()),
   appQuit: () => unwrap(window.api.system.quit()),
+  /** ★ 2026-09-30：本次主进程启动的会话标识（渲染层判定「新一次启动」→ 丢页面状态类记忆） */
+  systemSessionId: () => unwrap(window.api.system.sessionId()),
   playerOpen: (init: unknown) => unwrap(window.api.player.open(init)),
   playerSwitchEp: (epIndex: number) => unwrap(window.api.player.switchEp(epIndex)),
+  /** ★ 2026-09-30：播放器窗口订阅就绪 → 重发最新 init（修新窗口「等待播放…」竞态） */
+  playerReady: () => unwrap(window.api.player.ready()),
   playerIsOpen: () => unwrap(window.api.player.isOpen()),
   playerClose: () => unwrap(window.api.player.close()),
   playerOnInit: (cb: (init: unknown) => void) => window.api.player.onInit(cb),
@@ -378,6 +393,9 @@ export const client = {
   netSpeed: (cb: (kbs: number) => void) => window.api.net.onSpeed(cb),
   /** ★ 2026-09-29 磁力（BT）：探测本机外部播放器（MKV/HEVC 接力；配置页可指定路径） */
   btDetectPlayers: () => unwrap(window.api.bt.detectPlayers()),
+  /** ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定）——探测本机播放器 / 用当前地址拉起 */
+  vodDetectPlayers: () => unwrap(window.api.vod.detectPlayers()),
+  vodOpenExternal: (url: string, path?: string) => unwrap(window.api.vod.openExternal({ url, path })),
   /** ★ 2026-09-29 启动强制更新：检查 / 下载 / 拉起安装程序（进度走 onUpdateProgress） */
   updateCheck: () => unwrap(window.api.update.check()),
   updateDownload: () => unwrap(window.api.update.download()),

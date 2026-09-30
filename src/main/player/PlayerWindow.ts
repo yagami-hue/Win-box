@@ -196,6 +196,19 @@ export function playerSwitchEpisode(epIndex: number): void {
   }
 }
 
+/**
+ * ★ 2026-09-30：渲染层订阅就绪 → 重发缓存的最新 init。
+ *
+ * 真根因：新窗口的 `did-finish-load` 可能**早于** React 挂载后 `ipcRenderer.on('player:init')` 的订阅，
+ *   那一发 init 直接丢掉 → 播放器窗口永远停在「等待播放…」（生产产物必现，dev 因页面加载慢反而侥幸不中）。
+ *   改为**对方就绪再发**：重发同一份（序号相同）会被渲染层的 `acceptInitSeq` 判重忽略，不会重复应用。
+ */
+export function playerResendInit(): void {
+  const w = playerWin;
+  if (!w || w.isDestroyed() || !pendingInit) return;
+  w.webContents.send('player:init', pendingInit);
+}
+
 /** 关闭播放器窗口（窗口关闭亦可走 win:close） */
 export function closePlayerWindow(): void {
   if (playerWin && !playerWin.isDestroyed()) playerWin.close();

@@ -113,6 +113,11 @@ export function extRelevant(s: Pick<SourceBean, 'type' | 'api'>): boolean {
  * 这类源是**搜索聚合型**（蜘蛛只做 searchContent，detailContent 返回空或只有简介），
  * 点进详情页必然「无详情 / 无剧集」；正确姿势是拿片名做一次全源搜索，换到能播的源。
  *
+ * ★ 2026-09-30（用户报「饭太硬的豆瓣主页点了还是无详情」）：fty/饭太硬 的豆瓣片单源写成
+ *   `key=点我切源 / name=豆豆┃片单 / api=csp_DouDouGuard` —— 三个字段里**都没有「豆瓣/douban」**
+ *   （`豆豆`/`DouDou` 是它的自有叫法），旧判据抓不到 → 点击进详情 → 空详情。
+ *   故补上 `豆豆|doudou|doudouguard` 这一族别名（摸鱼/潇洒侧则写 `csp_Douban` + 「豆瓣」名）。
+ *
  * ★ 只作**点击分流**的加速判据；运行时兜底见 `detailIsEmpty()`（详情确实为空时同口径）。
  */
 export function isDoubanLikeSource(
@@ -121,7 +126,7 @@ export function isDoubanLikeSource(
   if (!s) return false;
   const ext = typeof s.ext === 'string' ? s.ext : JSON.stringify(s.ext ?? '');
   const blob = `${s.key || ''} ${s.name || ''} ${String(s.api || '').split(';')[0]} ${ext}`.toLowerCase();
-  return /豆瓣|douban/.test(blob);
+  return /豆瓣|douban|豆豆|doudou/.test(blob);
 }
 
 /** 详情结果是否「没有可播剧集」（各 flag 全空）—— 运行时兜底判据 */

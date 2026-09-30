@@ -509,6 +509,54 @@ export function loadUiMemory() {
 // 在 App.tsx 中调用 loadUiMemory() 初始化，在页面卸载时调用 saveUiMemory() 保存
 // 示例：在 App.tsx 的 useEffect 中 load，在各个页面的 useEffect(unmount) 中 save
 
+/** 会话标记键（**主进程 sessionId** 落在这里；两窗口共享 localStorage） */
+const SESSION_ID_KEY = 'winbox-session-id';
+
+/**
+ * ★★ 2026-09-30（用户要求「软件关闭后，所有的墓碑机制都应该脱钩」）★★
+ *
+ * 丢**页面状态类**记忆：浏览态 `home`（含搜索态 `search`）、详情态 `detail`、播放来源 `playSource`。
+ * 这类记忆只在**本会话**内有意义（「搜索 → 详情 → 返回」要能回到搜索页；「点播 → 详情 → 返回」要回到原分类），
+ * 跨启动保留只会让用户重启后点「点播」被拉回上一次的搜索界面（用户报的正是这个）。
+ * 跨启动保留的只有**用户资产**：观看历史 `history`、播放进度 `playTime`、历史删除墓碑 `deleted`。
+ *
+ * ★ `updatedAt` 必须 bump 成当前时间 —— `pickHomeForSave()` 取「更新的那份」，
+ *   不 bump 的话写盘时盘上那份旧 home（含旧搜索态）会被判定为更新而**原地复活**。
+ */
+export function dropSessionUiMemory(): void {
+  uiMem.home = { key: '', tid: '', pg: 1, scrollTop: 0, filters: {}, search: null, updatedAt: Date.now() };
+  uiMem.detail.clear();
+  uiMem.playSource = null;
+  saveUiMemory();
+}
+
+/**
+ * ★ 会话凭据 = **主进程给的 sessionId**（进程启动时生成，重启必变）。
+ *
+ * 为什么不看 sessionStorage：Electron/Chromium 会把 sessionStorage **落盘**
+ * （`<userData>/Session Storage/` leveldb）并在下次启动给同一 origin 恢复 ——
+ * 实测「重启后 sessionStorage 仍在」，据此判定"新会话"会**永远判不出重启**（本次踩过）。
+ * @returns 是否判定为「新一次启动」并已执行脱钩
+ */
+export function dropSessionUiMemoryIfRestarted(sessionId: string): boolean {
+  const sid = String(sessionId || '');
+  if (!sid) return false;
+  let prev = '';
+  try {
+    prev = localStorage.getItem(SESSION_ID_KEY) || '';
+  } catch {
+    return false; // 存储不可用：保守不动
+  }
+  if (prev === sid) return false;
+  try {
+    localStorage.setItem(SESSION_ID_KEY, sid);
+  } catch {
+    /* ignore */
+  }
+  dropSessionUiMemory();
+  return true;
+}
+
 // 清除历史记录与浏览状态（可选功能）
 export function clearUiMemory() {
   uiMem.home = { key: '', tid: '', pg: 1, scrollTop: 0, filters: {}, search: null };

@@ -43,6 +43,15 @@ export function jsLibDir(): string {
   return join(cacheDir(), 'js-lib');
 }
 
+/**
+ * ★ 2026-09-30：主进程产物目录（main.cjs / preload.cjs / **js-worker.cjs** 所在）。
+ *   开发态 = 源码树 `dist/`（`__dirname` 即它，esbuild 打成 CJS）；打包态 = `app.asar/dist/`
+ *   —— `js-worker` 用 `readFileSync` 取码 + `new Worker(code,{eval:true})` 启动，asar 内可直接读。
+ */
+export function distDir(): string {
+  return app.isPackaged ? join(app.getAppPath(), 'dist') : __dirname;
+}
+
 /** 组装当前运行时的解析上下文 */
 function ctx(): ResolveCtx {
   const c: ResolveCtx = { packaged: app.isPackaged };

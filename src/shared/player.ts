@@ -17,15 +17,23 @@ export interface PlayerSettings {
    * （探测顺序 PotPlayer → VLC → mpv → MPC-HC，见 main/torrent/externalPlayer.ts）。
    */
   btExternalPlayer: string;
+  /**
+   * ★ 2026-09-30（用户要求「点播也应该支持绑定外部播放器，和磁力区分开」）：
+   * **点播**外部播放器的路径（空 = 自动探测常见安装位置）——与磁力分开绑定。
+   * 用途：播放器控制条的「外部播放器」按钮 —— 把当前点播地址（必要时是本机 `/play` 中继）交给它打开。
+   */
+  vodExternalPlayer: string;
 }
 
 export const DEFAULT_PLAYER_SETTINGS: PlayerSettings = {
   m3u8Purify: false,
   btExternalPlayer: '',
+  vodExternalPlayer: '',
 };
 
 /** 归一（容错旧值/缺字段；纯函数，配置页与主进程共用） */
 export function normalizePlayerSettings(s: Partial<PlayerSettings> | null | undefined): PlayerSettings {
-  const p = s && typeof s.btExternalPlayer === 'string' ? s.btExternalPlayer.trim() : '';
-  return { m3u8Purify: !!(s && s.m3u8Purify), btExternalPlayer: p };
+  const bt = s && typeof s.btExternalPlayer === 'string' ? s.btExternalPlayer.trim() : '';
+  const vod = s && typeof s.vodExternalPlayer === 'string' ? s.vodExternalPlayer.trim() : '';
+  return { m3u8Purify: !!(s && s.m3u8Purify), btExternalPlayer: bt, vodExternalPlayer: vod };
 }

@@ -123,10 +123,11 @@ describe('pickPlayers — 只保留真实存在的（注入 exists）', () => {
   });
 });
 
-describe('PlayerSettings 归一 — btExternalPlayer（容错旧配置）', () => {
+describe('PlayerSettings 归一 — btExternalPlayer / vodExternalPlayer（容错旧配置）', () => {
   it('默认值：m3u8Purify=false、外部播放器留空（= 自动探测）', () => {
     expect(DEFAULT_PLAYER_SETTINGS.btExternalPlayer).toBe('');
-    expect(normalizePlayerSettings(undefined)).toEqual({ m3u8Purify: false, btExternalPlayer: '' });
+    expect(DEFAULT_PLAYER_SETTINGS.vodExternalPlayer).toBe('');
+    expect(normalizePlayerSettings(undefined)).toEqual({ m3u8Purify: false, btExternalPlayer: '', vodExternalPlayer: '' });
   });
 
   it('路径两端空白被去掉；非字符串一律回落空串（老档案里可能是布尔/数字）', () => {
@@ -137,5 +138,14 @@ describe('PlayerSettings 归一 — btExternalPlayer（容错旧配置）', () =
     // 老配置（无该字段）也能读：m3u8 开关保持
     expect(normalizePlayerSettings({ m3u8Purify: true }).btExternalPlayer).toBe('');
     expect(normalizePlayerSettings({ m3u8Purify: true }).m3u8Purify).toBe(true);
+  });
+
+  it('★ 2026-09-30：点播外部播放器与磁力分开（vodExternalPlayer 独立归一）', () => {
+    expect(normalizePlayerSettings({ vodExternalPlayer: '  C:\\PF\\PotPlayer\\PotPlayerMini64.exe  ' }).vodExternalPlayer)
+      .toBe('C:\\PF\\PotPlayer\\PotPlayerMini64.exe');
+    expect(normalizePlayerSettings({ vodExternalPlayer: 5 as unknown as string }).vodExternalPlayer).toBe('');
+    // 只绑磁力时，点播侧保持空（= 自动探测），两边互不影响
+    expect(normalizePlayerSettings({ btExternalPlayer: 'D:\\vlc.exe' }).vodExternalPlayer).toBe('');
+    expect(normalizePlayerSettings({ vodExternalPlayer: 'D:\\vlc.exe' }).btExternalPlayer).toBe('');
   });
 });

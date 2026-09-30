@@ -6,9 +6,6 @@ import { sourceAvailability } from '../../engine/vod/sourceAvailability';
 import { isDoubanLikeSource } from '../../engine/config/sourceKind';
 import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSearch';
 import { uiMem, schedulePersist, saveUiMemory, type HomeSearchMem } from '../lib/uiMemory';
-import SourcePicker from '../components/SourcePicker';
-import { useTheme } from '../lib/theme';
-import { TOP_NAV_THEMES, TOOLBAR_THEMES } from '../lib/themeTokens';
 import { getSessionSort, setSessionSort } from '../lib/sessionSort';
 import { wrapImageUrlForRelay, needsDriveBind } from '../../shared/driveProvider';
 import { pickCover, preloadImage } from '../lib/coverPick';
@@ -18,12 +15,9 @@ type SortClassView = { id: string; name: string; flag?: string; filters?: Filter
 
 export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string, id: string, pic?: string, name?: string) => void }) {
   /**
-   * ★ 2026-09-24（用户定稿）：TopNav 皮肤（Netflix / 哔哩哔哩）的顶栏已自带「搜索（全部源搜索）+ 换源」，
-   *   点播页顶栏因此**不再放源内搜索与换源入口** —— 避免两处重复；经典皮肤保持原样（含源内搜索）。
-   * ★ 2026-09-29：Apple 皮肤的全宽工具栏同样自带搜索/换源 ⇒ 用 TOOLBAR_THEMES 判定去重
-   *   （它不是 TopNav 布局，但这一排同样重复）。
+   * ★ 2026-09-24（用户定稿）：点播页**不放源内搜索与换源入口** ——
+   *   三套皮肤（网飝 / 哔哔 / 大果）的顶栏/工具栏都已自带「全源搜索 + 换源」，此处再放一遍是重复。
    */
-  const toolbarSkin = TOOLBAR_THEMES.includes(useTheme());
   const [sites, setSites] = useState<SourceBean[]>([]);
   const [key, setKey] = useState('');
   const [classes, setClasses] = useState<SortClassView[]>([]);
@@ -971,41 +965,12 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   return (
     <>
       {/**
-        * ★ 2026-09-24（用户定稿）：TopNav 皮肤（Netflix / 哔哩哔哩）的**浏览态不显示这一行** ——
-        *   搜索与换源都已在顶栏（🔍 搜索 / 源名），此处再放一遍是重复；整行隐藏让内容网格直接铺满。
-        *   仅「全源搜索结果态」保留（需要「返回浏览」出口与条数状态）。
-        * ★ 2026-09-29：Apple 皮肤（工具栏皮肤）同样适用。
+        * ★ 2026-09-24（用户定稿）：三套皮肤（网飝 / 哔哔 / 大果）的顶栏都已自带「全源搜索 + 换源」——
+        *   浏览态整行不显示（避免重复）；仅「全源搜索结果态」保留（需要「返回浏览」出口与条数状态）。
         */}
-      {(!toolbarSkin || aggMode) && (
+      {aggMode && (
       <div className="topbar">
-        {/* 经典皮肤：换源改手机 TVBox 式（源名纯文字，长按/右键弹列表），搜索仍走源内 */}
-        {!toolbarSkin && <SourcePicker sites={sites} current={key} onPick={chooseSource} disabled={aggMode} />}
-        {!toolbarSkin && (
-          <input
-            placeholder={searchAllSources ? '全源搜索：一次搜遍所有源（结果边搜边出）…' : '搜索当前源…'}
-            value={wd}
-            onChange={(e) => setWd(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && doSearch()}
-            style={{ flex: 1, maxWidth: 420 }}
-          />
-        )}
-        {!toolbarSkin && (
-          <label className="tag" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, cursor: 'pointer', userSelect: 'none' }} title="默认只搜当前选中的源（快）；勾选后遍历全部可搜索源（慢）">
-            <input
-              type="checkbox"
-              style={{ accentColor: 'var(--accent)', margin: 0 }}
-              checked={searchAllSources}
-              onChange={(e) => setSearchAllSources(e.target.checked)}
-            />
-            全源搜索
-          </label>
-        )}
-        {!toolbarSkin && (
-          <button className="primary" onClick={() => void doSearch()} disabled={loading || !wd.trim()}>
-            {searchAllSources ? '全源搜索' : '搜索'}
-          </button>
-        )}
-        {aggMode && <button onClick={exitSearch}>返回浏览</button>}
+        <button onClick={exitSearch}>返回浏览</button>
         <span className="status" style={{ marginLeft: 'auto' }}>
           {loading
             ? aggScope === 'all'

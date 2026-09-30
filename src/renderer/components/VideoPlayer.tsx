@@ -300,6 +300,11 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const [castBusy, setCastBusy] = useState(false);
   const [castDevices, setCastDevices] = useState<DlnaDevice[]>([]);
   const [castMsg, setCastMsg] = useState('');
+  // ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定，配置页「播放」可指定路径）
+  const [extOpen, setExtOpen] = useState(false);
+  const [extBusy, setExtBusy] = useState(false);
+  const [extPlayers, setExtPlayers] = useState<Array<{ id: string; name: string; path: string }>>([]);
+  const [extMsg, setExtMsg] = useState('');
   const [buffered, setBuffered] = useState(0);
   const [vol, setVol] = useState(() => prefsRef.current!.vol);
   const [rate, setRate] = useState(() => prefsRef.current!.rate);
@@ -329,6 +334,20 @@ export default function VideoPlayer(props: VideoPlayerProps) {
    *     因此点播页的横幅/入口、本提示条与原「去点播页绑定」按钮**全部保留**，弹窗只作新增路径。
    */
   const [bindOpen, setBindOpen] = useState(false);
+  /**
+   * ★ 2026-09-30（用户要求）：播放器「置顶」按钮 —— 把当前窗口设为「始终置于其它窗口之上」。
+   *   初值从主进程实际状态读（独立播放器窗口重开/复用时显示仍正确）；点击后按返回值对齐。
+   *   状态双区分：图标填充 + `.vp-on`（accent 高亮 + 亮底）。
+   */
+  const [pinTop, setPinTop] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    void client.winIsAlwaysOnTop().then((v) => { if (alive) setPinTop(!!v); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, []);
+  const togglePinTop = (): void => {
+    void client.winSetAlwaysOnTop(!pinTop).then((v) => setPinTop(!!v)).catch(() => undefined);
+  };
   useEffect(() => {
     // provider 来源：主进程 play 检出（首选）→ URL 兜底（历史直连等未走 play 解析的路径，解析 /play?ck=）
     const prov = (driveBindProvider && String(driveBindProvider).trim()) || driveProviderFromUrl(url) || '';
@@ -1394,6 +1413,45 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     }
   }
 
+  // ★ 2026-09-30（用户要求）：点播外部播放器 —— 探测本机播放器 → 用**当前播放地址**拉起
+  //   （地址可能是本机 /play 中继；中继已在主进程注入 header/cookie，外部播放器直接吃这个 URL）
+  async function detectExtPlayers() {
+    setExtBusy(true);
+    setExtMsg('');
+    try {
+      const list = await client.vodDetectPlayers();
+      setExtPlayers(list);
+      if (!list.length) setExtMsg('未检测到本机播放器：可安装 PotPlayer / VLC / mpv / MPC-HC，或在「配置 → 播放」里填写路径');
+    } catch (e) {
+      setExtMsg((e as Error).message);
+    } finally {
+      setExtBusy(false);
+    }
+  }
+
+  function toggleExt() {
+    if (extOpen) {
+      setExtOpen(false);
+      return;
+    }
+    setExtOpen(true);
+    void detectExtPlayers();
+  }
+
+  async function openInExt(p: { name: string; path: string }) {
+    setExtBusy(true);
+    setExtMsg('');
+    try {
+      const r = await client.vodOpenExternal(url, p.path);
+      setExtMsg(r.ok ? `已用「${r.player || p.name}」打开` : (r.error || '打开失败'));
+      if (r.ok) window.setTimeout(() => setExtOpen(false), 1200);
+    } catch (e) {
+      setExtMsg((e as Error).message);
+    } finally {
+      setExtBusy(false);
+    }
+  }
+
   // 竖向音量条：pointerdown 定位 + pointermove 拖动时持续跟随。
   // 用 ref 同步拖动状态，避免 pointermove 高频回调读到过期 state。
   const onVolPointer = (e: React.PointerEvent) => {
@@ -1693,6 +1751,48 @@ export default function VideoPlayer(props: VideoPlayerProps) {
               </svg>
             </button>
           </div>
+          {/* ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定，见配置页「播放」）——
+              面板列出本机已装播放器（点名字即用当前地址拉起）；地址走本机中继，header/cookie 已注入 */}
+          <div className={`vp-cast${extOpen ? ' open' : ''}`} onClick={(e) => e.stopPropagation()}>
+            <div className={`vp-cpanel${extOpen ? ' open' : ''}`}>
+              <div className="vp-cpct">{extBusy ? '启动中…' : '用外部播放器打开'}</div>
+              {extPlayers.map((p) => (
+                <button key={p.path} className="vp-citem" disabled={extBusy} onClick={() => void openInExt(p)} title={p.path}>
+                  {p.name}
+                </button>
+              ))}
+              {extMsg && <div className="vp-cmsg">{extMsg}</div>}
+              <button className="vp-citem vp-crefresh" disabled={extBusy} onClick={() => void detectExtPlayers()}>重新检测</button>
+            </div>
+            <button className="vp-ctl" title="用外部播放器打开（绑定路径见「配置 → 播放」）" onClick={toggleExt}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13.5 4H20v6.5" />
+                <path d="M20 4l-8.6 8.6" />
+                <path d="M18.5 14v4a2.5 2.5 0 0 1-2.5 2.5H6A2.5 2.5 0 0 1 3.5 18V8A2.5 2.5 0 0 1 6 5.5h3.8" />
+              </svg>
+            </button>
+          </div>
+          {/* ★ 2026-09-30（用户要求）播放器置顶：开启后窗口始终浮在其它窗口之上（图标填充 + accent 高亮区分） */}
+          <button
+            className={`vp-ctl${pinTop ? ' vp-on' : ''}`}
+            title={pinTop ? '置顶：开（点击取消）' : '置顶：关（点击把窗口固定在最上层）'}
+            aria-pressed={pinTop}
+            onClick={togglePinTop}
+          >
+            {pinTop ? (
+              // 已置顶：实心填充（配合 .vp-on 的 accent 高亮，一眼区分）
+              <svg width="15" height="15" viewBox="0 0 24 24">
+                <path fill="currentColor" d="M9.6 3h4.8l.7 6.1 3.1 3.1V14H5.8v-1.8l3.1-3.1L9.6 3Z" />
+                <path d="M12 14v6.6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+              </svg>
+            ) : (
+              // 未置顶：描边空心
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9.6 3h4.8l.7 6.1 3.1 3.1V14H5.8v-1.8l3.1-3.1L9.6 3Z" />
+                <path d="M12 14v6.6" />
+              </svg>
+            )}
+          </button>
           <button
             className="vp-ctl"
             title={`字幕：${subEnabled ? '开' : '关'}（左键开关 · 右键/长按调整）`}

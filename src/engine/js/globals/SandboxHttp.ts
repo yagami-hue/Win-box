@@ -68,8 +68,8 @@ function buildBody(opts: HttpOptions): { headers: Record<string, string>; body?:
   return { headers, body: String(opts.data) };
 }
 
-/** options → 引擎 HttpRequest（redirect 默认 1，Req.java:69） */
-function toRequest(url: string, opts: HttpOptions): HttpRequest {
+/** options → 引擎 HttpRequest（redirect 默认 1，Req.java:69）—— 同时供 drpy2 兼容全局（batchFetch）复用 */
+export function toRequest(url: string, opts: HttpOptions): HttpRequest {
   const rawMethod = String(opts.method ?? 'get').toLowerCase(); // Req.java:54 默认 get
   const method: 'get' | 'post' | 'head' =
     rawMethod === 'post' ? 'post' : rawMethod === 'head' || rawMethod === 'header' ? 'head' : 'get'; // Connect.java:68 "header" 亦为 head
@@ -208,9 +208,38 @@ function requestSyncIn(host: EngineHost, url: string, opts: HttpOptions): HttpRe
       const res = host.httpSync(req);
       return toRes(res);
     }
-    return spawnSyncRequest(req);
+    // ★★ 2026-09-30 排障埋点（用户报「另一台设备搜索时卡死」）：spawnSync 会**同步阻塞主进程**，
+    //   期间界面/IPC/本地代理服务全部停摆。超过 200ms 就记一行（含目标主机），
+    //   用来区分「某个源在同步请求上拖住了整个软件」还是别的原因。
+    const t0 = Date.now();
+    const res = spawnSyncRequest(req);
+    const ms = Date.now() - t0;
+    if (ms >= 200) {
+      let host0 = url;
+      try { host0 = new URL(url).host; } catch { /* 原样 */ }
+      host.logger.w(`js-sync 同步请求阻塞主进程 ${ms}ms（${req.method} ${host0}）${loopbackHint(url)}`);
+    }
+    return res;
   } catch {
     return errorRes();
+  }
+}
+
+/**
+ * ★★ 2026-09-30（「搜索时软件卡死」根因）：
+ *   同步请求若指向**本机回环**（我们自己的本地代理 127.0.0.1:9978），会与主进程**互等死锁** ——
+ *   spawnSync 把主进程阻塞住等子进程，而子进程请求的正是主进程里那个 HTTP 服务（它也停摆了），
+ *   只能等到子进程超时（默认 10s + 5s）才返回。日志实证：`97_search.js` 的
+ *   `req('http://127.0.0.1:9978/pkg/0/config/env.json')` 之后整整 62s 无任何日志（软件假死）。
+ *   命中即给出可读提示，便于定位是哪个源在用回环同步请求。
+ */
+function loopbackHint(url: string): string {
+  try {
+    const u = new URL(url);
+    if (!/^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)) return '';
+    return ` ⚠ 指向本机回环（${u.pathname.split('/')[1] || ''} 路由）——与主进程本地代理互等，会卡满超时`;
+  } catch {
+    return '';
   }
 }
 

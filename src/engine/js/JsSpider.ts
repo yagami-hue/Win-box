@@ -9,7 +9,7 @@
 // 两套命名都支持（callJs 传候选名列表），并以"方法名探测"日志记录实际命中的风格。
 import { Spider, type SpiderInit } from '../spider/Spider';
 import type { EngineHost } from '../ports';
-import { JsSandbox } from './JsSandbox';
+import { JsSandbox, type JsSandboxLike } from './JsSandbox';
 import { enrichExt } from '../spider/driveExt';
 
 /** 调用超时：首页/分类 20s，其它 15s（任务书约定） */
@@ -17,7 +17,7 @@ const TIMEOUT_HOME = 20000;
 const TIMEOUT_OTHER = 15000;
 
 export class JsSpider extends Spider {
-  private sandbox: JsSandbox | null = null;
+  private sandbox: JsSandboxLike | null = null;
   /** 降级原因（非 null 后所有调用直接返回空） */
   private failure: string | null = null;
 
@@ -27,13 +27,22 @@ export class JsSpider extends Spider {
     //   JS 蜘蛛的 ext 仅在沙箱首次加载时经 init 转发给蜘蛛（JsSandbox.forwardInit），
     //   不并入则"扫码绑定网盘 → JS 源调盘内资源"链路断裂（任务 #17 缺口①）。
     this.ext = enrichExt(this.ext || '', init.host?.driveTokens?.());
-    this.sandbox = new JsSandbox({
-      siteKey: init.key,
-      api: init.api,
-      ext: this.ext,
-      host: init.host,
-      jsLibDir: (init.host as EngineHost).jsLibDir ?? '',
-    });
+    // ★★ 2026-09-30：执行侧可插拔 —— 主进程注入 worker 池（同步 req 不再冻主进程，
+    //   死循环/超时直接 terminate）；单测与降级路径不注入 → 进程内 node:vm（行为与旧版一致）。
+    const make = init.host.jsSandboxFactory;
+    if (make) {
+      this.sandbox = make({ siteKey: init.key, api: init.api, ext: this.ext, host: init.host, jsLibDir: init.host.jsLibDir ?? '' });
+    } else {
+      // 降级路径（未注入工厂：单测/CLI/异常装配）——同步 req() 会以 spawnSync 阻塞本进程，必须留痕
+      init.host.logger.w(`spider js:${init.key} 执行侧=进程内（宿主未注入 worker 池，同步 req 会阻塞界面）`);
+      this.sandbox = new JsSandbox({
+        siteKey: init.key,
+        api: init.api,
+        ext: this.ext,
+        host: init.host,
+        jsLibDir: (init.host as EngineHost).jsLibDir ?? '',
+      });
+    }
   }
 
   /** init(Context, extend)：记录 ext；首次调用时随加载一并转发给蜘蛛的 init */
@@ -43,7 +52,7 @@ export class JsSpider extends Spider {
   }
 
   /** 惰性获取沙箱；加载失败永久降级 */
-  private async getSandbox(): Promise<JsSandbox | null> {
+  private async getSandbox(): Promise<JsSandboxLike | null> {
     if (this.failure || !this.sandbox) return null;
     try {
       await this.sandbox.ensureLoaded();

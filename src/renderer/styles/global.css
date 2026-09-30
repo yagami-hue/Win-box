@@ -1,5 +1,6 @@
 /* Win-Box — Mica 风格设计令牌。
-   深色为默认；`<html data-theme="light">` 时覆盖为亮色。
+   这里只有**深色基底**（三套皮肤各自在自己的文件里覆盖令牌）：
+   网飝 netflix.css / 哔哔 bilibili.css / 大果 apple.css —— ★ 2026-09-30 起经典深/浅主题已删除。
    表层多采用半透明 + 轻微模糊，让窗口底部的 Mica 丙烯酸质感透出。 */
 :root {
   --bg0: #0a0c10;
@@ -20,23 +21,6 @@
   --radius-sm: 8px;
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   --side-w: 208px;
-}
-:root[data-theme='light'] {
-  --bg0: #dce4ec;
-  --bg-glass: rgba(232, 238, 246, .92);
-  --bg1: rgba(250, 252, 255, .88);
-  --bg-elev: rgba(255, 255, 255, .82);
-  --bg-elev2: rgba(255, 255, 255, .9);
-  --border: #c3cdd9;
-  --border-soft: rgba(150, 165, 185, .35);
-  --text: #1f2733;
-  --text-dim: #5f6b7c;
-  --accent: #2f6bff;
-  --accent-soft: rgba(47, 107, 255, 0.12);
-  --accent-2: #0fa376;
-  --danger: #e5484d;
-  --warn: #b47a1f;
-  --shadow: 0 8px 24px rgba(40, 55, 80, .14);
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
@@ -418,6 +402,12 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
   width: 26px; height: 26px; color: #eee; border-radius: 5px; }
 .vp-ctl:hover { color: #fff; background: rgba(255,255,255,.14); }
 .vp-ctl:disabled { color: rgba(238,238,238,.28); cursor: default; background: none; }
+/* ★ 2026-09-30（用户要求）：播放器「置顶」按钮的**已开启态**——高亮色 + 亮底 + 实心图标，与未开启明显区分。
+   ★ 皮肤样式（netflix/bilibili/apple）里的 `:root[data-theme='X'] .vp-ctl` 特异度 (0,3,0) 更高，
+     故这里带 `:root[data-theme]` 前缀（(0,4,0)）压过它们 —— 否则默认皮肤下置顶态仍是白色，看不出开没开。 */
+.vp-ctl.vp-on,
+:root[data-theme] .vp-ctl.vp-on { color: var(--accent); background: rgba(255,255,255,.16); }
+:root[data-theme] .vp-ctl.vp-on:hover { color: var(--accent); background: rgba(255,255,255,.24); }
 .vp-time { font-size: 12px; color: #e6e8ee; font-variant-numeric: tabular-nums; }
 .vp-live { color: var(--danger); font-size: 12px; font-weight: 700; letter-spacing: .5px; }
 

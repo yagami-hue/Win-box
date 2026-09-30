@@ -8,6 +8,7 @@ import { EXT_TEMPLATES, validateExtJson } from '../../engine/config/extHelper';
 import { sourceKindInfo } from '../../engine/config/sourceKind';
 import type { AuditItem, SourceDebugReport } from '../../shared/types';
 import { applyTheme, currentTheme } from '../lib/theme';
+import { getShowDiscover, setShowDiscover } from '../lib/uiPrefs';
 import { THEME_LABELS, type Theme } from '../lib/themeTokens';
 import { DEFAULT_META_SETTINGS, type MetaSettings, type MetaSource } from '../../shared/meta';
 import { DEFAULT_PLAYER_SETTINGS, type PlayerSettings } from '../../shared/player';
@@ -83,6 +84,8 @@ export default function ConfigPage() {
   const [lastOk, setLastOk] = useState('');
   // 外观主题
   const [theme, setTheme] = useState<Theme>(() => currentTheme());
+  /** ★ 2026-09-30（用户要求）：是否展示「发现」页（默认展示；关掉后导航与默认落地页相应变化） */
+  const [showDiscover, setShowDiscoverState] = useState<boolean>(() => getShowDiscover());
   // 外挂字幕（多源：SubtitleCat 免 token / assrt 需 token）
   const [subToken, setSubToken] = useState('');
   const [subTokenSaved, setSubTokenSaved] = useState(false);
@@ -169,6 +172,38 @@ export default function ConfigPage() {
       });
     } catch (e) {
       setBtMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
+    }
+  };
+  // ★ 2026-09-30（用户要求「点播也应该支持绑定外部播放器，和磁力区分开」）：
+  //   点播外部播放器 —— 播放器控制条「外部播放器」按钮用它打开当前视频（留空 = 自动探测常见安装位置）
+  const [vodPlayerDraft, setVodPlayerDraft] = useState<string | null>(null);
+  const [vodPlayers, setVodPlayers] = useState<Array<{ id: string; name: string; path: string }>>([]);
+  const [vodMsg, setVodMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  const vodPlayerValue = vodPlayerDraft ?? playPrefs.vodExternalPlayer;
+  const detectVodPlayers = async () => {
+    try {
+      const list = await client.vodDetectPlayers();
+      setVodPlayers(list);
+      setVodMsg(
+        list.length
+          ? { text: `检测到 ${list.length} 个：${list.map((p) => p.name).join('、')}（点名字填入路径）`, kind: 'ok' }
+          : { text: '未检测到常见播放器：可安装 PotPlayer / VLC / mpv / MPC-HC，或手动粘贴播放器 exe 路径', kind: 'err' },
+      );
+    } catch (e) {
+      setVodMsg({ text: `检测失败：${(e as Error).message}`, kind: 'err' });
+    }
+  };
+  const saveVodPlayer = async () => {
+    try {
+      const s = await client.playerPrefsSet({ vodExternalPlayer: vodPlayerValue.trim() });
+      setPlayPrefs(s);
+      setVodPlayerDraft(null);
+      setVodMsg({
+        text: s.vodExternalPlayer ? '已保存：点播将用该播放器打开（播放器里点「外部播放器」按钮）' : '已清空：恢复自动检测（PotPlayer → VLC → mpv → MPC-HC）',
+        kind: 'ok',
+      });
+    } catch (e) {
+      setVodMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
     }
   };
 
@@ -750,7 +785,7 @@ export default function ConfigPage() {
       {/* ===== 一、订阅与源 ===== */}
       {tab === 'sources' && (
       <>
-      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>一、订阅与源</h4>
+      
 {/* 1) 导入区 */}
       <div className="card" id="cfg-import" style={{ padding: 12, marginBottom: 16 }}>
         <div className="row" style={{ marginBottom: 10 }}>
@@ -1068,7 +1103,7 @@ export default function ConfigPage() {
       {/* ===== 二、源健康与维护 ===== */}
       {tab === 'health' && (
       <>
-      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>二、源健康与维护</h4>
+      
 {/* 0.5) 逐源体检（主页可见性审计） */}
       <div className="card" id="cfg-audit" style={{ padding: 12, marginBottom: 16 }}>
         <div className="row" style={{ marginBottom: 8, flexWrap: 'wrap' }}>
@@ -1188,7 +1223,7 @@ export default function ConfigPage() {
       {/* ===== 三、配置档案 ===== */}
       {tab === 'profiles' && (
       <>
-      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>三、配置档案</h4>
+      
 {/* 0) 多配置档案（多 JSON 源切换） */}
       <div className="card" id="cfg-profiles" style={{ padding: 12, marginBottom: 16 }}>
         <details open={false}>
@@ -1292,7 +1327,7 @@ export default function ConfigPage() {
       {/* ===== 四、凭据 ===== */}
       {tab === 'account' && (
       <>
-      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>四、凭据</h4>
+      
       {/* 网盘 Cookie 统一在「源内绑定」（点播页 → 网盘类源 → 源主页「网盘绑定」按钮） */}
 
       {/* 外挂字幕：多字幕源（SubtitleCat 免 token / assrt 需 token） */}
@@ -1398,7 +1433,7 @@ export default function ConfigPage() {
       {/* ===== 五、外观 ===== */}
       {tab === 'appearance' && (
       <>
-      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>五、外观</h4>
+      
 {/* 外观：亮/深色模式（Mica 表层随主题切换） */}
       <div className="card" id="cfg-appearance" style={{ padding: 12, marginBottom: 16 }}>
         <div className="row" style={{ marginBottom: 8 }}>
@@ -1414,16 +1449,33 @@ export default function ConfigPage() {
                 applyTheme(t);
               }}
               title={
-                t === 'dark' ? '经典深色'
-                  : t === 'light' ? '经典亮色'
-                    : t === 'netflix' ? 'Netflix 风格'
-                      : t === 'bilibili' ? '哔哩哔哩风格'
-                        : 'Apple / macOS 风格'
+                t === 'netflix' ? '网飝（默认皮肤）'
+                  : t === 'bilibili' ? '哔哔'
+                    : '大果（Apple / macOS 风格）'
               }
             >
               {label} {theme === t ? '✓' : ''}
             </span>
           ))}
+        </div>
+      </div>
+
+      {/* ★ 2026-09-30（用户要求）：发现页展示开关（默认展示；关掉后侧边栏/顶栏不再出现「发现」，落地页改「点播」） */}
+      <div className="card" id="cfg-show-discover" style={{ padding: 12, marginBottom: 16 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={showDiscover}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setShowDiscoverState(on);
+              setShowDiscover(on);
+            }}
+          />
+          <span style={{ fontWeight: 600 }}>展示「发现」页</span>
+        </label>
+        <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+          关闭后导航里不再出现「发现」，打开软件直接进「点播」（源主页）。默认开启。
         </div>
       </div>
 
@@ -1433,7 +1485,7 @@ export default function ConfigPage() {
       {/* ===== 六、播放（去广告） ===== */}
       {tab === 'play' && (
       <>
-      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>六、播放</h4>
+      
       <div className="card" id="cfg-m3u8-purify" style={{ padding: 12, marginBottom: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
@@ -1488,13 +1540,47 @@ export default function ConfigPage() {
           )}
         </div>
       </div>
+      {/* ★ 2026-09-30（用户要求）：点播外部播放器 —— 与磁力分开绑定；播放器控制条「外部播放器」按钮用它拉起 */}
+      <div className="card" id="cfg-vod-player" style={{ padding: 12, marginBottom: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <span style={{ fontWeight: 600 }}>点播外部播放器（PotPlayer 等）</span>
+          <span className="muted" style={{ fontSize: 11 }}>
+            点播播放器控制条上的「外部播放器」按钮用它打开当前视频（走本机中继，header / cookie 已注入，可边下边播）。
+            与磁力分开绑定；留空 = 自动检测。
+          </span>
+          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <input
+              placeholder="播放器 exe 路径（留空 = 自动检测 PotPlayer / VLC / mpv / MPC-HC）…"
+              value={vodPlayerValue}
+              style={{ flex: 1 }}
+              onChange={(e) => setVodPlayerDraft(e.target.value)}
+            />
+            <button className="primary" onClick={() => void saveVodPlayer()}>保存</button>
+            <button onClick={() => void detectVodPlayers()}>检测</button>
+          </div>
+          {vodPlayers.length > 0 && (
+            <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+              {vodPlayers.map((p) => (
+                <span key={p.path} className="tag" title={p.path} onClick={() => setVodPlayerDraft(p.path)}>
+                  {p.name}
+                </span>
+              ))}
+            </div>
+          )}
+          {vodMsg && (
+            <span className={vodMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0 }}>
+              {vodMsg.text}
+            </span>
+          )}
+        </div>
+      </div>
       </>
       )}
 
       {/* ===== 七、快捷键（老板键） ===== */}
       {tab === 'shortcut' && (
       <>
-      <h4 style={{ margin: '18px 0 8px', scrollMarginTop: 12 }}>七、快捷键（老板键）</h4>
+      
 {/* 老板键：全局快捷键一键隐藏/恢复（视频自动暂停静音） */}
       <div className="card" id="cfg-shortcut" style={{ padding: 12, marginBottom: 16 }}>
         {bossKey ? (
@@ -1558,7 +1644,7 @@ export default function ConfigPage() {
       {/* ===== 八、网络（代理） ===== */}
       {tab === 'network' && (
       <>
-      <h4 style={{ margin: '18px 0 8px' }}>八、网络（代理）</h4>
+      
       <div className="card" style={{ padding: 12, marginBottom: 16 }}>
         {proxy ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -1603,7 +1689,7 @@ export default function ConfigPage() {
 
       {tab === 'storage' && (
       <>
-      <h4 style={{ margin: '18px 0 8px' }}>十、WebDAV 存储</h4>
+      
       <div className="card" style={{ padding: 12, marginBottom: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <span className="muted" style={{ fontSize: 12 }}>
@@ -1663,7 +1749,7 @@ export default function ConfigPage() {
 
       {tab === 'backup' && (
       <>
-      <h4 style={{ margin: '18px 0 8px' }}>九、设置备份</h4>
+      
       <div className="card" style={{ padding: 12, marginBottom: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <span className="muted" style={{ fontSize: 12 }}>

@@ -20,17 +20,115 @@ export const UPDATE_RELEASES_API = `https://api.github.com/repos/${UPDATE_REPO}/
 export const UPDATE_RELEASES_PAGE = `https://github.com/${UPDATE_REPO}/releases/latest`;
 
 /**
- * GitHub 代理加速前缀（按顺序尝试，最后回退直连）。
- * 用法 = 前缀直接拼接原始 GitHub 地址，如
- *   `https://gh-proxy.org/https://api.github.com/repos/...`
- * 新域名口径见 gh-proxy 文档（2025-11 起业务域名统一为 gh-proxy.org）。
+ * GitHub 代理加速前缀池（用法 = 前缀直接拼接原始 GitHub 地址，如
+ *   `https://gh.acmsz.top/https://github.com/o/r/releases/download/…`）。
+ *
+ * ★ 2026-09-30（用户要求「现在的软件里 GitHub 代理加速还是太慢，能不能把 github.akams.cn 的代理接口内置进来」）：
+ *   该站点把社区节点硬编码在自家 JS bundle 里（**没有公开 JSON 接口**），本清单是**从 `github.akams.cn`
+ *   的快照提取**（`contribute` 49 条 + `测绘` 31 条 = 80 条，见 `.tmp/akams-extract.cjs`）。
+ *   顺序 = **本机实测速率降序**（`.tmp/akams-speed-measure.cjs`，Range 64KB/1.5s），前 48 条实测连通、
+ *   其余垫底（运行时探测会很快跳过死节点）；另把历史稳定节点 `gh-proxy.org` 放首位（实测 2077 KB/s）。
+ *   实测榜首 `gh.acmsz.top` 去首字节 **5057 KB/s**，显著快于旧池最好的 `gh-proxy.com`（4730）——
+ *   而旧池里的 `mirror.ghproxy.com` 已持续超时。
+ *
+ * 红线（勿回退）：① 池子大 ⇒ **绝不逐个串行试**，检查阶段只取前 `ACCEL_CHECK_LIMIT` 条并发抢首响；
+ *   下载前先跑两段测速（见 `UpdateService.speedTest`）。② 池子换新时把「实测榜单」与快照日期写在
+ *   本注释里，别只贴域名。
  */
 export const GH_ACCEL_PREFIXES: string[] = [
   'https://gh-proxy.org/',
-  'https://ghproxy.net/',
+  'https://gh.acmsz.top/',
+  'https://xsadwsd.kdns.fr/',
+  'https://ghpxy.hwinzniej.top/',
+  'https://js.jiangss.shop/',
+  'https://cfgh.ikgy.top/',
+  'https://gh.meali.top/',
+  'https://gg.z321.cc.cd/',
+  'https://fastgit.cc/',
+  'https://777.z321.cc.cd/',
+  'https://github.mxw.qzz.io/',
+  'https://gh.ddlc.top/',
+  'https://gh.chjina.com/',
+  'https://ghf.无名氏.top/',
+  'https://ghproxy.cxkpro.top/',
+  'https://gh.idayer.com/',
+  'https://githubdog.com/',
+  'https://git.yylx.win/',
+  'https://ghproxy.imciel.com/',
+  'https://ghm.078465.xyz/',
+  'https://gitproxy.mrhjx.cn/',
+  'https://gh.monlor.com/',
+  'https://github.geekery.cn/',
+  'https://github.ednovas.xyz/',
+  'https://ghproxy.felicity.land/',
+  'https://down.mxw.xx.kg/',
+  'https://gh.qfmc0721.cc.cd/',
+  'https://github.xxlab.tech/',
+  'https://gh.jjj.gv.uy/',
+  'https://gh.felicity.ac.cn/',
+  'https://jiashu.1win.eu.org/',
+  'https://github.tbap.top/',
+  'https://gh.my-website.ccwu.cc/',
+  'https://cdn.akaere.online/',
   'https://gh-proxy.com/',
-  'https://mirror.ghproxy.com/',
+  'https://tvv.tw/',
+  'https://gh.07150721.xyz/',
+  'https://github.dpik.top/',
+  'https://g.blfrp.cn/',
+  'https://gh.dpik.top/',
+  'https://gh.sixyin.com/',
+  'https://ghproxy.net/',
+  'https://gh.noki.icu/',
+  'https://ghfast.top/',
+  'https://gh.catmak.name/',
+  'https://github.ikgy.top/',
+  'https://gh.inkchills.cn/',
+  'https://git.669966.xyz/',
+  'https://ghproxy.monkeyray.net/',
+  // ---- 以下为同批快照中本机未测通者（运行时探测自动跳过，保留以便网络变化后自动复活）----
+  'https://ghfile.geekertao.top/',
+  'https://cdn.gh-proxy.com/',
+  'https://j.1lin.dpdns.org/',
+  'https://github.starrlzy.cn/',
+  'https://github-proxy.memory-echoes.cn/',
+  'https://gh.927223.xyz/',
+  'https://gh.bugdey.us.kg/',
+  'https://j.1win.ggff.net/',
+  'https://gitproxy.127731.xyz/',
+  'https://gh.b52m.cn/',
+  'https://down.mxw.qzz.io/',
+  'https://slink.ltd/',
+  'https://github.tmby.shop/',
+  'https://ghpr.cc/',
+  'https://gh.tryxd.cn/',
+  'https://gitproxy.click/',
+  'https://github.chenc.dev/',
+  'https://gh.jasonzeng.dev/',
+  'https://gp.zkitefly.eu.org/',
+  'https://ghproxy.1888866.xyz/',
+  'https://ghp.arslantu.xyz/',
+  'https://free.cn.eu.org/',
+  'https://ghp.keleyaa.com/',
+  'https://proxy.yaoyaoling.net/',
+  'https://g.z321.cc.cd/',
+  'https://gap.andyjin.website/',
+  'https://gh.ruan.dpdns.org/',
+  'https://github.nswrz.cn/',
+  'https://gh.zhai.edu.pl/',
+  'https://github-cf.947563.xyz/',
+  'https://github.gohj99.site/',
+  'https://githubproxy.gohj99.site/',
 ];
+
+/** 检查最新 Release 阶段参与并发抢首响的加速条数（池子大，不能全放：每条都是真实请求） */
+export const ACCEL_CHECK_LIMIT = 12;
+/** 下载前小样本测速：最多探测多少条候选 / 并发多少 / 每条的窗口（字节、毫秒） */
+export const ACCEL_PROBE_LIMIT = 56;
+export const ACCEL_PROBE_CONCURRENCY = 10;
+export const ACCEL_PROBE_BYTES = 96 * 1024;
+export const ACCEL_PROBE_MS = 2200;
+/** 小样本前列进入「大样本复测」的条数（复测才决定真正下载的那条） */
+export const ACCEL_FINALISTS = 3;
 
 /** GitHub Release 资产（原始字段，仅取需要的） */
 export interface ReleaseAssetInput {
@@ -103,19 +201,31 @@ export interface UpdateProgress {
 
 /**
  * ★ 2026-09-30（用户要求「先为代理链路测速，挑下载速度最快的下载」）：单条线路的测速样本。
- *   `bytes`/`ms` 是「限时窗口内实际收到的字节数与耗时」，`bps` = bytes*1000/ms。
+ *   `bytes`/`ms` 是「限时窗口内实际收到的字节数与耗时」；`ttfb` 是首字节耗时（可选）。
+ *   速率口径：**优先用「去掉首字节」的 [ms - ttfb] 段**算 sustained 速率 —— 小样本窗口下
+ *   TTFB 会占掉大半时间（实测同一节点 64KB 样本 217KB/s、2MB 样本 5057KB/s，差 20 倍），
+ *   不扣掉握手/首字节就会把「慢节点先回包」误判成最快。
  */
 export interface SpeedSample {
   url: string;
   bytes: number;
   ms: number;
   ok: boolean;
+  /** 首字节耗时（ms）；0/缺省 = 未知（退回整段耗时口径） */
+  ttfb?: number;
 }
 
-/** 单条线路实测速率（字节/秒）；ms 非正或 ok=false → 0 */
+/**
+ * 单条线路实测速率（字节/秒）：ok=false / 数据不足 → 0。
+ * 有 ttfb 时按「去掉首字节」的段算；但该窗口 **<100ms 就不足以代表持续速率**（典型是样本几乎
+ * 在首字节那一刻一次性到达）→ 退回整段耗时口径，避免把「只收到一小撮」误算成天文速率。
+ */
 export function sampleBps(s: SpeedSample): number {
   if (!s.ok || s.ms <= 0 || s.bytes <= 0) return 0;
-  return Math.round((s.bytes * 1000) / s.ms);
+  const ttfb = Math.max(0, Number(s.ttfb) || 0);
+  const steadyMs = s.ms - ttfb;
+  const useMs = steadyMs >= 100 ? steadyMs : s.ms;
+  return Math.round((s.bytes * 1000) / useMs);
 }
 
 /**

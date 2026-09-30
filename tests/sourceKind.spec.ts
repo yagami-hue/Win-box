@@ -87,6 +87,16 @@ describe('isDoubanLikeSource / detailIsEmpty（无详情源判据）', () => {
     expect(isDoubanLikeSource(null)).toBe(false);
   });
 
+  it('★ 2026-09-30 fty/饭太硬 的豆瓣片单源（豆豆 / DouDou）同样判是', () => {
+    // 实测配置原样：key=点我切源 / name=豆豆┃片单 / api=csp_DouDouGuard（三字段都无「豆瓣/douban」）
+    const fty = { key: '点我切源', name: '豆豆┃片单', api: 'csp_DouDouGuard', ext: '' };
+    expect(isDoubanLikeSource(fty)).toBe(true);
+    expect(isDoubanLikeSource({ key: 'k', name: '豆豆┃片单', api: 'csp_X', ext: '' })).toBe(true);
+    expect(isDoubanLikeSource({ key: 'k', name: 'x', api: 'csp_DouDou', ext: '' })).toBe(true);
+    // 反向：不含豆瓣族字样的普通源仍判否（宁窄勿宽）
+    expect(isDoubanLikeSource({ key: 'k', name: '多多┃回放', api: 'csp_DoubaoGuard', ext: '' })).toBe(false);
+  });
+
   it('detailIsEmpty：无 flags / 各线路全空 → true；任一线路有集 → false', () => {
     expect(detailIsEmpty(null)).toBe(true);
     expect(detailIsEmpty({})).toBe(true);

@@ -20,6 +20,20 @@ export interface EngineHost {
   /** 可选同步 HTTP（T03-B 沙箱 req() 同步语义的测试 mock 注入点；生产由沙箱内 spawnSync 兜底） */
   httpSync?: (req: import('../shared/types').HttpRequest) => import('../shared/types').HttpResponse;
   /**
+   * ★★ 2026-09-30（用户报「另一台设备用本地包搜索时软件卡死」）：JS 沙箱执行侧工厂。
+   *   主进程注入 **worker 线程版**（worker/JsWorkerPool.ts）——JS 蜘蛛里的同步 `req()`
+   *   原先用 spawnSync 实现，会把主进程冻住 0.4~1.5s/次，指向本机回环（`/pkg/…`）时
+   *   还会与本地代理互等死锁（实测 11.6s）；搬进 worker 后阻塞只影响该 worker，
+   *   超时直接 terminate 重建。缺省不注入 = 进程内 node:vm（单测与降级路径）。
+   */
+  jsSandboxFactory?: (init: {
+    siteKey: string;
+    api: string;
+    ext: string;
+    host: EngineHost;
+    jsLibDir: string;
+  }) => import('./js/JsSandbox').JsSandboxLike;
+  /**
    * 网盘/资源站绑定凭据提供器（provider -> token，如 aliyun/quark/uc/baidu/pansou）。
    * 由宿主（SpiderHost）注入 DriveStore 快照；jar(dex) 蜘蛛 init(Context, ext) 前
    * 引擎会把这里返回的 token 并入 ext 顶层，使"先绑网盘 → 蜘蛛读 ext 调盘内资源"

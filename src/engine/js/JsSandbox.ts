@@ -44,6 +44,23 @@ export interface JsSandboxOptions {
 /** 蜘蛛方法名风格探测结果（写日志用，见任务书"方法名探测"） */
 export type SpiderStyle = 'hiker' | 'drpy' | 'unknown';
 
+/**
+ * ★★ 2026-09-30：JS 沙箱的**执行侧接口**（JsSpider 只依赖这一面）。
+ *   两个实现：
+ *     · `JsSandbox`（本文件）—— 进程内 node:vm（默认/测试/降级）；
+ *     · `PooledSandbox`（worker/JsWorkerPool.ts）—— worker 线程里跑同一份 JsSandbox。
+ *   后者是为了修「同步 req() 用 spawnSync 实现 → **冻住整个主进程**，指向本机回环时
+ *   还会与本地代理互等死锁」的问题（详见 worker/protocol.ts 头注释）。
+ */
+export interface JsSandboxLike {
+  readonly siteKey: string;
+  readonly spiderStyle: SpiderStyle;
+  setExt(ext: string): void;
+  ensureLoaded(): Promise<void>;
+  callMethod(names: string[], args: unknown[], timeoutMs: number): Promise<unknown>;
+  destroy(): void;
+}
+
 const SPIDER_METHODS = ['init', 'homeContent', 'homeVideoContent', 'categoryContent', 'detailContent',
   'searchContent', 'playerContent', 'liveContent', 'proxy', 'localProxy', 'action', 'home', 'homeVid',
   'category', 'detail', 'search', 'play', 'live'];
@@ -75,7 +92,7 @@ function isJson(text: string): boolean {
   }
 }
 
-export class JsSandbox {
+export class JsSandbox implements JsSandboxLike {
   readonly siteKey: string;
   readonly api: string;
   protected host: EngineHost;

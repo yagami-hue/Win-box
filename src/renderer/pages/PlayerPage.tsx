@@ -139,6 +139,10 @@ export default function PlayerPage() {
     });
     // 小窗口模式状态同步
     const offMini = client.playerOnMini((m) => setMini(m));
+    // ★ 2026-09-30：订阅就绪 → 通知主进程重发最新的 init。
+    //   新窗口的 `did-finish-load` 可能早于本次订阅（生产产物必现）→ 首推会丢、窗口停在「等待播放…」；
+    //   重发的同一份带相同 initSeq，会被上面的 acceptInitSeq 判重忽略，不会重复应用。
+    void client.playerReady().catch(() => undefined);
     return () => {
       offInit();
       offSwitch();

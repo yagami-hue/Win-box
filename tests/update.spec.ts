@@ -28,6 +28,21 @@ describe('★ 2026-09-30 更新测速：rankBySpeed / sampleBps', () => {
     expect(sampleBps(s('a', 1000, 1000, false))).toBe(0);
   });
 
+  it('★ 有 ttfb 时按「去掉首字节」的段算速率（小样本窗口不被握手时间带偏）', () => {
+    // 同一节点：64KB/1.5s 与 2MB/3.5s 两个样本，扣掉首字节后速率才可比
+    const small: SpeedSample = { url: 'a', bytes: 64 * 1024, ms: 1500, ok: true, ttfb: 1200 };
+    const big: SpeedSample = { url: 'a', bytes: 2 * 1024 * 1024, ms: 3500, ok: true, ttfb: 500 };
+    expect(sampleBps(small)).toBe(Math.round((64 * 1024 * 1000) / 300)); // 300ms 内收 64KB
+    expect(sampleBps(big)).toBe(Math.round((2 * 1024 * 1024 * 1000) / 3000));
+    // 无 ttfb → 退回整段耗时口径（夹具）
+    expect(sampleBps({ url: 'a', bytes: 1000, ms: 1000, ok: true, ttfb: 0 })).toBe(1000);
+  });
+
+  it('ttfb 非法（负数/超过整段耗时）→ 夹紧到 [0, ms-1]，不产生除零', () => {
+    expect(sampleBps({ url: 'a', bytes: 1000, ms: 1000, ok: true, ttfb: -5 })).toBe(1000);
+    expect(sampleBps({ url: 'a', bytes: 1000, ms: 1000, ok: true, ttfb: 9999 })).toBe(1000);
+  });
+
   it('按实测速率降序排列；样本不足（错误页）的线路垫底但仍保留', () => {
     const ranked = rankBySpeed([
       s('slow', 300 * 1024, 3000),

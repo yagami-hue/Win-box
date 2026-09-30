@@ -2,7 +2,6 @@
 // ★ 2026-09-29：播放走 `/play?dav=<id>`（主进程中继注入 Authorization，凭据绝不进 URL）；
 //   mp4/webm 等内联播，mkv/HEVC 等交给本机外部播放器接力（复用磁力的播放器设置）。
 import { useEffect, useState } from 'react';
-import BackButton from '../components/BackButton';
 import { client } from '../api/client';
 import type { DavEntry, DavServer } from '../../shared/webdav';
 import { davParentPath, isDavInlinePlayable, wrapDavPlayUrl } from '../../shared/webdav';
@@ -106,7 +105,6 @@ export default function StoragePage() {
   return (
     <>
       <div className="topbar">
-        <BackButton fallback="/" label="返回" />
         <select value={serverId} onChange={(e) => pickServer(e.target.value)} disabled={busy || !servers.length}>
           {servers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>

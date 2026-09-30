@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import BackButton from '../components/BackButton';
 import { client } from '../api/client';
 import type { LiveGroup, LiveBean, LiveEpgEntry, EpgChannelRef } from '../../shared/types';
 import VideoPlayer from '../components/VideoPlayer';
@@ -155,7 +154,6 @@ export default function LivePage() {
   return (
     <>
       <div className="topbar">
-        <BackButton fallback="/" label="返回" />
         <select value={liveIdx} onChange={(e) => pickLive(Number(e.target.value))} disabled={loading}>
           {lives.map((l, i) => <option key={i} value={i}>{l.name}</option>)}
         </select>

@@ -36,7 +36,7 @@ import type { UpdateProgress } from '../../shared/update';
 import type { UpdateService } from '../update/UpdateService';
 import { md5Hex } from '../../engine/util/md5';
 // 独立播放器窗口
-import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow } from '../player/PlayerWindow';
+import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow, playerResendInit } from '../player/PlayerWindow';
 // 老板键
 import { bossKey, BOSS_DEFAULT_ACCEL } from '../bossKey';
 import { playerSettings } from '../player/playerSettings';
@@ -51,6 +51,9 @@ function winOf(e: IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(e.sender);
 }
 
+/** ★ 本次主进程启动的会话标识（模块求值 = 应用启动一次；重启必变） */
+const SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
 export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService, updater: UpdateService, pkgs: LocalPkgStore): void {
   const log = fileLogger;
 
@@ -64,8 +67,31 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
   });
   ipcMain.handle(IPC.WIN_CLOSE, (e) => winOf(e)?.close());
   ipcMain.handle(IPC.WIN_IS_MAXIMIZED, (e) => !!winOf(e)?.isMaximized());
+  /**
+   * ★ 2026-09-30（用户要求）：播放器「置顶」按钮 —— 把**发起窗口**设为始终置顶。
+   *   level 用 'floating'（HWND_TOPMOST 语义：压过所有普通窗口，但不与任务栏/系统 UI 抢层级）。
+   *   ★ 必须走 registerHandler（IpcResult 信封）—— 渲染层 client 的 unwrap 只认 {ok,data}。
+   */
+  registerHandler(IPC.WIN_SET_ALWAYS_ON_TOP, (e: IpcMainInvokeEvent, on: unknown) => {
+    const w = winOf(e);
+    if (!w) return false;
+    const flag = !!on;
+    try {
+      w.setAlwaysOnTop(flag, 'floating');
+    } catch {
+      w.setAlwaysOnTop(flag);
+    }
+    return w.isAlwaysOnTop();
+  }, log);
+  registerHandler(IPC.WIN_IS_ALWAYS_ON_TOP, (e: IpcMainInvokeEvent) => !!winOf(e)?.isAlwaysOnTop(), log);
 
   registerHandler(IPC.SYSTEM_PING, () => 'pong', log);
+  /**
+   * ★ 2026-09-30（用户要求「软件关闭后，所有的墓碑机制都应该脱钩」）：
+   *   本次**主进程启动**的唯一会话标识（每次启动必变）——渲染层用它判定「新一次启动」，
+   *   决定是否丢弃页面状态类记忆（搜索态/浏览态/详情态）。见 renderer/lib/uiMemory.ts。
+   */
+  registerHandler(IPC.SYSTEM_SESSION_ID, () => SESSION_ID, log);
   // 退出整个应用（免责声明「拒绝」等场景）
   registerHandler(IPC.APP_QUIT, () => {
     app.quit();
@@ -470,6 +496,11 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
   }, log);
   registerHandler(IPC.PLAYER_IS_OPEN, () => ({ open: isPlayerOpen() }), log);
   registerHandler(IPC.PLAYER_GET_INIT, () => ({ open: isPlayerOpen() }), log);
+  /** ★ 2026-09-30：渲染层订阅就绪 → 重发最新 init（修新窗口「首推早于订阅」的竞态，见 PlayerWindow.playerResendInit） */
+  registerHandler(IPC.PLAYER_READY, () => {
+    playerResendInit();
+    return { ok: true };
+  }, log);
   registerHandler(IPC.PLAYER_SET_MINI, (_e: any, isMini: boolean) => {
     playerSetMini(!!isMini);
     return { mini: playerIsMini() };
@@ -515,6 +546,25 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     () => detectPlayers(playerSettings.settings.btExternalPlayer).map((p) => ({ id: p.id, name: p.name, path: p.path })),
     log,
   );
+  // ---- ★ 2026-09-30（用户要求）：点播外部播放器（绑定值 vodExternalPlayer，与磁力分开）----
+  /** 探测本机已安装的外部播放器（点播用；配置页可指定路径，留空 = 自动探测） */
+  registerHandler(
+    IPC.VOD_DETECT_PLAYERS,
+    () => detectPlayers(playerSettings.settings.vodExternalPlayer).map((p) => ({ id: p.id, name: p.name, path: p.path })),
+    log,
+  );
+  /** 用本机外部播放器打开当前点播地址（a.path 指定本次用哪个播放器；地址是本机 /play 中继时 header/cookie 已由中继注入） */
+  registerHandler(IPC.VOD_OPEN_EXTERNAL, (_e: any, a: { url?: string; path?: string }) => {
+    const u = String(a?.url || '').trim();
+    if (!u) return { ok: false, error: '地址为空' };
+    const pick = String(a?.path || '').trim();
+    const players = detectPlayers(pick || playerSettings.settings.vodExternalPlayer);
+    if (!players.length) return { ok: false, error: '未检测到本机播放器（可在配置页「播放」中填写播放器路径）' };
+    const p = players[0];
+    const started = launchPlayer(p.path, u);
+    log.i(`vod: 外部播放器接力「${p.name}」→ ${u.slice(0, 120)}`);
+    return started ? { ok: true, player: p.name } : { ok: false, error: `无法启动「${p.name}」` };
+  }, log);
 
   // ★ 2026-09-29 WebDAV 存储（只读）：服务器管理 + 目录浏览；取流走 `/play?dav=<id>`（中继注入 Authorization）
   registerHandler(IPC.DAV_LIST, () => dav.list(), log);

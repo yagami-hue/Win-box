@@ -120,6 +120,12 @@ export const IPC = {
   WIN_MAXIMIZE: 'win:maximize',
   WIN_CLOSE: 'win:close',
   WIN_IS_MAXIMIZED: 'win:isMaximized',
+  /** ★ 2026-09-30（用户要求「播放器加置顶按钮」）：按**发起窗口**设置/查询「始终置顶」 */
+  WIN_SET_ALWAYS_ON_TOP: 'win:setAlwaysOnTop',
+  WIN_IS_ALWAYS_ON_TOP: 'win:isAlwaysOnTop',
+  /** ★ 2026-09-30（用户要求「软件关闭后，所有的墓碑机制都应该脱钩」）：主进程**本次启动**的唯一标识
+   *  （每次启动重新生成）—— 渲染层据此判定「新一次启动」并丢掉页面状态类记忆（见 uiMemory）。 */
+  SYSTEM_SESSION_ID: 'system:sessionId',
   VOD_PLAY: 'vod:play',
   VOD_DEBUG: 'vod:debug',
   LIVE_LOAD: 'live:load',
@@ -132,6 +138,9 @@ export const IPC = {
   PLAYER_OPEN: 'player:open',
   PLAYER_SWITCH_EP: 'player:switchEp',
   PLAYER_GET_INIT: 'player:getInit',
+  /** ★ 2026-09-30：播放器窗口渲染层订阅就绪 → 主进程重发缓存的最新 init
+   *  （修「新窗口首推与 React 挂载竞态」：`did-finish-load` 发出的 init 可能早于订阅，直接丢） */
+  PLAYER_READY: 'player:ready',
   PLAYER_IS_OPEN: 'player:isOpen',
   PLAYER_SET_MINI: 'player:setMini',
   PLAYER_IS_MINI: 'player:isMini',
@@ -148,6 +157,10 @@ export const IPC = {
   PLAYER_PREFS_SET: 'player:prefsSet',
   /** ★ 2026-09-29 磁力（BT）：探测本机已安装的外部播放器（MKV/HEVC 接力用；只探测不启动） */
   BT_DETECT_PLAYERS: 'bt:detectPlayers',
+  /** ★ 2026-09-30（用户要求「点播也应该支持绑定外部播放器，和磁力区分开」）：
+   *  点播外部播放器（探测 / 用当前播放地址拉起）—— 绑定值 `vodExternalPlayer` 与磁力分开 */
+  VOD_DETECT_PLAYERS: 'vod:detectPlayers',
+  VOD_OPEN_EXTERNAL: 'vod:openExternal',
   // ★ 2026-09-29 启动强制更新：查 GitHub 最新 Release / 代理加速下载 Setup / 拉起安装程序
   UPDATE_CHECK: 'update:check',
   UPDATE_DOWNLOAD: 'update:download',

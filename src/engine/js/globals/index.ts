@@ -11,6 +11,7 @@ import type { EngineHost } from '../../ports';
 import * as cheerio from 'cheerio';
 import * as CryptoJS from 'crypto-js';
 import { createHttpGlobals } from './SandboxHttp';
+import { createDrpyEngineGlobals } from './drpyEngine';
 import { createLocal } from './SandboxLocal';
 import { aesX, rsaX, rsaEncrypt, rsaDecrypt } from './SandboxCrypto';
 import { createConsole, createTimers, createProxyFns, createTransStub } from './SandboxMisc';
@@ -30,6 +31,8 @@ export function buildSandboxGlobals(
   return {
     // --- 网络（net.js 语义：req 同步 / http 返回 Promise） ---
     ...createHttpGlobals(host, siteKey),
+    // --- drpy2 引擎级全局（safeJSONParse / batchFetch / md5；包内 lang:'ds' 脚本直接依赖） ---
+    ...createDrpyEngineGlobals(host),
     // --- 海阔规则 DSL（Global.java:54-81） ---
     pdfh: (html: string, rule: string): string => parseDomForUrl(html, rule, ''),
     pd: (html: string, rule: string, addUrl: string): string => parseDomForUrl(html, rule, addUrl ?? ''),

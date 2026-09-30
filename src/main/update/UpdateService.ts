@@ -11,6 +11,12 @@ import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync 
 import { pipeline } from 'node:stream/promises';
 import { join } from 'node:path';
 import {
+  ACCEL_CHECK_LIMIT,
+  ACCEL_FINALISTS,
+  ACCEL_PROBE_BYTES,
+  ACCEL_PROBE_CONCURRENCY,
+  ACCEL_PROBE_LIMIT,
+  ACCEL_PROBE_MS,
   GH_ACCEL_PREFIXES,
   UPDATE_RELEASES_API,
   buildAccelUrls,
@@ -33,13 +39,13 @@ const agent = new Agent({ connect: { timeout: 20000 } });
 const UA = 'Win-Box-Updater';
 
 /**
- * ★ 2026-09-30（用户要求「更新时优先走代理链路，先测速挑最快的下载，别连上 GitHub 就走直连」）：
- *   检查接口候选地址 = **代理加速优先、直连垫底**，且**全部并发**抢第一个成功响应
- *   （直连在国内常能连通但极慢；串行试代理会白等 each×8s）。
+ * ★ 2026-09-30（用户要求「优先走代理链路，别连上 GitHub 就走直连」）：
+ *   检查接口候选 = **代理加速前 ACCEL_CHECK_LIMIT 条（池内已按实测速率排序）+ 直连垫底**，
+ *   且**全部并发抢首响**。池子有 80 条 —— 全放出去等于 80 个并发请求，必须限量。
  */
 function checkUrls(): string[] {
   const out: string[] = [];
-  for (const p of GH_ACCEL_PREFIXES) {
+  for (const p of GH_ACCEL_PREFIXES.slice(0, ACCEL_CHECK_LIMIT)) {
     const pre = p.endsWith('/') ? p : p + '/';
     out.push(pre + UPDATE_RELEASES_API);
   }
@@ -47,11 +53,11 @@ function checkUrls(): string[] {
   return out;
 }
 
-/** 测速窗口：单条线路最多测这么久 / 最多收这么多字节（够比较速率即可，别拖时间） */
-const SPEED_TEST_MS = 3500;
-const SPEED_TEST_BYTES = 2 * 1024 * 1024;
+/** 小样本测速窗口（筛出前列）/ 大样本复测窗口（定胜负） */
+const PROBE_SMALL = { bytes: ACCEL_PROBE_BYTES, ms: ACCEL_PROBE_MS, headersTimeout: 2500 };
+const PROBE_BIG = { bytes: 1536 * 1024, ms: 3000, headersTimeout: 3000 };
 /** 视为「该线路可用」的最小样本字节数（挡住加速站返回的错误页/秒断） */
-const SPEED_MIN_BYTES = 256 * 1024;
+const SPEED_MIN_BYTES = 64 * 1024;
 
 export class UpdateService {
   private lastAsset: UpdateAsset | null = null;
@@ -166,78 +172,103 @@ export class UpdateService {
   }
 
   /**
-   * ★ 2026-09-30（用户要求「先为代理链路测速，挑下载速度最快的下载」）：
-   *   对每条候选线路做**限时测速**（并发；最多 SPEED_TEST_MS / SPEED_TEST_BYTES），
-   *   按实测速率排序返回下载顺序。测速失败的线路仍排在末尾作回退（不丢候选）。
+   * ★ 2026-09-30（用户要求「池子多一些、挑下载速度最快的下载」）：**两段测速**。
+   *   池子有 80 条候选，直接对每条跑大样本测速 = 每条 1.5MB 起（合计上百 MB），不可接受。
+   *   ① 小样本筛选：对前 `ACCEL_PROBE_LIMIT` 条并发（`ACCEL_PROBE_CONCURRENCY`）各拉 ≤96KB/2.2s，
+   *      速率按**去掉首字节**的段算（小窗口下 TTFB 会带偏排名，实测同一节点 64KB 与 2MB 样本差 20 倍）；
+   *   ② 大样本复测：小样本前 `ACCEL_FINALISTS` 名再各拉 ≤1.5MB/3s，用真实持续速率定胜负。
+   *   返回 = 下载候选顺序（复测冠军打头 → 其余入围者 → 其余存活线路 → 直连垫底）。
    */
   private async speedTest(urls: string[], onProgress: (p: UpdateProgress) => void): Promise<string[]> {
     if (urls.length <= 1) return urls;
+    const pool = urls.slice(0, ACCEL_PROBE_LIMIT);
+    const rest = urls.slice(ACCEL_PROBE_LIMIT);
     onProgress({
       phase: 'speedtest',
       received: 0,
       total: 0,
       percent: 0,
       speed: 0,
-      message: `正在为 ${urls.length} 条下载线路测速…`,
+      message: `正在为 ${pool.length} 条下载线路测速…`,
     });
-    const samples = await this.collectSamples(urls);
-    for (const s of samples) {
-      const host = s.url.replace(/^https?:\/\//, '').split('/')[0];
-      this.log.i(
-        s.ok && s.bytes > 0
-          ? `更新测速：${host} ${Math.round(sampleBps(s) / 1024)} KB/s（${s.bytes}B/${s.ms}ms）`
-          : `更新测速：${host} 不可用（${s.bytes}B）`,
-      );
+    const small = await this.collectSamples(pool, PROBE_SMALL, ACCEL_PROBE_CONCURRENCY);
+    const alive = small.filter((s) => s.ok && s.bytes >= SPEED_MIN_BYTES).sort((a, b) => sampleBps(b) - sampleBps(a));
+    for (const s of alive.slice(0, 8)) this.log.i(`更新测速(小样本)：${this.hostOf(s.url)} ${Math.round(sampleBps(s) / 1024)} KB/s（${Math.round((s.ms - (s.ttfb || 0)))}ms）`);
+    if (!alive.length) {
+      this.log.w(`更新测速：${pool.length} 条候选全部不可用（改按原顺序尝试下载）`);
+      return [...pool, ...rest];
     }
-    const ranked = rankBySpeed(samples, SPEED_MIN_BYTES);
-    const best = samples.find((s) => s.url === ranked[0]);
+
+    const finalists = alive.slice(0, ACCEL_FINALISTS);
+    const big = await this.collectSamples(finalists.map((s) => s.url), PROBE_BIG, finalists.length);
+    for (const s of big) this.log.i(`更新测速(复测)：${this.hostOf(s.url)} ${Math.round(sampleBps(s) / 1024)} KB/s（${s.bytes}B/${s.ms}ms）`);
+    const ranked = [
+      ...rankBySpeed(big, SPEED_MIN_BYTES),
+      ...alive.slice(ACCEL_FINALISTS).map((s) => s.url),
+      ...small.filter((s) => !alive.includes(s)).map((s) => s.url),
+      ...rest,
+    ];
+    const best = big.find((s) => s.url === ranked[0]) || finalists.find((s) => s.url === ranked[0]);
     onProgress({
       phase: 'speedtest',
       received: 0,
       total: 0,
       percent: 0,
       speed: best ? sampleBps(best) : 0,
-      message: best ? `最快线路：${best.url.replace(/^https?:\/\//, '').split('/')[0]}` : '',
+      message: best ? `最快线路：${this.hostOf(best.url)}（${Math.round(sampleBps(best) / 1024)} KB/s）` : '',
     });
-    return ranked;
+    return [...new Set(ranked)];
+  }
+
+  private hostOf(url: string): string {
+    return url.replace(/^https?:\/\//, '').split('/')[0];
   }
 
   /**
-   * 并发测速并**限总时长**收集样本：整段最多 SPEED_TEST_MS + 800ms（不该被最慢的线路拖住 ——
+   * 并发（限流）测速并**限总时长**收集样本：整段最多 `ms + 800ms`（不该被最慢的线路拖住 ——
    * 实测直连 GitHub 会超时，串等会让"测速"花 8s+）。到点仍没回样本的线路按不可用记，
    * 仍保留在候选末尾作回退。
    */
-  private async collectSamples(urls: string[]): Promise<SpeedSample[]> {
+  private async collectSamples(
+    urls: string[],
+    opts: { bytes: number; ms: number; headersTimeout: number },
+    concurrency: number,
+  ): Promise<SpeedSample[]> {
     const got: Array<SpeedSample | null> = urls.map(() => null);
-    const probes = urls.map((u, i) =>
-      this.probeSpeed(u).then((s) => {
-        got[i] = s;
-        return s;
-      }),
-    );
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < urls.length) {
+        const i = cursor++;
+        try {
+          got[i] = await this.probeSpeed(urls[i], opts);
+        } catch {
+          got[i] = { url: urls[i], bytes: 0, ms: 0, ok: false };
+        }
+      }
+    };
     await Promise.race([
-      Promise.all(probes),
-      new Promise((r) => setTimeout(r, SPEED_TEST_MS + 800)),
+      Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, urls.length)) }, worker)),
+      new Promise((r) => setTimeout(r, opts.ms + 800)),
     ]);
     return urls.map((u, i) => got[i] ?? { url: u, bytes: 0, ms: 0, ok: false });
   }
 
   /**
-   * 单线路限时测速：带 Range 只取头部，收满 SPEED_TEST_BYTES 或到 SPEED_TEST_MS 即断。
-   * 加速站不支持 Range 时也能用（收到窗口上限就主动 destroy，不整包下载）。
+   * 单线路限时测速：带 Range 只取头部，收满 `bytes` 或到 `ms` 即断（记 TTFB）。
+   * 加速站不支持 Range 时也能用（收到窗口上限就主动 abort，不整包下载）。
    */
-  private async probeSpeed(url: string): Promise<SpeedSample> {
+  private async probeSpeed(url: string, opts: { bytes: number; ms: number; headersTimeout: number }): Promise<SpeedSample> {
     const ac = new AbortController();
     const t0 = Date.now();
+    let first = 0;
     let bytes = 0;
     let ok = false;
     try {
       const res = await request(url, {
         method: 'GET',
-        headers: { 'User-Agent': UA, Range: `bytes=0-${SPEED_TEST_BYTES - 1}` },
-        // 连接/首字节给 3s（死线路快速出局），body 窗口另算
-        headersTimeout: 3000,
-        bodyTimeout: SPEED_TEST_MS + 500,
+        headers: { 'User-Agent': UA, Range: `bytes=0-${opts.bytes - 1}` },
+        headersTimeout: opts.headersTimeout,
+        bodyTimeout: opts.ms + 500,
         signal: ac.signal,
         dispatcher: dispatchChain(url, agent)[0],
       });
@@ -247,10 +278,11 @@ export class UpdateService {
       }
       ok = true;
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => { ac.abort(); resolve(); }, SPEED_TEST_MS);
+        const timer = setTimeout(() => { ac.abort(); resolve(); }, opts.ms);
         res.body.on('data', (c: Buffer) => {
+          if (!first) first = Date.now();
           bytes += c.length;
-          if (bytes >= SPEED_TEST_BYTES) {
+          if (bytes >= opts.bytes) {
             clearTimeout(timer);
             ac.abort();
             resolve();
@@ -261,9 +293,9 @@ export class UpdateService {
       });
     } catch {
       // abort 属预期（测速窗口到）；其它异常按不可用处理
-      return { url, bytes, ms: Date.now() - t0, ok: ok && bytes > 0 };
+      return { url, bytes, ms: Date.now() - t0, ok: ok && bytes > 0, ttfb: first ? first - t0 : 0 };
     }
-    return { url, bytes, ms: Date.now() - t0, ok };
+    return { url, bytes, ms: Date.now() - t0, ok, ttfb: first ? first - t0 : 0 };
   }
 
   /**

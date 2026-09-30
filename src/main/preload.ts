@@ -10,7 +10,7 @@ const invoke = <T>(channel: string, ...args: unknown[]): Promise<IpcResult<T>> =
   ipcRenderer.invoke(channel, ...args);
 
 const api = {
-  system: { ping: () => invoke<string>(IPC.SYSTEM_PING), icon: () => invoke<string>(IPC.APP_ICON), setTheme: (t: string) => invoke<void>(IPC.THEME_SET, t), quit: () => invoke<void>(IPC.APP_QUIT), dataDir: () => invoke(IPC.SYSTEM_DATA_DIR) },
+  system: { ping: () => invoke<string>(IPC.SYSTEM_PING), icon: () => invoke<string>(IPC.APP_ICON), setTheme: (t: string) => invoke<void>(IPC.THEME_SET, t), quit: () => invoke<void>(IPC.APP_QUIT), dataDir: () => invoke(IPC.SYSTEM_DATA_DIR), sessionId: () => invoke<string>(IPC.SYSTEM_SESSION_ID) },
   config: {
     import: (args: { url?: string; json?: string }) => invoke(IPC.CONFIG_IMPORT, args),
     listSites: () => invoke(IPC.CONFIG_LIST_SITES),
@@ -100,6 +100,10 @@ const api = {
       return () => { ipcRenderer.removeListener(IPC.VOD_SEARCH_ALL_PROGRESS, l); };
     },
     play: (a: { key: string; flag: string; id: string }) => invoke(IPC.VOD_PLAY, a),
+    // ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定）——探测本机播放器 / 用当前地址拉起
+    detectPlayers: () => invoke<Array<{ id: string; name: string; path: string }>>(IPC.VOD_DETECT_PLAYERS),
+    openExternal: (a: { url: string; path?: string }) =>
+      invoke<{ ok: boolean; player?: string; error?: string }>(IPC.VOD_OPEN_EXTERNAL, a),
   },
   live: {
     load: (index: number) => invoke(IPC.LIVE_LOAD, index),
@@ -175,6 +179,9 @@ const api = {
     maximize: () => invoke(IPC.WIN_MAXIMIZE),
     close: () => invoke(IPC.WIN_CLOSE),
     isMaximized: () => invoke<boolean>(IPC.WIN_IS_MAXIMIZED),
+    // ★ 2026-09-30（用户要求）：播放器置顶按钮（按发起窗口生效；返回设置后的真实状态）
+    setAlwaysOnTop: (on: boolean) => invoke<boolean>(IPC.WIN_SET_ALWAYS_ON_TOP, !!on),
+    isAlwaysOnTop: () => invoke<boolean>(IPC.WIN_IS_ALWAYS_ON_TOP),
   },
   net: {
     // 监听主进程推送的实时网速（KB/s，源于 /play 中继真实转发字节）
@@ -190,6 +197,8 @@ const api = {
   player: {
     open: (init: unknown) => invoke(IPC.PLAYER_OPEN, init),
     switchEp: (epIndex: number) => invoke(IPC.PLAYER_SWITCH_EP, epIndex),
+    /** ★ 2026-09-30：渲染层订阅就绪 → 主进程重发最新 init（新窗口首推与订阅的竞态，见 PlayerWindow） */
+    ready: () => invoke(IPC.PLAYER_READY),
     isOpen: () => invoke<{ open: boolean }>(IPC.PLAYER_IS_OPEN),
     close: () => invoke('player:close'),
     setMini: (isMini: boolean) => invoke<{ mini: boolean }>(IPC.PLAYER_SET_MINI, isMini),

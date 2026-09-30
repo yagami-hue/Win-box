@@ -73,7 +73,11 @@ export function detectPlayers(overridePath = ''): ExternalPlayer[] {
   const ov = (overridePath || '').trim();
   if (ov) {
     try {
-      if (existsSync(ov)) return [{ id: 'custom', name: '自定义播放器', path: ov }, ...list.filter((p) => p.path !== ov)];
+      if (existsSync(ov)) {
+        // ★ 2026-09-30：用户填的路径若就是某个已知播放器 → 沿用它的名字（别显示「自定义播放器」）
+        const known = list.find((p) => p.path.toLowerCase() === ov.toLowerCase());
+        return [{ id: known?.id ?? 'custom', name: known?.name ?? '自定义播放器', path: ov }, ...list.filter((p) => p.path !== ov)];
+      }
     } catch {
       /* 用户填的路径非法 → 忽略，继续用探测结果 */
     }

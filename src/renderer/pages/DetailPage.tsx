@@ -8,6 +8,7 @@ import type { Episode, MetaExtra, MetaHit, VodDetail } from '../../shared/types'
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 import { pickCover } from '../lib/coverPick';
 import { formatEpisodeLabel } from '../lib/epName';
+import { EP_PAGE_SIZE, epPageSlice } from '../lib/epPager';
 import { makeStaleGuard } from '../lib/staleGuard';
 import { detailIsEmpty } from '../../engine/config/sourceKind';
 import HScrollRow from '../components/HScrollRow';
@@ -40,6 +41,13 @@ export default function DetailPage({
   const [detail, setDetail] = useState<VodDetail | null>(null);
   const [flag, setFlag] = useState('');
   const [ep, setEp] = useState(0);
+  /**
+   * ★ 2026-09-30（用户要求）：剧集列表**分页** —— 每页至多 `EP_PAGE_SIZE`（50）集，多的翻页展示。
+   *   页码只为浏览用；选中集 `ep` 始终是**全局下标**（播放/高亮/记忆都不受翻页影响）。
+   */
+  const [epPage, setEpPage] = useState(0);
+  /** 剧集列表容器（翻页后把新页开头带回视野） */
+  const epListRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
   /**
@@ -94,6 +102,7 @@ export default function DetailPage({
           const e = mem && mem.ep >= 0 && mem.ep < eps.length ? mem.ep : 0;
           setFlag(f);
           setEp(e);
+          setEpPage(Math.floor(e / EP_PAGE_SIZE)); // 恢复的选中集可能在后几页 → 翻到它所在的页
           uiMem.detail.set(memKey, { flag: f, ep: e, scrollTop: mem?.scrollTop ?? 0 });
         }
       })
@@ -228,6 +237,7 @@ export default function DetailPage({
     setBusy(false);
     setFlag(f);
     setEp(0);
+    setEpPage(0); // ★ 换线路 → 集列表变了，回到第一页
     uiMem.detail.set(memKey, { flag: f, ep: 0, scrollTop: contentRef.current?.scrollTop ?? 0 });
   }
   function chooseEp(i: number) {
@@ -240,6 +250,15 @@ export default function DetailPage({
     void client.playerIsOpen().then((r) => {
       if (r.open) void client.playerSwitchEp(i).catch(() => undefined);
     }).catch(() => undefined);
+  }
+
+  // ★ 2026-09-30（用户要求）：剧集列表分页（每页至多 EP_PAGE_SIZE 集，页码越界自动夹取）
+  const epAll = detail?.episodes[flag] || [];
+  const epPaged = epPageSlice(epAll, epPage);
+  /** 翻页：切换页码并把新页开头带回视野（翻页按钮在列表下方，不滚一下会停在新页末尾） */
+  function goEpPage(p: number): void {
+    setEpPage(p);
+    requestAnimationFrame(() => epListRef.current?.scrollIntoView({ block: 'start' }));
   }
 
   async function play() {
@@ -418,18 +437,28 @@ export default function DetailPage({
                     <span key={f} className={`tag ${f === flag ? 'active' : ''}`} onClick={() => chooseFlag(f)}>{f}</span>
                   ))}
                 </div>
-                <div className="ep-list">
-                  {(detail.episodes[flag] || []).map((e, i) => (
-                    // ★ 2026-09-24：网盘源集名是一整串文件名 → 只展示「第N集 · 体积」（title 保留原名可悬停查看）
-                    <div key={i} className={`ep ${i === ep ? 'active' : ''}`} onClick={() => chooseEp(i)} title={e.name || e.url}>
-                      {formatEpisodeLabel(e.name, i)}
-                    </div>
-                  ))}
+                {/* ★ 2026-09-30（用户要求）：剧集分页 —— 每页至多 EP_PAGE_SIZE 集；翻页按钮只放列表下方、区域右下角 */}
+                <div className="ep-list" ref={epListRef}>
+                  {epPaged.items.map((e, i) => {
+                    const gi = epPaged.start + i; // 全局集下标：选择/高亮/播放都按它，翻页不影响已选集
+                    return (
+                      // ★ 2026-09-24：网盘源集名是一整串文件名 → 只展示「第N集 · 体积」（title 保留原名可悬停查看）
+                      <div key={gi} className={`ep ${gi === ep ? 'active' : ''}`} onClick={() => chooseEp(gi)} title={e.name || e.url}>
+                        {formatEpisodeLabel(e.name, gi)}
+                      </div>
+                    );
+                  })}
                 </div>
-                <div className="row" style={{ marginTop: 14 }}>
+                <div className="row" style={{ marginTop: 14, alignItems: 'center' }}>
                   <button className={`primary${nf ? ' nf-play-btn' : ''}`} disabled={busy} onClick={play}>
                     {busy ? '正在解析播放地址…' : '▶ 播放选中'}
                   </button>
+                  {epPaged.pageCount > 1 && (
+                    <div className="row ep-pager" style={{ marginLeft: 'auto', gap: 8 }}>
+                      <button disabled={epPaged.page <= 0} onClick={() => goEpPage(epPaged.page - 1)}>上一页</button>
+                      <button disabled={epPaged.page >= epPaged.pageCount - 1} onClick={() => goEpPage(epPaged.page + 1)}>下一页</button>
+                    </div>
+                  )}
                 </div>
               </>
             ) : (

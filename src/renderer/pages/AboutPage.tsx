@@ -2,7 +2,6 @@
 // ★ 2026-09-28（用户要求）：新增「说明」页 —— 详细版免责声明 + GitHub / 爱发电入口。
 //   链接一律走 window.open：主进程 setWindowOpenHandler 会拦截并交给系统浏览器（shell.openExternal），
 //   不在应用内加载任何外部页面。
-import BackButton from '../components/BackButton';
 
 /** 项目主页（源码 / 更新发布） */
 const GITHUB_URL = 'https://github.com/yagami-hue/Win-box';
@@ -17,7 +16,6 @@ export default function AboutPage() {
   return (
     <>
       <div className="topbar">
-        <BackButton fallback="/" label="返回" />
         <h2 style={{ margin: 0, fontSize: 16 }}>说明 · 免责声明</h2>
       </div>
       <div className="content about">
