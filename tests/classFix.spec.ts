@@ -323,4 +323,40 @@ describe('instrLen — 指令长度表（tableswitch / wide 特判）', () => {
     const wide = Buffer.from([0xc4, 0x84, 0, 0, 0, 0]); // wide iinc = 6
     expect(instrLen(wide, 0)).toBe(6);
   });
+
+  // ★★ 2026-10-08（用户报「打开就卡死/闪退」的真根因）：畸形/错位字节码里
+  //   `tableswitch` 的 hi < lo、`lookupswitch` 的 npairs < 0 会算出**负数长度** ——
+  //   调用方 `i += len` 原地打转（负跳后又被逐字节推回原处）⇒ **死循环**。
+  //   实测：某 227KB 混淆类（merge/A/f1.class）在 auto-dex2jar 产物里必现；
+  //   而这条链跑在主进程（jar 收编 → classFix）⇒ 整个应用冻结，且收编永远完不成
+  //   ⇒ 每次启动都在同一处卡死（用户侧看到的就是「崩溃/闪退」）。
+  //   口径：长度**恒 ≥ 1**（宁可漏修，绝不卡死）。
+  it('畸形 tableswitch（hi < lo）→ 长度钳到 ≥1（旧实现返回负数 ⇒ 扫描死循环）', () => {
+    const code = Buffer.alloc(64);
+    code[0] = 0xaa;
+    code.writeInt32BE(0, 4); // default
+    code.writeInt32BE(100, 8); // low
+    code.writeInt32BE(3, 12); // high < low
+    expect(instrLen(code, 0)).toBeGreaterThanOrEqual(1);
+  });
+
+  it('畸形 lookupswitch（npairs < 0）→ 长度钳到 ≥1', () => {
+    const code = Buffer.alloc(64);
+    code[0] = 0xab;
+    code.writeInt32BE(0, 4); // default
+    code.writeInt32BE(-5, 8); // npairs 负值
+    expect(instrLen(code, 0)).toBeGreaterThanOrEqual(1);
+  });
+
+  it('含畸形 switch 的方法体：parseClassBytes 必须终止（回归：旧实现在此死循环）', () => {
+    // 方法体 = [畸形 tableswitch(hi<lo), return]。若长度钳制失效，本用例会一直转圈到超时失败。
+    const badSwitch = Buffer.alloc(16);
+    badSwitch[0] = 0xaa;
+    badSwitch.writeInt32BE(0, 4);
+    badSwitch.writeInt32BE(100, 8);
+    badSwitch.writeInt32BE(3, 12);
+    const bytes = makeClass('A', 'S', [{ name: 'm', desc: '()V', code: () => [...badSwitch, 0xb1] }]);
+    const info = parseClassBytes(bytes);
+    expect(info.methods).toHaveLength(1);
+  }, 5000);
 });

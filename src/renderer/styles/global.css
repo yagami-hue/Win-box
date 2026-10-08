@@ -78,6 +78,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .tb-btn:hover { background: var(--bg-elev2); color: var(--text); box-shadow: none; }
 .tb-btn.tb-close:hover { background: #e81123; color: #fff; }
 .tb-btn:active { transform: none; }
+/* ★ 2026-10-08（用户要求「置顶按钮挪到最小化按钮旁边」）：标题栏置顶按钮开启态（accent 高亮 + 淡底）。
+   带 `:root[data-theme]` 前缀压过皮肤（`.app.pwin .tb-btn:hover` 等），同 §C54 教训。 */
+:root[data-theme] .tb-btn.tb-pin-on { color: var(--accent); background: rgba(255, 255, 255, .12); }
+:root[data-theme] .tb-btn.tb-pin-on:hover { color: var(--accent); background: rgba(255, 255, 255, .18); }
 
 /* ---- 小窗口（mini）细拖拽条 ----
    小窗不再渲染完整标题栏（38px 的标题栏在 216px 高的窗口里就是"边框"），
@@ -181,6 +185,16 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .srcpick-item { padding: 7px 10px; border-radius: 6px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srcpick-item:hover { background: var(--accent-soft, rgba(120,170,255,.12)); }
 .srcpick-item.active { color: var(--accent); font-weight: 650; }
+/* ★ 2026-10-08（用户要求「换源下拉框要能删源/调顺序/置顶多个源」）：源行 = 名字 + 悬停显现的管理按钮
+   （置顶 ⤒ / 上移 ↑ / 下移 ↓ / 删除 ✕；只在当前生效订阅的行出现） */
+.srcpick-col-src .srcpick-item { display: flex; align-items: center; gap: 6px; }
+.srcpick-sname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srcpick-act { display: none; gap: 2px; flex: none; }
+.srcpick-item:hover .srcpick-act { display: inline-flex; }
+.srcpick-act button { all: unset; cursor: pointer; width: 18px; height: 18px; line-height: 18px; text-align: center; border-radius: 4px;
+  font-size: 11px; color: #cfd6e4; background: rgba(255, 255, 255, .08); }
+.srcpick-act button:hover { background: rgba(255, 255, 255, .22); color: #fff; }
+.srcpick-act button.danger:hover { background: rgba(232, 17, 35, .85); color: #fff; }
 /* 左栏订阅项：当前生效订阅加圆点标记（悬停 title 里带源数；行内 ::before，保证 ellipsis 作用在整行） */
 .srcpick-sub.cur::before { content: '● '; color: var(--accent-2); font-size: 8px; vertical-align: 2px; }
 .srcpick-sub.active { background: var(--accent-soft, rgba(120,170,255,.12)); font-weight: 600; }
@@ -469,6 +483,31 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .vp-rate { background: rgba(255,255,255,.12); color: #fff; border: none; border-radius: 5px; font-size: 11px;
   padding: 2px 4px; cursor: pointer; }
 .vp-rate option { color: #111; }
+/* ★ 2026-10-08（用户拍板「内置官方构建」）MPV 内核切换按钮：小标（激活态复用 .vp-ctl.vp-on 的 accent 高亮） */
+.vp-kernel-tag { font-size: 10px; font-weight: 700; letter-spacing: .5px; }
+
+/* ★★ 2026-10-08 MPV 高兼容内核：播放器窗口 transparent=true + 播放区页面透明 ——
+   mpv 子窗口从透明处透出，HTML 覆盖层（控制条/弹幕/设置面板）仍在其上绘制且点击归 HTML（PoC 实测）。
+   普通（HTML5）内核下这些规则不生效（整页仍不透明绘制，视觉与旧版一致）。
+   ★ 透明链必须一路到 .vplayer/.vp-stage（中间任何一层不透明都会整块盖住 mpv 画面）。
+   ★★ 特异度（勿改回 html[data-mpv]）：皮肤包（netflix/bilibili/apple.css）用
+   `:root[data-theme=X] .app.pwin .main`（0,5,0）等规则把播放器壳画成不透明黑 ——
+   本组选择器必须挂 `:root[data-theme][data-mpv]`（0,6,0）才能压过皮肤（同 §C54 置顶按钮那次教训）。 */
+:root[data-theme][data-mpv] body,
+:root[data-theme][data-mpv] .app.pwin,
+:root[data-theme][data-mpv] .app.pwin .main,
+:root[data-theme][data-mpv] .pwin-body,
+:root[data-theme][data-mpv] .pwin-stage,
+:root[data-theme][data-mpv] .vplayer { background: transparent; }
+:root[data-theme][data-mpv] .vplayer video { visibility: hidden; }
+/* ★ mpv 子窗口按父窗口**客户区**渲染（无法只占播放区）→ 标题栏 / mini 条改**浮层**（顶栏渐隐），
+   让出顶部 38px 给画面：否则标题栏会把视频上缘盖掉（竖屏 / 4:3 内容尤其明显）。 */
+:root[data-theme][data-mpv] .app.pwin .main { position: relative; }
+:root[data-theme][data-mpv] .app.pwin .titlebar,
+:root[data-theme][data-mpv] .app.pwin .mini-strip {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 6; border-bottom: none;
+  background: linear-gradient(180deg, rgba(10, 12, 16, .72), rgba(10, 12, 16, 0));
+}
 
 /* ---- 播放器音量控件：竖向条状音量条（悬浮面板） ---- */
 .vp-vol { position: relative; display: inline-flex; align-items: center; }
@@ -563,6 +602,21 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .vp-subpanel.vp-fitpanel { position: static; width: 268px; }
 /* ★ 2026-09-28（用户要求）：弹幕面板加宽（原本 340px，长剧名读不全）；候选名最多两行 */
 .vp-subpanel.vp-dmpanel { width: 438px; max-height: 380px; }
+/* ★ 2026-10-08（用户要求）：跳过片头片尾面板 / 进度条右键菜单 / 跳过提示 */
+.vp-subpanel.vp-skippanel { width: 320px; }
+.vp-skipmenu { position: fixed; z-index: 40; width: 236px; padding: 6px;
+  background: var(--bg-glass, rgba(18,20,26,.96)); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.55); display: flex; flex-direction: column; gap: 2px; }
+.vp-skipmenu-title { font-size: 11px; color: var(--muted, #9aa3b2); padding: 2px 6px 6px; border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 4px; }
+.vp-skipmenu-item { all: unset; cursor: pointer; font-size: 12px; padding: 6px 8px; border-radius: 6px; color: var(--text); }
+.vp-skipmenu-item:hover { background: rgba(255,255,255,.10); }
+.vp-skipmenu-item:disabled { opacity: .45; cursor: not-allowed; }
+.vp-skipmenu-item:disabled:hover { background: none; }
+.vp-skipmenu-cancel { color: var(--muted, #9aa3b2); }
+.vp-toast { position: absolute; left: 50%; top: 64px; transform: translateX(-50%); z-index: 26; pointer-events: none;
+  padding: 8px 16px; border-radius: 999px; background: rgba(0,0,0,.72); color: #fff; font-size: 13px;
+  border: 1px solid rgba(255,255,255,.14); }
 .vp-dmpanel .vsp-item-name { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .vsp-fits { display: flex; flex-wrap: wrap; gap: 6px; }
 .vsp-fits .vsp-btn { flex: 0 0 calc(50% - 3px); text-align: center; box-sizing: border-box; }

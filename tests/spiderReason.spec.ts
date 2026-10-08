@@ -5,7 +5,7 @@
 // 但默认只进 logger，用户只看到笼统的「蜘蛛返回空结果」。extractSpiderReason 把
 // stderr 里的最后一条 SpiderLog 压成人可读短句，供 SourceViewModel 细化文案。
 import { describe, it, expect } from 'vitest';
-import { extractSpiderReason, translateSpiderLog, isSpiderClassMissing } from '../src/engine/spider/JarSpiderBridge';
+import { extractSpiderReason, extractSpiderReasonRaw, translateSpiderLog, isSpiderClassMissing } from '../src/engine/spider/JarSpiderBridge';
 
 const LOADED = '[android.Log.D] SpiderLog: 自定义爬虫代码加载成功！';
 const LOADED_TW = '[android.Log.D] SpiderLog: 自定義爬蟲代碼載入成功！';
@@ -73,6 +73,26 @@ describe('extractSpiderReason', () => {
   });
 });
 
+// ★ 2026-10-08（用户报「配置中心」源只见一句「接口缺失请反馈」、原始异常被吞）：
+//   人话翻译会给用户看，但「具体缺哪个类/方法」在 ` :: 异常` 尾巴里 —— 须并行落原始串才能定位。
+describe('extractSpiderReasonRaw（同一条 SpiderLog 的原文，★ 2026-10-08）', () => {
+  it('保留 :: 异常尾巴（extractSpiderReason 会吞掉它）', () => {
+    const err = `${LOADED}\n[android.Log.D] SpiderLog: 配置中心接口失败 :: java.lang.NoSuchMethodError: android.content.Context.getExternalFilesDir`;
+    expect(extractSpiderReason(err)).toBe('配置中心接口失败');
+    expect(extractSpiderReasonRaw(err)).toContain('java.lang.NoSuchMethodError');
+    expect(extractSpiderReasonRaw(err)).toContain('android.content.Context.getExternalFilesDir');
+  });
+  it('只有成功日志 / 空输入 → 空串（与 extractSpiderReason 同过滤）', () => {
+    expect(extractSpiderReasonRaw('')).toBe('');
+    expect(extractSpiderReasonRaw(LOADED)).toBe('');
+    expect(extractSpiderReasonRaw(FETCHED)).toBe('');
+  });
+  it('截断到 300 字符', () => {
+    const err = `[android.Log.D] SpiderLog: boom :: ${'z'.repeat(500)}`;
+    expect(extractSpiderReasonRaw(err).length).toBe(300);
+  });
+});
+
 /**
  * 翻译层回归：把"行话"映射成用户能懂的中文。
  *
@@ -120,6 +140,18 @@ describe('translateSpiderLog', () => {
     const r = translateSpiderLog('java.lang.NoSuchFieldError: android.view.View.mResizeMode');
     expect(r).toContain('桌面版缺失');
     expect(r).not.toContain('架构限制');
+  });
+
+  // ★ 2026-10-08（用户报「配置中心」源）：符号名必须上屏 —— 只说「接口缺失请反馈」等于没有可行动信息。
+  it('NoSuchMethodError 带上缺失方法名', () => {
+    const r = translateSpiderLog('java.lang.NoSuchMethodError: android.app.Activity.getWindow()Landroid/view/Window;');
+    expect(r).toContain('桌面版缺失方法');
+    expect(r).toContain('android.app.Activity.getWindow');
+  });
+
+  it('NoSuchFieldError / ClassNotFoundException 带上缺失符号名', () => {
+    expect(translateSpiderLog('java.lang.NoSuchFieldError: android.view.View.mResizeMode')).toContain('android.view.View.mResizeMode');
+    expect(translateSpiderLog('java.lang.ClassNotFoundException: android.content.ContentResolver')).toContain('android.content.ContentResolver');
   });
 
   // ★ 区分「蜘蛛自己的类找不到」与「桌面版缺接口」——两者成因与处置完全不同：

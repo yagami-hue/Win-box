@@ -60,21 +60,49 @@ export interface BaiduShareItem {
   path: string;
 }
 
-/** 该文本里是否含百度分享链接（`pan.baidu.com/s/<id>`）；大小写不敏感 */
+/**
+ * ★ 2026-10-08：文本的「匹配候选」= 原文 + 逐层 percent-decode（≤2 轮）。
+ *
+ * 根因（用户日志实证）：jar 把分享链接塞进 `do=pan` 代理地址的 **query 参数值**时会
+ * percent-encode（`fileId=https%3A%2F%2Fpan.baidu.com%2Fs%2F…`，部分 jar 还会二次编码），
+ * 裸正则匹配不到 → 解链**静默**失败 → 用户侧「百度网盘线路黑屏」且日志无任何线索。
+ * 解码失败（非法百分号序列）不抛：原文即全部候选。
+ */
+function shareTextCandidates(text: string): string[] {
+  const out: string[] = [];
+  let cur = String(text || '');
+  for (let i = 0; i < 3 && cur; i++) {
+    out.push(cur);
+    let next = '';
+    try {
+      next = decodeURIComponent(cur);
+    } catch {
+      break; // 非法百分号序列：不再往下解
+    }
+    if (next === cur) break;
+    cur = next;
+  }
+  return out;
+}
+
+/** 该文本里是否含百度分享链接（`pan.baidu.com/s/<id>`，兼容 percent-encoded 形态）；大小写不敏感 */
 export function isBaiduSharePlay(text: string): boolean {
-  return /pan\.baidu\.com\/s\/[0-9a-zA-Z_-]+/i.test(text || '');
+  return shareTextCandidates(text).some((s) => /pan\.baidu\.com\/s\/[0-9a-zA-Z_-]+/i.test(s));
 }
 
 /**
  * 从文本（分享链接 / jar 的 `do=pan` 代理地址 / episode id）里解析分享 id 与提取码。
+ * ★ 兼容 query 值里的 percent-encoded 分享链接（见 shareTextCandidates）。
  * 提取码可选：`?pwd=abcd`（百度为 4 位，大小写敏感）。
  */
 export function extractBaiduShare(text: string): { short: string; pwd: string } | null {
-  const s = text || '';
-  const m = /pan\.baidu\.com\/s\/([0-9a-zA-Z_-]+)/i.exec(s);
-  if (!m) return null;
-  const p = /[?&](?:pwd|password|passcode)=([0-9a-zA-Z]{4})/i.exec(s);
-  return { short: m[1], pwd: p ? p[1] : '' };
+  for (const s of shareTextCandidates(text)) {
+    const m = /pan\.baidu\.com\/s\/([0-9a-zA-Z_-]+)/i.exec(s);
+    if (!m) continue;
+    const p = /[?&](?:pwd|password|passcode)=([0-9a-zA-Z]{4})/i.exec(s);
+    return { short: m[1], pwd: p ? p[1] : '' };
+  }
+  return null;
 }
 
 /**

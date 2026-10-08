@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseSrt, parseVtt, parseAss, parseSubtitleFile, shiftCues } from '../src/engine/subtitle/parseSubtitle';
+import { parseSrt, parseVtt, parseAss, parseSubtitleFile, shiftCues, cuesToSrt } from '../src/engine/subtitle/parseSubtitle';
 
 const SRT = `1
 00:00:01,000 --> 00:00:03,500
@@ -147,5 +147,27 @@ describe('parseSubtitleFile — 扩展名与内容不符时的二次尝试', () 
   });
   it('确实是垃圾文本 → 仍返回空（不臆造 cue）', () => {
     expect(parseSubtitleFile('a.ass', 'garbage')).toEqual([]);
+  });
+});
+
+// ---- ★ 2026-10-08：MPV 内核外挂字幕 —— cue 列表回写 SRT（mpv 走 sub-add 读文件，不认 VTTCue）----
+describe('cuesToSrt — cue → SRT 文本', () => {
+  it('时间戳格式 HH:MM:SS,mmm + 序号 + 文本（CRLF 分隔）', () => {
+    const srt = cuesToSrt(parseSrt(SRT));
+    expect(srt).toContain('1\r\n00:00:01,000 --> 00:00:03,500\r\n你好，世界');
+    expect(srt).toContain('2\r\n00:00:04,000 --> 00:00:06,000\r\n第二行字幕');
+  });
+  it('往返解析：cues → SRT → parseSrt 内容一致（偏移后的 cue 亦同）', () => {
+    const cues = shiftCues(parseSrt(SRT), 2.5);
+    const back = parseSrt(cuesToSrt(cues));
+    expect(back).toHaveLength(cues.length);
+    expect(back[0].start).toBeCloseTo(cues[0].start, 2);
+    expect(back[0].end).toBeCloseTo(cues[0].end, 2);
+    expect(back[0].text).toBe(cues[0].text);
+  });
+  it('负值/非法时间按 0 处理，空列表 → 空串', () => {
+    expect(cuesToSrt([])).toBe('');
+    const srt = cuesToSrt([{ start: -5, end: 1.2, text: 'x' }]);
+    expect(srt).toContain('00:00:00,000 --> 00:00:01,200');
   });
 });

@@ -80,3 +80,42 @@ export function useWaterfall(): boolean {
   }, []);
   return on;
 }
+
+/**
+ * ★ 2026-10-08（用户要求「设置-外观加开关：控制视频详情页是否单独窗口展示」）：
+ *   详情页「独立窗口」偏好（localStorage `winbox-detail-window`；默认**关** = 主窗口内嵌，与现状一致）。
+ *   开启后：点列表/历史 → 在独立窗口打开详情；已开窗口复用（聚焦 + 换路由），不再堆窗口。
+ */
+const KEY_DETAIL_WINDOW = 'winbox-detail-window';
+
+export function getDetailWindowPref(): boolean {
+  try {
+    return localStorage.getItem(KEY_DETAIL_WINDOW) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function setDetailWindowPref(v: boolean): void {
+  try {
+    localStorage.setItem(KEY_DETAIL_WINDOW, v ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+  try {
+    window.dispatchEvent(new Event(UI_PREFS_EVENT));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** React Hook：订阅「详情页独立窗口」偏好（配置页切换后，App 的打开详情行为立即跟着变） */
+export function useDetailWindowPref(): boolean {
+  const [on, setOn] = useState<boolean>(() => getDetailWindowPref());
+  useEffect(() => {
+    const onChange = (): void => setOn(getDetailWindowPref());
+    window.addEventListener(UI_PREFS_EVENT, onChange);
+    return () => window.removeEventListener(UI_PREFS_EVENT, onChange);
+  }, []);
+  return on;
+}

@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { client } from '../api/client';
 import BackButton from '../components/BackButton';
+import { isDetailWindow } from '../lib/detailWin';
 import { uiMem, schedulePersist } from '../lib/uiMemory';
 import type { Episode, MetaExtra, MetaHit, VodDetail } from '../../shared/types';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
@@ -30,6 +31,8 @@ export default function DetailPage({
   const { key, id } = useParams<{ key: string; id: string }>();
   const [searchParams] = useSearchParams();
   const nav = useNavigate();
+  /** ★ 2026-10-08（用户要求「详情页独立窗口」）：本页是否运行在独立详情窗口里（hash 带 dw=1）→ 返回=关窗 */
+  const isDetailWin = isDetailWindow();
   /** ★ 2026-09-24：Netflix 皮肤下详情页用「大图背景 + 大标题 + 白色播放键」的影院式排版
    *  ★ 2026-09-29：Apple 皮肤用同源剧照背景，但排版走 Apple TV 影片页观感（玻璃信息卡 + 蓝色胶囊播放键） */
   const nf = useTheme() === 'netflix';
@@ -387,7 +390,13 @@ export default function DetailPage({
         />
       )}
       <div className="topbar">
-        <BackButton fallback="/home" label="返回列表" />
+        {/* ★ 2026-10-08（用户要求「详情页独立窗口」）：独立窗口里「返回」= 关闭该窗口（无侧栏可回）；
+            主窗口内仍是「返回列表」（既有行为）。 */}
+        <BackButton
+          fallback="/home"
+          label={isDetailWin ? '关闭' : '返回列表'}
+          onClick={isDetailWin ? () => void client.winClose() : undefined}
+        />
         <span className="muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
       </div>
       <div className={`content${nf ? ' nf-detail-wrap' : ap ? ' ap-detail-wrap' : ''}`} ref={contentRef}>

@@ -8,6 +8,11 @@ import type { DanmakuItem, DanmakuRegion } from '../../shared/danmaku';
 
 interface DanmakuOverlayProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  /**
+   * ★ 2026-10-08 MPV 内核：`<video>` 不再推进播放 —— 时间与画面尺寸改由主进程事件驱动
+   *   （time = 当前播放秒；size = 画面物理像素）。缺省（html5 内核）走 videoRef。
+   */
+  mpv?: { time: React.RefObject<number>; size: React.RefObject<{ w: number; h: number }> } | null;
   items: DanmakuItem[];
   enabled: boolean;
   region: DanmakuRegion;
@@ -20,7 +25,7 @@ interface DanmakuOverlayProps {
   fit?: string;
 }
 
-export default function DanmakuOverlay({ videoRef, items, enabled, region, fontSize, opacity, density, speed, offset, fit = 'contain' }: DanmakuOverlayProps) {
+export default function DanmakuOverlay({ videoRef, mpv = null, items, enabled, region, fontSize, opacity, density, speed, offset, fit = 'contain' }: DanmakuOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   /** 视频真实显示区（相对画布）：contain 时上下留出黑边高度 */
@@ -36,7 +41,10 @@ export default function DanmakuOverlay({ videoRef, items, enabled, region, fontS
       const w = parent.clientWidth;
       const h = parent.clientHeight;
       setSize((p) => (p.w === w && p.h === h ? p : { w, h }));
-      const a = danmakuArea({ fit, canvasW: w, canvasH: h, videoW: v?.videoWidth || 0, videoH: v?.videoHeight || 0 });
+      // ★ mpv 内核：画面尺寸来自主进程事件（mpv 子窗口按物理像素渲染）；无则按容器满幅
+      const videoW = mpv ? mpv.size.current.w : v?.videoWidth || 0;
+      const videoH = mpv ? mpv.size.current.h || parent.clientHeight : v?.videoHeight || 0;
+      const a = danmakuArea({ fit, canvasW: w, canvasH: h, videoW, videoH });
       setArea((p) => (p.top === a.top && p.height === a.height ? p : a));
     };
     update();
@@ -44,12 +52,14 @@ export default function DanmakuOverlay({ videoRef, items, enabled, region, fontS
     ro.observe(parent);
     v?.addEventListener('loadedmetadata', update);
     v?.addEventListener('resize', update);
+    const t = mpv ? setInterval(update, 800) : null; // mpv：尺寸事件无 DOM 可监听，低频校准
     return () => {
       ro.disconnect();
       v?.removeEventListener('loadedmetadata', update);
       v?.removeEventListener('resize', update);
+      if (t) clearInterval(t);
     };
-  }, [videoRef, fit]);
+  }, [videoRef, mpv, fit]);
 
   // 轨道布局：items/绘制区/偏好变化时重算（纯函数，渲染层只负责绘制）
   const layout = useMemo(
@@ -80,7 +90,8 @@ export default function DanmakuOverlay({ videoRef, items, enabled, region, fontS
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       return;
     }
-    if (!v) return;
+    // ★ mpv 内核：无 <video> 时间源，用主进程推送的 time（mpv.time.current）
+    if (!v && !mpv) return;
 
     let raf = 0;
     let lastT = -1;
@@ -91,7 +102,7 @@ export default function DanmakuOverlay({ videoRef, items, enabled, region, fontS
 
     const draw = () => {
       raf = requestAnimationFrame(draw);
-      const t = v.currentTime;
+      const t = mpv ? mpv.time.current : (v as HTMLVideoElement).currentTime;
       // 暂停不跳过绘制：t 不变则弹幕位置不变，画面自然冻结（否则暂停时加载弹幕看不到出现）
       if (t < lastT || Math.abs(t - lastT) > SEEK_JUMP) si = 0;
       lastT = t;
@@ -139,7 +150,7 @@ export default function DanmakuOverlay({ videoRef, items, enabled, region, fontS
     };
     draw();
     return () => cancelAnimationFrame(raf);
-  }, [enabled, layout, fontSize, opacity, region, area.top, videoRef, speed]);
+  }, [enabled, layout, fontSize, opacity, region, area.top, videoRef, speed, mpv]);
 
   return (
     <canvas

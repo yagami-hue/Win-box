@@ -2,7 +2,7 @@
 // 独立播放器窗口控制器：主窗口停留在「选集」页，播放在独立 BrowserWindow。
 // 支持主窗口换集时同步切换本窗口当前集（player:switchEp）。
 // 支持「小窗口模式」：无边框小窗只保留 上/下集 + 播放暂停（playerSetMini）。
-import { app, BrowserWindow, screen, shell, nativeTheme } from 'electron';
+import { app, BrowserWindow, screen, shell } from 'electron';
 import { join } from 'node:path';
 import { applyWindowCorner } from '../util/windowCorner';
 
@@ -141,8 +141,17 @@ export function openPlayerWindow(init: PlayerInit): void {
     frame: false,
     autoHideMenuBar: true,
     show: false,
-    // ★ 不透明底色：无边框窗口全透明在放大/最大化时未渲染区显黑/形状异常（与主窗口一致的修复）
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0a0c10' : '#dce4ec',
+    /**
+     * ★★ 2026-10-08（MPV 内核硬前提，勿改回不透明）★★
+     *
+     * mpv 以 `--wid=<本窗口 HWND>` 把画面嵌成**子窗口**，而 Chromium 的渲染面在它之上 ——
+     * 只有「窗口 transparent + 播放区页面透明」时，mpv 画面才能从透明处透出；
+     * HTML 覆盖层（控制条/弹幕/字幕）仍绘制在 mpv 之上且点击归 HTML（PoC 实测）。
+     * 普通（HTML5）内核下整页仍是不透明背景绘制 → 视觉与旧版一致；
+     * 最大化副作用沿用既有对策：maximize/unmaximize 时强制 invalidate（见下方监听）。
+     */
+    transparent: true,
+    backgroundColor: '#00000000',
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,

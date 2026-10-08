@@ -36,7 +36,12 @@ import type { UpdateProgress } from '../../shared/update';
 import type { UpdateService } from '../update/UpdateService';
 import { md5Hex } from '../../engine/util/md5';
 // 独立播放器窗口
-import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow, playerResendInit } from '../player/PlayerWindow';
+import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow, playerResendInit, onPlayerWindowClosed } from '../player/PlayerWindow';
+// ★ 2026-10-08 MPV 高兼容播放内核（独立播放器窗口内嵌 --wid）
+import { MpvController } from '../player/MpvController';
+// ★ 2026-10-08 详情页独立窗口（外观开关控制；见 renderer/lib/detailWin.ts）
+import { openDetailWindow } from '../player/DetailWindow';
+import type { MpvCommand, MpvStartOptions } from '../../shared/player';
 // 老板键
 import { bossKey, BOSS_DEFAULT_ACCEL } from '../bossKey';
 import { playerSettings } from '../player/playerSettings';
@@ -56,6 +61,8 @@ const SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slic
 
 export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService, updater: UpdateService, pkgs: LocalPkgStore): void {
   const log = fileLogger;
+  /** ★ 2026-10-08 MPV 播放内核（单会话；播放器窗口关闭/退出应用会 dispose） */
+  const mpv = new MpvController(fileLogger);
 
   // 自定义无边框窗口控制
   ipcMain.handle(IPC.WIN_MINIMIZE, (e) => winOf(e)?.minimize());
@@ -511,6 +518,32 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     return { ok: true };
   }, log);
 
+  // ---- ★ 2026-10-08 详情页独立窗口（外观开关；已开则复用：聚焦 + 通知其换路由）----
+  registerHandler(IPC.WIN_OPEN_DETAIL, (_e: any, a: { key?: string; id?: string; query?: string }) =>
+    openDetailWindow(a || {}), log);
+
+  // ---- ★ 2026-10-08 MPV 高兼容播放内核（独立播放器窗口内嵌；见 main/player/MpvController）----
+  registerHandler(IPC.MPV_STATUS, () => mpv.status(), log);
+  registerHandler(IPC.MPV_START, (e: any, opts: MpvStartOptions) => {
+    const w = winOf(e as IpcMainInvokeEvent);
+    if (!w) throw new Error('播放器窗口不存在（mpv 无法嵌入）');
+    return mpv.start(w, opts || ({ url: '' } as MpvStartOptions));
+  }, log);
+  registerHandler(IPC.MPV_CMD, (_e: any, cmd: MpvCommand) => ({ ok: mpv.command(cmd) }), log);
+  registerHandler(IPC.MPV_STOP, () => {
+    mpv.stop();
+    return { ok: true };
+  }, log);
+  // 播放器窗口关闭 → 停 mpv（不留孤儿进程）；退出应用再兜一道（will-quit）
+  onPlayerWindowClosed(() => mpv.dispose());
+  app.on('will-quit', () => {
+    try {
+      mpv.dispose();
+    } catch {
+      /* ignore */
+    }
+  });
+
   // ---- 老板键（全局快捷键隐藏/恢复窗口）----
   registerHandler(IPC.BOSS_GET, () => bossKey.settings, log);
   registerHandler(IPC.BOSS_SET, (_e: any, patch: Partial<BossKeySettings>) => {
@@ -558,6 +591,11 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
    * ★ 2026-09-30（用户要求）：`a.seek`（秒）= 续播位置 —— 按播放器类型拼成命令行参数传给播放器（见 seekArgs）。
    */
   registerHandler(IPC.VOD_OPEN_EXTERNAL, (_e: any, a: { url?: string; path?: string; seek?: number }) => {
+    // ★ 2026-10-08（用户要求「换成勾选项；就算填了路径，不勾选依旧不使用第三方播放器」）：
+    //   总开关在**主进程兜一道** —— 任何调用方都不得绕过：未勾选 = 拒绝拉起（渲染层同判据，见 externalPlay.ts）。
+    if (!playerSettings.settings.vodExternalPlayerEnabled) {
+      return { ok: false, error: '点播外部播放器未启用（请在配置页「播放」中勾选「启用点播外部播放器」）' };
+    }
     const u = String(a?.url || '').trim();
     if (!u) return { ok: false, error: '地址为空' };
     const pick = String(a?.path || '').trim();

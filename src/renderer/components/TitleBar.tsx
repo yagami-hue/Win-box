@@ -4,6 +4,8 @@
 // 可选 props（仅播放器窗口使用）：
 //   showMini —— 在最小化旁显示「小窗口」按钮；mini —— 当前是否为小窗口模式；
 //   onMiniToggle —— 切换回调。mini 时隐藏 最大化(还原)，小窗口按钮变「恢复原窗口」。
+//   ★ 2026-10-08（用户要求）：showPin + pinTop + onPinToggle —— 「置顶」按钮挪到**最小化旁**
+//   （原在播放器下方控制条，用户反馈下方功能区太拥挤；状态由 PlayerPage 统一持有）。
 import { useEffect, useState } from 'react';
 import { client } from '../api/client';
 
@@ -12,6 +14,11 @@ interface TitleBarProps {
   showMini?: boolean;
   mini?: boolean;
   onMiniToggle?: () => void;
+  /** ★ 2026-10-08：显示「置顶」按钮（播放器窗口用；紧挨最小化按钮左侧） */
+  showPin?: boolean;
+  /** 当前置顶态（由外层持有，TitleBar 只渲染） */
+  pinTop?: boolean;
+  onPinToggle?: () => void;
   /**
    * ★ 2026-09-29：`mac` = macOS 交通灯变体（仅供 Apple 皮肤的全宽工具栏使用）——
    *   渲染**左置红/黄/绿圆点**（关闭/最小化/最大化，符号悬停显现），标题与右侧窗口按钮不再渲染
@@ -20,7 +27,7 @@ interface TitleBarProps {
   variant?: 'win' | 'mac';
 }
 
-export default function TitleBar({ title = 'Win-Box', showMini = false, mini = false, onMiniToggle, variant = 'win' }: TitleBarProps) {
+export default function TitleBar({ title = 'Win-Box', showMini = false, mini = false, onMiniToggle, showPin = false, pinTop = false, onPinToggle, variant = 'win' }: TitleBarProps) {
   const [max, setMax] = useState(false);
   const [icon, setIcon] = useState('');
   useEffect(() => {
@@ -67,6 +74,27 @@ export default function TitleBar({ title = 'Win-Box', showMini = false, mini = f
         <span className="tb-text">{title}</span>
       </div>
       <div className="tb-controls" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+        {/* ★ 2026-10-08（用户要求）：置顶（始终在最上层）—— 紧挨最小化按钮左侧；图标填充 + accent 高亮表示开启 */}
+        {showPin && (
+          <button
+            className={`tb-btn tb-pin${pinTop ? ' tb-pin-on' : ''}`}
+            title={pinTop ? '置顶：开（点击取消）' : '置顶：关（点击把窗口固定在最上层）'}
+            aria-pressed={pinTop}
+            onClick={() => onPinToggle?.()}
+          >
+            {pinTop ? (
+              <svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="currentColor" d="M9.6 3h4.8l.7 6.1 3.1 3.1V14H5.8v-1.8l3.1-3.1L9.6 3Z" />
+                <path d="M12 14v6.6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+              </svg>
+            ) : (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M9.6 3h4.8l.7 6.1 3.1 3.1V14H5.8v-1.8l3.1-3.1L9.6 3Z" />
+                <path d="M12 14v6.6" />
+              </svg>
+            )}
+          </button>
+        )}
         <button className="tb-btn" title="最小化" onClick={() => void client.winMinimize()}>
           <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><line x1="3.5" y1="8" x2="12.5" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>

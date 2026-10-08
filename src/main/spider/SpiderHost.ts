@@ -184,6 +184,39 @@ function raceTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
   });
 }
 
+/**
+ * ★ 2026-10-08：解析 jar 的 `do=pan` 代理地址 query（**不能用 `new URL`** —— 端口 `:-1` 非法，必抛）。
+ * 返回「参数名 → percent-decode（≤2 轮）后的值」；仅用于诊断日志与形态判读（调用方不得据此拼请求）。
+ * 「fileId 是不是分享链接 / site 是哪个网盘」是判因关键 —— 用户日志里只有参数名时完全查不出来。
+ */
+export function parsePanProxyQuery(proxyUrl: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const s = String(proxyUrl || '');
+  // ★ 从**第一个** `?` 起取到末尾：裸（未编码）fileId 值里还会有自己的 `?`（`fileId=<分享URL>?pwd=`），
+  //   用 `split('?')[1]` 会在那儿截断（旧实现同坑）→ 后面的 fileToken 等参数整段丢失。
+  const qi = s.indexOf('?');
+  const q = qi >= 0 ? s.slice(qi + 1) : '';
+  for (const kv of q.split('&')) {
+    if (!kv) continue;
+    const i = kv.indexOf('=');
+    const k = i >= 0 ? kv.slice(0, i) : kv;
+    const raw = i >= 0 ? kv.slice(i + 1) : '';
+    let v = raw;
+    for (let n = 0; n < 2; n++) {
+      let next = '';
+      try {
+        next = decodeURIComponent(v);
+      } catch {
+        break; // 非法百分号序列：保留当前值
+      }
+      if (next === v) break;
+      v = next;
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
 export interface LiveLoadResult {
   groups: LiveGroup[];
   liveName: string;
@@ -945,16 +978,25 @@ export class SpiderHost {
    * jar 的 `do=pan` 代理地址里带**百度分享链接** → 走原生解链（成功返回播放结果，失败返回 null）。
    * 实测 jar 形态：`http://127.0.0.1:-1/proxy?do=pan&site=baidu&shareId=&fileId=<分享URL>&fileToken=`。
    * 这条兜底覆盖「episode id 本身不是分享链接、只有 jar 才知道要播哪个分享」的源。
+   * ★ 2026-10-08：失败原因不再静默（`miss` 收集，调用处汇总落日志 + 上屏）——
+   *   此前 extract 未命中/未绑定 Cookie 都静默 return null，用户日志里完全无迹可查。
    */
-  private async baiduFromPanUrl(url: string, flag: string): Promise<PlayResult | null> {
+  private async baiduFromPanUrl(url: string, flag: string, miss?: string[]): Promise<PlayResult | null> {
     const share = extractBaiduShare(url);
-    if (!share) return null;
+    if (!share) {
+      miss?.push('百度：未识别分享链接');
+      return null;
+    }
     const cookie = (this.driveList() as Record<string, string>)['baidu'] || '';
-    if (!cookie) return null;
+    if (!cookie) {
+      miss?.push('百度：已识别分享但未绑定百度网盘 Cookie');
+      return null;
+    }
     try {
       const t = await baiduResolveShare(share.short, share.pwd, cookie, { logger: fileLogger });
       if (!t.ok || !t.url) {
         fileLogger.w(`baiduTransfer(do=pan) 未成功(${t.reason || '未知原因'})`);
+        miss?.push(`百度：解链失败(${t.reason || '未知原因'})`);
         return null;
       }
       if (t.path) {
@@ -973,6 +1015,52 @@ export class SpiderHost {
       };
     } catch (e) {
       fileLogger.w(`baiduTransfer(do=pan) 异常: ${(e as Error).message}`);
+      miss?.push(`百度：异常(${(e as Error).message.slice(0, 80)})`);
+      return null;
+    }
+  }
+
+  /**
+   * jar 的 `do=pan` 代理地址里带 **UC 分享链接** → 走原生 ucResolveShare（成功返回播放结果，失败返回 null）。
+   * 形态与百度同族：`http://127.0.0.1:-1/proxy?do=pan&type=2&site=uc&shareId=&fileId=<分享URL>&fileToken=`。
+   * ★ 2026-10-08（用户报「UC 网盘资源无法播放」）：桌面端此前**只有百度**这一条兜底 ——
+   *   jar 给 UC 分享的线路一律「视为无地址」→ 用户侧黑屏且无原因。这里补齐 UC 通道（免转存优先）。
+   */
+  private async ucFromPanUrl(url: string, flag: string, miss?: string[]): Promise<PlayResult | null> {
+    const share = extractUcShare(url);
+    if (!share) {
+      miss?.push('UC：未识别分享链接');
+      return null;
+    }
+    const cookie = (this.driveList() as Record<string, string>)['uc'] || '';
+    if (!cookie) {
+      miss?.push('UC：已识别分享但未绑定 UC 网盘 Cookie');
+      return null;
+    }
+    try {
+      const t = await ucResolveShare(share.pwdId, share.passcode, cookie, { logger: fileLogger });
+      if (!t.ok || !t.url) {
+        fileLogger.w(`ucTransfer(do=pan) 未成功(${t.reason || '未知原因'})`);
+        miss?.push(`UC：解链失败(${t.reason || '未知原因'})`);
+        return null;
+      }
+      if (t.fid) {
+        this.pendingQuarkDeletes.push({ provider: 'uc', cookie, pdirFid: t.pdirFid || '', fid: t.fid, at: Date.now() });
+        if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift();
+        this.persistPendingQuark();
+      }
+      fileLogger.i(`ucTransfer(do=pan) 直链 ok: ${t.url.slice(0, 90)}...`);
+      return {
+        parse: 0,
+        url: wrapPlayUrlWithHeaders(t.url, t.header || {}),
+        playUrl: '',
+        flag,
+        header: t.header || {},
+        jx: 0,
+      };
+    } catch (e) {
+      fileLogger.w(`ucTransfer(do=pan) 异常: ${(e as Error).message}`);
+      miss?.push(`UC：异常(${(e as Error).message.slice(0, 80)})`);
       return null;
     }
   }
@@ -1916,19 +2004,41 @@ export class SpiderHost {
       //   交给 /play 中继只会 `new URL('http://127.0.0.1:-1/…')` 抛 Invalid URL → 用户看到黑屏、
       //   且真正原因（转存失败）被吞掉。这类地址一律视为「蜘蛛没给可用地址」，走下面的原因上屏。
       if (r.url && (/[?&]do=pan\b/i.test(r.url) || /127\.0\.0\.1:-1/i.test(r.url))) {
-        // ★ 落**参数名清单**：这条日志是排查「网盘线路播不了」的唯一线索，只记 key 等于没有。
-        //   注意**不能**用 `new URL` 解析 —— 端口是 `:-1`（非法），一定抛异常；
-        //   值可能带 token/签名，故只记参数名。
-        const panKeys = (r.url.split('?')[1] || '')
-          .split('&')
-          .map((kv) => kv.split('=')[0])
-          .filter(Boolean)
-          .join(',');
-        this.logger.w(`play: 蜘蛛返回桌面端无路由的网盘代理地址（do=pan）→ 视为无地址: ${key} | keys=${panKeys}`);
-        // ★ 2026-09-30：这个地址里若带**百度分享链接**（实测形态 `do=pan&site=baidu&shareId=&fileId=<分享URL>`），
+        // ★ 落**参数值里的关键线索**：这条日志是排查「网盘线路播不了」的唯一入口。
+        //   ★ 2026-10-08 加强：此前只记参数名（keys=…），而「fileId 是不是分享链接、site 是哪个网盘、
+        //   值有没有被 percent-encode」正是判因关键。现在并记 `site` / `shareId` / **解码后**的 fileId 预览
+        //   （截断 140）。注意**不能**用 `new URL` 解析 —— 端口是 `:-1`（非法），一定抛异常；
+        //   值里可能带 token，故 fileToken 一律不落。
+        const pan = parsePanProxyQuery(r.url);
+        const panKeys = Object.keys(pan).join(',');
+        this.logger.w(
+          `play: 蜘蛛返回桌面端无路由的网盘代理地址（do=pan）→ 视为无地址: ${key} | keys=${panKeys}` +
+            ` | site=${pan.site || '-'} | shareId=${(pan.shareId || '-').slice(0, 40)} | fileId=${(pan.fileId || '-').slice(0, 140)}`,
+        );
+        // ★ 2026-09-30：这个地址里若带**分享链接**（实测形态 `do=pan&site=baidu&shareId=&fileId=<分享URL>`），
         //   改走原生解链（比上面的 episode id 判据更晚，覆盖「id 不是分享链接、jar 才拼出分享」的源）。
-        const viaBaidu = await this.baiduFromPanUrl(r.url, flag);
+        // ★ 2026-10-08：扩为**百度 + UC 双通道**（此前只有百度 —— jar 给 UC 分享的线路必然黑屏），
+        //   两条通道的失败原因汇总落日志；全失败则**原因上屏**（不再静默 parse:0 黑屏，与 quarkFail 同口径）。
+        const miss: string[] = [];
+        const viaBaidu = await this.baiduFromPanUrl(r.url, flag, miss);
         if (viaBaidu) return viaBaidu;
+        const viaUc = await this.ucFromPanUrl(r.url, flag, miss);
+        if (viaUc) return viaUc;
+        if (miss.length) {
+          const bindMiss = miss.find((m) => m.includes('未绑定')) || '';
+          const prov = bindMiss.startsWith('百度') ? 'baidu' : bindMiss.startsWith('UC') ? 'uc' : '';
+          this.logger.w(`play: do=pan 原生解链均未成功（${miss.join('；')}）: ${key}`);
+          return {
+            ...r,
+            url: '',
+            parse: 1,
+            playUrl: '',
+            ...(prov ? { needDriveCookieBind: prov } : {}),
+            message: prov
+              ? `该线路需要在「网盘绑定」绑定${driveProviderLabel(prov)}后才能取流播放（${miss.join('；')}）`
+              : `该线路需要网盘解链但未成功（${miss.join('；')}）—— 多为分享失效或源侧改版，建议换线路或换源`,
+          };
+        }
         r = { ...r, url: '' };
       }
       // ★ 2026-09-29：协议识别（用户选定「先做 A：协议解析 + 链路识别」）

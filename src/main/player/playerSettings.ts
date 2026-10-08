@@ -4,14 +4,17 @@
 import { join } from 'node:path';
 import { JsonStore } from '../store/JsonStore';
 import { userDataDir } from '../util/paths';
-import { DEFAULT_PLAYER_SETTINGS, normalizePlayerSettings, type PlayerSettings } from '../../shared/player';
+import { normalizePlayerSettings, type PlayerSettings } from '../../shared/player';
 
 export class PlayerSettingsStore {
   private store = new JsonStore(join(userDataDir(), 'player-settings.json'));
 
   get settings(): PlayerSettings {
     const raw = this.store.getObject<Partial<PlayerSettings>>('settings', {});
-    return normalizePlayerSettings({ ...DEFAULT_PLAYER_SETTINGS, ...raw });
+    // ★ 2026-10-08：**不要**先铺 `...DEFAULT_PLAYER_SETTINGS` 再归一 —— `vodExternalPlayerEnabled` 的
+    //   迁移判据是「字段缺失」（缺 = 按路径非空推导，老用户保持原行为）；先铺默认会把「缺失」抹平成 false，
+    //   老用户会被静默改成内置播放器。其余字段的缺省由 normalizePlayerSettings 自己兜（口径不变）。
+    return normalizePlayerSettings(raw);
   }
 
   set settings(v: PlayerSettings) {

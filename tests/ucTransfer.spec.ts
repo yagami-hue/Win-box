@@ -38,3 +38,29 @@ describe('extractUcShare', () => {
     expect(extractUcShare('')).toBeNull();
   });
 });
+
+// ★ 2026-10-08（用户报「UC 网盘资源无法播放」）：jar 把 UC 分享链接塞进 do=pan 的 query
+//   参数值时会 percent-encode，旧实现裸正则匹配不到；且桌面端当时只有百度兜底、没有 UC 通道。
+describe('do=pan 的 percent-encoded 形态', () => {
+  const encPan =
+    'http://127.0.0.1:-1/proxy?do=pan&type=2&site=uc&shareId=&fileId=https%3A%2F%2Fdrive.uc.cn%2Fs%2F2c66665853b34%3Fpwd%3Da1b2&fileToken=';
+
+  it('isUcSharePlay 识别 encoded 分享', () => {
+    expect(isUcSharePlay(encPan)).toBe(true);
+  });
+
+  it('extractUcShare 解出 encoded pwd_id 与提取码', () => {
+    expect(extractUcShare(encPan)).toEqual({ pwdId: '2c66665853b34', passcode: 'a1b2' });
+  });
+
+  it('二次编码同样能解（≤2 轮解码）', () => {
+    const twice = 'http://x/proxy?do=pan&fileId=' + encodeURIComponent(encodeURIComponent('https://drive.uc.cn/s/b37622addbf04?public=1'));
+    expect(extractUcShare(twice)).toEqual({ pwdId: 'b37622addbf04', passcode: '' });
+    expect(isUcSharePlay(twice)).toBe(true);
+  });
+
+  it('非法百分号序列不抛异常（原文兜底 → null）', () => {
+    expect(() => extractUcShare('http://x/proxy?do=pan&fileId=%e0%')).not.toThrow();
+    expect(extractUcShare('http://x/proxy?do=pan&fileId=%e0%')).toBeNull();
+  });
+});

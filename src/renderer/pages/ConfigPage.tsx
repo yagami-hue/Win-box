@@ -8,10 +8,10 @@ import { EXT_TEMPLATES, validateExtJson } from '../../engine/config/extHelper';
 import { sourceKindInfo } from '../../engine/config/sourceKind';
 import type { AuditItem, SourceDebugReport } from '../../shared/types';
 import { applyTheme, currentTheme } from '../lib/theme';
-import { getShowDiscover, setShowDiscover } from '../lib/uiPrefs';
+import { getShowDiscover, setShowDiscover, getDetailWindowPref, setDetailWindowPref } from '../lib/uiPrefs';
 import { THEME_LABELS, type Theme } from '../lib/themeTokens';
 import { DEFAULT_META_SETTINGS, type MetaSettings, type MetaSource } from '../../shared/meta';
-import { DEFAULT_PLAYER_SETTINGS, type PlayerSettings } from '../../shared/player';
+import { DEFAULT_PLAYER_SETTINGS, type PlayerSettings, type MpvStatus } from '../../shared/player';
 import type { DavServer } from '../../shared/webdav';
 
 type TabId = 'sources' | 'health' | 'profiles' | 'account' | 'storage' | 'appearance' | 'play' | 'shortcut' | 'network' | 'backup';
@@ -86,6 +86,8 @@ export default function ConfigPage() {
   const [theme, setTheme] = useState<Theme>(() => currentTheme());
   /** ★ 2026-09-30（用户要求）：是否展示「发现」页（默认展示；关掉后导航与默认落地页相应变化） */
   const [showDiscover, setShowDiscoverState] = useState<boolean>(() => getShowDiscover());
+  /** ★ 2026-10-08（用户要求）：详情页是否单独窗口展示（默认关；切换即时生效，见 lib/detailWin.ts） */
+  const [detailWindow, setDetailWindowState] = useState<boolean>(() => getDetailWindowPref());
   // 外挂字幕（多源：SubtitleCat 免 token / assrt 需 token）
   const [subToken, setSubToken] = useState('');
   const [subTokenSaved, setSubTokenSaved] = useState(false);
@@ -175,11 +177,29 @@ export default function ConfigPage() {
     }
   };
   // ★ 2026-09-30（用户要求「点播也应该支持绑定外部播放器，和磁力区分开」+「选定后直接由它播放」）：
-  //   点播外部播放器 —— **填了路径 = 点播直接用该播放器播放（不开内置播放器）**；留空 = 用内置播放器
+  //   点播外部播放器 —— 与磁力分开绑定。
+  // ★ 2026-10-08（用户要求）：改为**勾选项**总开关 —— 勾选且填了路径才由它播；不勾选一律内置播放器（即使有路径）。
   const [vodPlayerDraft, setVodPlayerDraft] = useState<string | null>(null);
   const [vodPlayers, setVodPlayers] = useState<Array<{ id: string; name: string; path: string }>>([]);
   const [vodMsg, setVodMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
   const vodPlayerValue = vodPlayerDraft ?? playPrefs.vodExternalPlayer;
+  /** 总开关（即时保存，与路径草稿互不影响） */
+  const toggleVodPlayerEnabled = async (on: boolean) => {
+    try {
+      const s = await client.playerPrefsSet({ vodExternalPlayerEnabled: on });
+      setPlayPrefs(s);
+      const pathNow = (vodPlayerDraft ?? s.vodExternalPlayer).trim();
+      setVodMsg(
+        !on
+          ? { text: '已停用：点播一律用内置播放器（已填路径也不会用它）', kind: 'ok' }
+          : pathNow
+            ? { text: '已启用：点播将直接用上面的播放器播放', kind: 'ok' }
+            : { text: '已启用，但还没填播放器路径 —— 请点「检测」选择本机播放器，或粘贴 exe 路径后点「保存」', kind: 'err' },
+      );
+    } catch (e) {
+      setVodMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
+    }
+  };
   const detectVodPlayers = async () => {
     try {
       const list = await client.vodDetectPlayers();
@@ -200,12 +220,36 @@ export default function ConfigPage() {
       setVodPlayerDraft(null);
       setVodMsg({
         text: s.vodExternalPlayer
-          ? '已保存：点播将直接用该播放器播放（不再开内置播放器；从历史续播会自动带上次位置）'
+          ? s.vodExternalPlayerEnabled
+            ? '已保存：点播将直接用该播放器播放（不再开内置播放器；从历史续播会自动带上次位置）'
+            : '已保存路径；当前「启用」未勾选 —— 点播仍用内置播放器'
           : '已清空：点播改用内置播放器',
         kind: 'ok',
       });
     } catch (e) {
       setVodMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
+    }
+  };
+  // ★ 2026-10-08（用户拍板「内置官方构建」）：MPV 播放内核 —— 路径覆盖（留空 = 用随包内置构建）+ 可用性状态
+  const [mpvDraft, setMpvDraft] = useState<string | null>(null);
+  const [mpvStatus, setMpvStatus] = useState<MpvStatus | null>(null);
+  const [mpvMsg, setMpvMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
+  useEffect(() => {
+    client.mpvStatus().then(setMpvStatus).catch(() => setMpvStatus(null));
+  }, []);
+  const saveMpvPath = async () => {
+    try {
+      const s = await client.playerPrefsSet({ mpvPath: (mpvDraft ?? playPrefs.mpvPath).trim() });
+      setPlayPrefs(s);
+      setMpvDraft(null);
+      const st = await client.mpvStatus();
+      setMpvStatus(st);
+      setMpvMsg({
+        text: st.available ? `已保存：MPV 内核${st.note}` : `已保存，但该路径不可用：${st.note}`,
+        kind: st.available ? 'ok' : 'err',
+      });
+    } catch (e) {
+      setMpvMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
     }
   };
 
@@ -1481,6 +1525,26 @@ export default function ConfigPage() {
         </div>
       </div>
 
+      {/* ★ 2026-10-08（用户要求）：详情页「独立窗口」开关（默认关 = 详情在主窗口内嵌，与现状一致） */}
+      <div className="card" id="cfg-detail-window" style={{ padding: 12, marginBottom: 16 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={detailWindow}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setDetailWindowState(on);
+              setDetailWindowPref(on);
+            }}
+          />
+          <span style={{ fontWeight: 600 }}>详情页单独窗口展示</span>
+        </label>
+        <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+          开启后：点列表/历史的影片 → 详情在独立窗口打开（已开则复用同一个窗口，不堆窗口）；
+          主窗口保持原浏览位置，窗口里的「返回」= 关闭该窗口。默认关闭（详情在主窗口内嵌，与旧版一致）。
+        </div>
+      </div>
+
       </>
       )}
 
@@ -1542,17 +1606,27 @@ export default function ConfigPage() {
           )}
         </div>
       </div>
-      {/* ★ 2026-09-30（用户要求）：点播外部播放器 —— 与磁力分开绑定；**填了路径 = 点播直接由它播放** */}
+      {/* ★ 2026-09-30（用户要求）：点播外部播放器 —— 与磁力分开绑定 */}
+      {/* ★ 2026-10-08（用户要求）：改为**勾选项**总开关 —— 不勾选时即使填了路径也用内置播放器 */}
       <div className="card" id="cfg-vod-player" style={{ padding: 12, marginBottom: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <span style={{ fontWeight: 600 }}>点播外部播放器（PotPlayer 等）</span>
           <span className="muted" style={{ fontSize: 11 }}>
-            填了路径，点播就<b>直接用它播放</b>（不再开内置播放器；走本机中继，header / cookie 已注入）；
-            从历史播放会自动带上次进度。留空 = 用内置播放器。与磁力分开绑定。
+            勾选后：点播<b>直接用它播放</b>（不再开内置播放器；走本机中继，header / cookie 已注入；
+            从历史播放会自动带上次进度）——需同时填好下面的播放器路径。
+            <b>不勾选 = 一律用内置播放器</b>（即使已填路径）。与磁力分开绑定。
           </span>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={playPrefs.vodExternalPlayerEnabled}
+              onChange={(e) => void toggleVodPlayerEnabled(e.target.checked)}
+            />
+            <span>启用点播外部播放器</span>
+          </label>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
             <input
-              placeholder="播放器 exe 路径（留空 = 自动检测 PotPlayer / VLC / mpv / MPC-HC）…"
+              placeholder="播放器 exe 路径（点「检测」自动探测 PotPlayer / VLC / mpv / MPC-HC）…"
               value={vodPlayerValue}
               style={{ flex: 1 }}
               onChange={(e) => setVodPlayerDraft(e.target.value)}
@@ -1572,6 +1646,38 @@ export default function ConfigPage() {
           {vodMsg && (
             <span className={vodMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0 }}>
               {vodMsg.text}
+            </span>
+          )}
+        </div>
+      </div>
+      {/* ★ 2026-10-08（用户拍板「内置官方构建」）：MPV 高兼容播放内核 —— 随包内置（安装目录内），4K/HEVC/MKV 兼容更好 */}
+      <div className="card" id="cfg-mpv-kernel" style={{ padding: 12, marginBottom: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <span style={{ fontWeight: 600 }}>MPV 播放内核（4K / HEVC / MKV）</span>
+          <span className="muted" style={{ fontSize: 11 }}>
+            独立播放器窗口内的第二内核：Chromium 播不好的形态（MKV / 4K HEVC / HDR 等）在播放器里可一键切换，
+            「自动」偏好下也会按资源形态或播放失败自动改走 MPV；字幕 / 弹幕 / 控制条仍由界面层叠加。
+            随包内置官方构建，一般无需填写下面路径。
+          </span>
+          <span className={mpvStatus && !mpvStatus.available ? 'err' : 'status'} style={{ margin: 0, wordBreak: 'break-all' }}>
+            {mpvStatus
+              ? mpvStatus.available
+                ? `可用：${mpvStatus.note}（${mpvStatus.path}）`
+                : `不可用：${mpvStatus.note}`
+              : '正在检测…'}
+          </span>
+          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <input
+              placeholder="mpv.exe 路径覆盖（留空 = 用随包内置构建）…"
+              value={mpvDraft ?? playPrefs.mpvPath}
+              style={{ flex: 1 }}
+              onChange={(e) => setMpvDraft(e.target.value)}
+            />
+            <button className="primary" onClick={() => void saveMpvPath()}>保存</button>
+          </div>
+          {mpvMsg && (
+            <span className={mpvMsg.kind === 'err' ? 'err' : 'status'} style={{ margin: 0, wordBreak: 'break-all' }}>
+              {mpvMsg.text}
             </span>
           )}
         </div>

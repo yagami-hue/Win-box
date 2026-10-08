@@ -1366,8 +1366,11 @@ export class JarSpiderBridge {
         //   （旧行为把错误串当正常 data 直接返回，两条路都断了；见 PoolResult.error）。
         if (r.ok) {
           if (r.error) {
-            this.lastSpiderReason = translateSpiderLog(r.error);
-            this.host?.logger.i(`jvm-bridge ${className}.${method} 失败原因: ${this.lastSpiderReason}`);
+            const raw = String(r.error);
+            this.lastSpiderReason = translateSpiderLog(raw);
+            // ★ 2026-10-08：人话旁边**并记原始报错** —— 人话规则命中（如「接口缺失」）会把「具体缺哪个
+            //   类/方法」吞掉，没有原始串就无法定位该补哪个桩（用户报「配置中心」源时日志里只有一句中文）。
+            this.host?.logger.i(`jvm-bridge ${className}.${method} 失败原因: ${this.lastSpiderReason}｜原始: ${raw.slice(0, 300)}`);
           }
           return r.data;
         }
@@ -1978,14 +1981,17 @@ export class JarSpiderBridge {
         //   text must begin with..."），但默认只在 logger 里、UI 看不到 —— 用户因此只看到
         //   笼统的「蜘蛛返回空结果」，无法判断是源站挂了、超时了，还是缺 ext。
         const spiderLog = extractSpiderReason(err);
+        const spiderLogRaw = extractSpiderReasonRaw(err);
         const runnerErr = err.match(/\[SpiderRunner\.ERROR\][^\n]*/)?.[0]?.trim() ?? '';
         const outEmpty = !out.trim();
+        let reasonFromSpiderLog = false;
         if (timedOut) {
           this.lastSpiderReason = `蜘蛛调用超时（>${Math.round((timeoutMs ?? this.callTimeoutMs) / 1000)}s），源站可能无响应`;
         } else if (!outEmpty) {
           this.lastSpiderReason = ''; // 有正常输出，不算失败
         } else if (spiderLog) {
           this.lastSpiderReason = translateSpiderLog(spiderLog);
+          reasonFromSpiderLog = true;
         } else if (runnerErr) {
           // ★ 运行器异常同样要过一遍"说人话"翻译：这里的报错常是
           //   UnsatisfiedLinkError / ExceptionInInitializerError / dalvik 相关类缺失 ——
@@ -2025,7 +2031,10 @@ export class JarSpiderBridge {
           else if (m) this.host?.logger.w(`jvm-bridge ${className}.${method} (退出0但有日志): ${line}`);
         }
         if (this.lastSpiderReason) {
-          this.host?.logger.i(`jvm-bridge ${className}.${method} 失败原因: ${this.lastSpiderReason}`);
+          // ★ 2026-10-08：人话原因旁并记**原始 SpiderLog 行**（含 ` :: 异常` 尾巴）—— 翻译规则会把
+          //   「缺哪个类/方法」这类可行动信息吞掉；只在本次原因确实来自 SpiderLog 时附加，避免串台。
+          const rawSuffix = reasonFromSpiderLog && spiderLogRaw ? `｜原始: ${spiderLogRaw}` : '';
+          this.host?.logger.i(`jvm-bridge ${className}.${method} 失败原因: ${this.lastSpiderReason}${rawSuffix}`);
         }
         resolve(out.trim());
       });
@@ -2226,6 +2235,16 @@ export function translateSpiderLog(log: string): string {
     //   95 个源全部报这一句）。
     [/ClassNotFoundException: ?com\.github\.catvod\.spider\./i,
       '蜘蛛类未找到：该源指向的 jar 没有加载成功（配置与 jar 不匹配，或 jar 资源已失效）'],
+    // ★ 2026-10-08（用户报「配置中心」源）：这类报错**具体缺哪个类/方法/字段**才是可行动信息 ——
+    //   旧文案一律「请反馈」，且调用处只落人话、原始异常被吞（用户日志里拿不到符号名，无法定位该补哪个桩）。
+    //   这里把符号名抠出来上屏；调用处已同步补「原始: …」落日志（见 call() 两处）。
+    //   注意保留「桌面版缺失」「请反馈」措辞 —— 既有测试与用户认知都按这句对齐。
+    [/NoSuchMethodError: ?'?([\w.$<>\[\]]+)/,
+      (m) => `桌面版缺失方法「${m[1]}」（属兼容性问题，请反馈）`],
+    [/NoSuchFieldError: ?'?([\w.$]+)/,
+      (m) => `桌面版缺失字段「${m[1]}」（属兼容性问题，请反馈）`],
+    [/ClassNotFoundException: ?([\w.$]+)/,
+      (m) => `桌面版缺失类「${m[1]}」（属兼容性问题，请反馈）`],
     [/ClassNotFoundException|NoSuchMethodError|NoSuchFieldError/i,
       '蜘蛛依赖的接口在桌面版缺失（属兼容性问题，请反馈）'],
     [/ExceptionInInitializerError/i,
@@ -2303,23 +2322,38 @@ export function isJarOrDex(buf: Buffer): boolean {
  * 找不到返回空串（不臆造原因）。
  */
 export function extractSpiderReason(stderr: string): string {
-  if (!stderr) return '';
+  return lastFailureSpiderLog(stderr)?.msg.slice(0, 120) ?? '';
+}
+
+/**
+ * ★ 2026-10-08：取同一条 SpiderLog 的**原文**（含 ` :: 异常` 尾巴，截断 300）。
+ * 人话翻译会把尾巴里的关键信息吞掉（如 NoSuchMethodError 缺的具体符号），
+ * 供「失败原因」日志旁并记原始串，便于定位该补哪个桩 / 该反馈什么。
+ */
+export function extractSpiderReasonRaw(stderr: string): string {
+  return lastFailureSpiderLog(stderr)?.raw.slice(0, 300) ?? '';
+}
+
+/** 找最后一条「真实失败」SpiderLog（成功/加载类日志不算）；返回消息与含异常尾巴的原文 */
+function lastFailureSpiderLog(stderr: string): { raw: string; msg: string } | null {
+  if (!stderr) return null;
   const lines = stderr.split(/\r?\n/);
   // 从后往前找 SpiderLog 行（蜘蛛的失败原因通常最后打印）
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     const idx = line.indexOf('SpiderLog:');
     if (idx < 0) continue;
-    let msg = line.slice(idx + 'SpiderLog:'.length).trim();
+    const raw = line.slice(idx + 'SpiderLog:'.length).trim();
+    let msg = raw;
     // 去掉 " :: <异常类>: <详细>" 尾巴，只留人可读的前半句
     const sep = msg.indexOf(' :: ');
     if (sep > 0) msg = msg.slice(0, sep).trim();
     // ★ 只保留「真正的失败原因」。以下日志前缀属蜘蛛成功路径/启动路径的提示，不是失败：
     //   - `自定义爬虫代码加载成功`（简/繁两种写法都有，繁体曾漏过滤导致 28 条假失败）
     //   - `获取到源码--> ...`（蜘蛛已成功取到源站正文，随后解析，属成功日志）
-    if (msg && !/^(自定义爬虫代码加载成功|自定義爬蟲代碼載入成功|获取到源码-->)/.test(msg)) return msg.slice(0, 120);
+    if (msg && !/^(自定义爬虫代码加载成功|自定義爬蟲代碼載入成功|获取到源码-->)/.test(msg)) return { raw, msg };
   }
-  return '';
+  return null;
 }
 
 /**

@@ -39,20 +39,47 @@ export interface UcShareResult {
   pdirFid?: string;
 }
 
-/** 该 episode id 是否是 UC 分享（drive.uc.cn/s/<pwdId>）；大小写不敏感 */
+/**
+ * ★ 2026-10-08：文本的「匹配候选」= 原文 + 逐层 percent-decode（≤2 轮）。
+ * 与 baiduTransfer 同因同解：jar 把分享链接塞进 `do=pan` 代理地址的 **query 参数值**时会
+ * percent-encode（`fileId=https%3A%2F%2Fdrive.uc.cn%2Fs%2F…`，部分 jar 还会二次编码），
+ * 裸正则匹配不到 → 解链**静默**失败 → 用户侧「UC 线路黑屏」且日志无任何线索。
+ */
+function shareTextCandidates(text: string): string[] {
+  const out: string[] = [];
+  let cur = String(text || '');
+  for (let i = 0; i < 3 && cur; i++) {
+    out.push(cur);
+    let next = '';
+    try {
+      next = decodeURIComponent(cur);
+    } catch {
+      break; // 非法百分号序列：不再往下解
+    }
+    if (next === cur) break;
+    cur = next;
+  }
+  return out;
+}
+
+/** 该 episode id 是否是 UC 分享（drive.uc.cn/s/<pwdId>，兼容 percent-encoded 形态）；大小写不敏感 */
 export function isUcSharePlay(id: string): boolean {
-  return /drive\.uc\.cn\/s\/[0-9a-zA-Z_-]+/i.test(id || '');
+  return shareTextCandidates(id).some((s) => /drive\.uc\.cn\/s\/[0-9a-zA-Z_-]+/i.test(s));
 }
 
 /**
  * 从分享链接里解析 pwd_id 与 4 位提取码。
  * 支持 `https://drive.uc.cn/s/<id>`、`...?public=1`、`...?pwd=abcd`（提取码可选）。
+ * ★ 兼容 query 值里的 percent-encoded 分享链接（见 shareTextCandidates）。
  */
 export function extractUcShare(id: string): { pwdId: string; passcode: string } | null {
-  const m = /drive\.uc\.cn\/s\/([0-9a-zA-Z_-]+)/i.exec(id || '');
-  if (!m) return null;
-  const p = /[?&](?:pwd|password|passcode)=([0-9a-zA-Z]{4})/i.exec(id || '');
-  return { pwdId: m[1], passcode: p ? p[1] : '' };
+  for (const s of shareTextCandidates(id)) {
+    const m = /drive\.uc\.cn\/s\/([0-9a-zA-Z_-]+)/i.exec(s);
+    if (!m) continue;
+    const p = /[?&](?:pwd|password|passcode)=([0-9a-zA-Z]{4})/i.exec(s);
+    return { pwdId: m[1], passcode: p ? p[1] : '' };
+  }
+  return null;
 }
 
 async function jpost(

@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import VideoPlayer from '../components/VideoPlayer';
 import TitleBar from '../components/TitleBar';
 import { client } from '../api/client';
-import { uiMem, recordWatch, saveUiMemory, markHistoryOnlyWriter } from '../lib/uiMemory';
+import { uiMem, recordWatch, saveUiMemory, markHistoryOnlyWriter, historyGroupKey } from '../lib/uiMemory';
 import { formatEpisodeLabel } from '../lib/epName';
 import { makeStaleGuard, acceptInitSeq } from '../lib/staleGuard';
 
@@ -46,6 +46,19 @@ export default function PlayerPage() {
   const [driveBind, setDriveBind] = useState<string | null>(null);
   // 小窗口模式（主进程改窗口尺寸后广播同步）
   const [mini, setMini] = useState(false);
+  /**
+   * ★ 2026-10-08（用户要求「把置顶按钮从播放器下方取消，做到上方最小化按钮旁边，播放器下方的功能区太拥挤了」）：
+   *   置顶态上提到本页 —— 标题栏（最小化旁）与 mini 条共用同一份状态（按发起窗口生效，见 win:setAlwaysOnTop）。
+   */
+  const [pinTop, setPinTop] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    void client.winIsAlwaysOnTop().then((v) => { if (alive) setPinTop(!!v); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, []);
+  const togglePinTop = useCallback(() => {
+    void client.winSetAlwaysOnTop(!pinTop).then((v) => setPinTop(!!v)).catch(() => undefined);
+  }, [pinTop]);
   /** ★ 2026-09-24：parse=1 且自动解析失败时的原因提示（上屏，替代原来的静默黑屏） */
   const [parseMsg, setParseMsg] = useState('');
   const loadingRef = useRef(false);
@@ -232,6 +245,26 @@ export default function PlayerPage() {
         <div className="mini-strip" onDoubleClick={() => void client.playerSetMini(false)}>
           <span className="mini-strip-title" title={curName || 'Win-Box'}>{curName || 'Win-Box'}</span>
           <div className="mini-strip-btns">
+            {/* ★ 2026-10-08（用户要求）：置顶按钮在 mini 条上（与标题栏同款）；开启态 accent 高亮 */}
+            <button
+              className="mini-btn"
+              style={pinTop ? { color: 'var(--accent)' } : undefined}
+              title={pinTop ? '置顶：开（点击取消）' : '置顶：关（点击把窗口固定在最上层）'}
+              aria-pressed={pinTop}
+              onClick={togglePinTop}
+            >
+              {pinTop ? (
+                <svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true">
+                  <path fill="currentColor" d="M9.6 3h4.8l.7 6.1 3.1 3.1V14H5.8v-1.8l3.1-3.1L9.6 3Z" />
+                  <path d="M12 14v6.6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                </svg>
+              ) : (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M9.6 3h4.8l.7 6.1 3.1 3.1V14H5.8v-1.8l3.1-3.1L9.6 3Z" />
+                  <path d="M12 14v6.6" />
+                </svg>
+              )}
+            </button>
             <button className="mini-btn" title="恢复原窗口" onClick={() => void client.playerSetMini(false)}>
               <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden="true">
                 <rect x="2.5" y="2.5" width="11" height="11" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
@@ -253,6 +286,9 @@ export default function PlayerPage() {
           showMini
           mini={mini}
           onMiniToggle={() => void client.playerSetMini(!mini)}
+          showPin
+          pinTop={pinTop}
+          onPinToggle={togglePinTop}
         />
       )}
       {/* ★ 2026-09-26：这两层改用 CSS 类（`.pwin-body` / `.pwin-stage`）——内联样式没有
@@ -283,10 +319,21 @@ export default function PlayerPage() {
               onPrev={() => goEp(epIndex - 1)}
               onNext={() => goEp(epIndex + 1)}
               mini={mini}
+              // ★ 2026-10-08（用户拍板「内置官方构建」）：MPV 高兼容内核 —— 仅本窗口（transparent）可用
+              allowMpv
               // ★ 2026-09-30：图集源（每「集」= 一张图）/ 音乐源 → 图片浏览器 / 音乐播放器显示页码与封面
               epIndex={epIndex}
               epTotal={eps.length}
               cover={init?.meta?.pic}
+              // ★ 2026-10-08（用户要求）：跳过片头片尾 —— 资源键（与历史分组同口径）+ 本集键（原始 episode url）
+              skipResourceKey={historyGroupKey({
+                sourceKey: init?.key,
+                vodId: init?.meta?.vodId ?? init?.meta?.id,
+                name: curName,
+                url: eps[epIndex]?.url,
+              })}
+              skipEpisodeKey={eps[epIndex]?.url || `#${epIndex}`}
+              skipEpisodeLabel={eps[epIndex]?.name || curName}
             />
           ) : (
             <div className="empty">等待播放…</div>

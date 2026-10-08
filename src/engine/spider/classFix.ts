@@ -57,7 +57,15 @@ export interface ClassInfo {
   usage: Map<number, Array<{ op: number; method: number }>>;
 }
 
-/** 指令长度表（tableswitch / lookupswitch / wide 特判；其余按 JVM 规范） */
+/** 指令长度表（tableswitch / lookupswitch / wide 特判；其余按 JVM 规范）。
+ *
+ * ★★ 2026-10-08（用户报「打开就卡死/闪退」的真根因，勿回退）：**长度必须恒 ≥ 1**。
+ *   畸形/错位字节码里 `tableswitch` 的 `hi < lo`、`lookupswitch` 的 `n < 0` 都会让旧实现
+ *   算出**负数长度**，调用方 `i += len` 原地打转 ⇒ **死循环**（实测：某 227KB 混淆类
+ *   `merge/A/f1.class` 必现）—— 而这条链跑在**主进程**（jar 收编 → classFix），
+ *   一旦命中整个应用冻结、且产物永远收编不完 ⇒ 每次启动都在同一处卡死（用户侧「崩溃」）。
+ *   宁可漏修（解析错位后本就不该误改），绝不卡死：一律钳到 ≥1 保证扫描单调前进。
+ */
 export function instrLen(code: Buffer, i: number): number {
   const op = code[i];
   if (op === 0xaa) {
@@ -65,13 +73,16 @@ export function instrLen(code: Buffer, i: number): number {
     while ((j - i) % 4 !== 0) j++;
     const lo = code.readInt32BE(j + 4);
     const hi = code.readInt32BE(j + 8);
-    return j - i + 12 + (hi - lo + 1) * 4;
+    const cnt = hi - lo + 1;
+    const len = j - i + 12 + cnt * 4;
+    return len >= 1 ? len : 1;
   }
   if (op === 0xab) {
     let j = i + 1;
     while ((j - i) % 4 !== 0) j++;
     const n = code.readInt32BE(j + 4);
-    return j - i + 8 + n * 8;
+    const len = j - i + 8 + n * 8;
+    return len >= 1 ? len : 1;
   }
   if (op === 0xc4) return code[i + 1] === 0x84 ? 6 : 4; // wide
   if (
@@ -183,7 +194,8 @@ export function parseClassBytes(input: Buffer): ClassInfo {
         if (op === 0xb6 || op === 0xb7 || op === 0xb8 || op === 0xb9) {
           m.invokes.push({ op, ref: codeBuf.readUInt16BE(i + 1) });
         }
-        i += len;
+        // ★ 2026-10-08：长度一律 ≥1（见 instrLen 头注释）—— 这里再钳一道，任何未来分支都不许原地打转
+        i += len > 0 ? len : 1;
       }
     }
     methods.push(m);

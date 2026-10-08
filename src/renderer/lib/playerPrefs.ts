@@ -6,6 +6,8 @@
 //     · 字幕时间偏移
 //   ★ 不在此重复持久化的项：字幕字号/位置/开关（主进程 subtitleSet → subtitle.json）、
 //     弹幕设置（主进程 danmakuSet → danmaku.json），二者已是跨窗口持久的。
+import type { KernelPref } from './kernel';
+
 export interface PlayerPrefs {
   /** 音量 0..1（0 = 静音） */
   vol: number;
@@ -15,6 +17,8 @@ export interface PlayerPrefs {
   subOffset: number;
   /** ★ 2026-09-26 新增：画面比例（见 PlayerFit） */
   fit: PlayerFit;
+  /** ★ 2026-10-08 新增：播放内核偏好（auto = 按资源形态自动；手动切换后记住显式值） */
+  kernel: KernelPref;
 }
 
 /**
@@ -40,9 +44,14 @@ export function normalizeFit(v: unknown): PlayerFit {
   return PLAYER_FITS.some((f) => f.value === v) ? (v as PlayerFit) : 'contain';
 }
 
+/** 内核偏好兜底：非法/未知值一律回落「自动」（见 lib/kernel.ts） */
+export function normalizeKernelPref(v: unknown): KernelPref {
+  return v === 'html5' || v === 'mpv' ? v : 'auto';
+}
+
 const KEY = 'winbox-player-prefs';
 
-export const DEFAULT_PLAYER_PREFS: PlayerPrefs = { vol: 1, rate: 1, subOffset: 0, fit: 'contain' };
+export const DEFAULT_PLAYER_PREFS: PlayerPrefs = { vol: 1, rate: 1, subOffset: 0, fit: 'contain', kernel: 'auto' };
 
 /** 数值兜底：非法（NaN/Infinity/越界）一律退回默认值，避免「记忆」把音量记成 0 这类静默故障 */
 function num(v: unknown, def: number, lo: number, hi: number): number {
@@ -62,6 +71,7 @@ export function loadPlayerPrefs(): PlayerPrefs {
       rate: num(o.rate, DEFAULT_PLAYER_PREFS.rate, 0.25, 4),
       subOffset: num(o.subOffset, DEFAULT_PLAYER_PREFS.subOffset, -60, 60),
       fit: normalizeFit(o.fit),
+      kernel: normalizeKernelPref(o.kernel),
     };
   } catch {
     return { ...DEFAULT_PLAYER_PREFS };

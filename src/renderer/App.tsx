@@ -16,13 +16,22 @@ import HistoryPage from './pages/HistoryPage';
 import AboutPage from './pages/AboutPage';
 /** ★ 2026-09-29：启动强制更新门禁（本地版本低于 GitHub 最新 Release 时遮挡全界面） */
 import UpdateGate from './components/UpdateGate';
-import { loadUiMemory, sameEpProgress, saveUiMemory } from './lib/uiMemory';
+import { loadUiMemory, sameEpProgress, saveUiMemory, markHistoryOnlyWriter } from './lib/uiMemory';
 // ★ 2026-09-30（用户要求）：显式绑定第三方播放器时点播直接由它播放（详见 lib/externalPlay.ts）
 import { playVodExternal } from './lib/externalPlay';
 import { useShowDiscover } from './lib/uiPrefs';
+// ★ 2026-10-08（用户要求）：外观开关「详情页独立窗口」——详情打开方式统一入口 + 本窗口身份判定
+import { isDetailWindow, openDetailRoute } from './lib/detailWin';
 import { useTheme } from './lib/theme';
 import { client } from './api/client';
 import type { Episode } from '../shared/types';
+
+/**
+ * ★ 2026-10-08（用户要求「详情页独立窗口」）：详情窗口与主窗口共享同一份 localStorage 的 uiMem，
+ *   若整份写盘会把主窗口已清掉的状态复活（与播放器窗口同款问题，见 PlayerPage 顶部那段）。
+ *   这里在**模块求值期**声明：本窗口只写历史与进度（任何页面挂载前的第一件事）。
+ */
+if (isDetailWindow()) markHistoryOnlyWriter();
 
 const NAV = [
   // ★ 2026-09-24（用户定稿）：**发现放第一位，且打开软件默认进发现页**；「点播」= 源主页，移到 /home
@@ -168,6 +177,8 @@ function AppShell() {
   /** 工具栏返回箭头（‹）：macOS 窗口的导航回退 */
   const goBack = (): void => {
     if (window.history.length > 1) nav(-1);
+    // ★ 2026-10-08：独立详情窗口没有可退的历史 → 返回 = 关窗（更符合「点开一个独立窗口」的直觉）
+    else if (isDetailWindow()) void client.winClose();
     else nav(backHome, { replace: true });
   };
   // 首次启动免责声明弹窗：已同意过（localStorage 标记）则不再弹出
@@ -189,8 +200,7 @@ function AppShell() {
       const backspace = e.key === 'Backspace';
       if ((altLeft || backspace) && loc.pathname !== backHome) {
         e.preventDefault();
-        if (window.history.length > 1) nav(-1);
-        else nav(backHome, { replace: true });
+        goBack(); // ★ 2026-10-08：与工具栏/返回键同一套语义（详情窗口无历史 → 关窗）
       }
     };
     window.addEventListener('keydown', onKey);
@@ -246,6 +256,14 @@ function AppShell() {
 
   // 独立播放器窗口：#/player 时渲染无侧栏的播放界面（独立 BrowserWindow 使用）
   const isPlayerWin = loc.pathname === '/player';
+
+  // ★ 2026-10-08（用户要求「详情页独立窗口」）：详情窗口复用 —— 主进程在已开的详情窗口上再点片子时
+  //   发 `win:navigate`，本窗口切到新路由（不新开窗口、不整页重载，窗口位置/尺寸保留）。
+  useEffect(() => {
+    if (!isDetailWindow()) return;
+    return client.winOnNavigate((route) => nav(route));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ★ 2026-09-20 修复「历史续播位置过期」：独立播放器窗口关闭 → 主窗口重新获得焦点，
   //   此时重载 localStorage 历史（播放器窗口关窗时把最新进度写入了 localStorage），
@@ -370,12 +388,13 @@ function AppShell() {
 
   // ★ 2026-09-24：列表 → 详情的统一跳转（带上封面与片名）
   //   片名兜底：部分源（如「立播」）详情接口不返回 vod_name，详情页用它显示标题/查 TMDb
+  // ★ 2026-10-08（用户要求）：外观开关打开时改在**独立窗口**打开（已开则复用换路由）；
+  //   本窗口本身就是详情窗口时始终本窗口内跳（相关推荐/演员链不另开窗）。
   const openDetail = (k: string, id: string, pic?: string, name?: string) => {
     const qs = new URLSearchParams();
     if (pic) qs.set('pic', pic);
     if (name) qs.set('name', name);
-    const q = qs.toString();
-    nav(`/detail/${encodeURIComponent(k)}/${encodeURIComponent(id)}${q ? `?${q}` : ''}`);
+    void openDetailRoute((to) => nav(to), k, id, qs.toString());
   };
 
   if (isPlayerWin) {
@@ -419,6 +438,25 @@ function AppShell() {
       </Route>
     </Routes>
   );
+
+  /**
+   * ★ 2026-10-08（用户要求「详情页独立窗口」）：详情窗口 = **无侧栏的极简外壳**（与 `#/player` 同款），
+   *   但路由仍用共享的 routesNode —— 详情页里的「演员 / 相关推荐」会跳 `/search`、其他页面也都可用
+   *   （若只放 `/detail` 一条路由，这些跳转会落空白页；页面自身的 topbar 提供各自导航）。
+   *   本窗口身份由 hash 的 `dw=1` 决定（见 lib/detailWin.ts）：只写历史/进度、返回=关窗。
+   */
+  if (isDetailWindow()) {
+    return (
+      <div className="app pwin">
+        {disclaim && DisclaimerModal}
+        <main className="main">
+          {/* 无边框窗口必须有可拖拽 + 关闭的标题栏（页面自身 topbar 只提供返回/关闭语义） */}
+          <TitleBar title="影片详情" />
+          {routesNode}
+        </main>
+      </div>
+    );
+  }
 
   /**
    * ★ 2026-09-29：Apple（macOS / Liquid Glass）专属外壳 —— 窗口结构按 macOS 原生应用重排：

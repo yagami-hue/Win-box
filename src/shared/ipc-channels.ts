@@ -123,6 +123,14 @@ export const IPC = {
   /** ★ 2026-09-30（用户要求「播放器加置顶按钮」）：按**发起窗口**设置/查询「始终置顶」 */
   WIN_SET_ALWAYS_ON_TOP: 'win:setAlwaysOnTop',
   WIN_IS_ALWAYS_ON_TOP: 'win:isAlwaysOnTop',
+  /**
+   * ★ 2026-10-08（用户要求「设置-外观加开关：控制视频详情页是否单独窗口展示」）：
+   * 在独立窗口打开详情页（同款窗口复用：已开则聚焦 + `WIN_NAVIGATE` 通知其换路由）。
+   * 窗口 hash 带 `dw=1` 标记（渲染层据此只写历史/进度、返回键改为关窗）。
+   */
+  WIN_OPEN_DETAIL: 'win:openDetail',
+  /** 主进程 → 渲染层：让已打开的详情窗口切换路由（`/detail/:key/:id?…&dw=1`） */
+  WIN_NAVIGATE: 'win:navigate',
   /** ★ 2026-09-30（用户要求「软件关闭后，所有的墓碑机制都应该脱钩」）：主进程**本次启动**的唯一标识
    *  （每次启动重新生成）—— 渲染层据此判定「新一次启动」并丢掉页面状态类记忆（见 uiMemory）。 */
   SYSTEM_SESSION_ID: 'system:sessionId',
@@ -157,6 +165,17 @@ export const IPC = {
   PLAYER_PREFS_SET: 'player:prefsSet',
   /** ★ 2026-09-29 磁力（BT）：探测本机已安装的外部播放器（MKV/HEVC 接力用；只探测不启动） */
   BT_DETECT_PLAYERS: 'bt:detectPlayers',
+  // ★ 2026-10-08 MPV 高兼容播放内核（独立播放器窗口内嵌 --wid + JSON IPC；见 main/player/MpvController）
+  /** 探活 + 路径解析（配置覆盖 → 随包内置 resources/mpv → 本机常见安装位置） */
+  MPV_STATUS: 'mpv:status',
+  /** 启动一次 mpv 会话（换集/换源即重启；参数见 MpvStartOptions） */
+  MPV_START: 'mpv:start',
+  /** 内核控制命令（play/pause/seek/volume/rate/fit/字幕） */
+  MPV_CMD: 'mpv:cmd',
+  /** 停止 mpv 会话（切回内置内核 / 关窗口 / 卸载） */
+  MPV_STOP: 'mpv:stop',
+  /** 主进程 → 渲染层：内核状态推送（时间/时长/暂停/缓冲/直播/尺寸/缓存速度；见 MpvStateEvent） */
+  MPV_STATE: 'mpv:state',
   /** ★ 2026-09-30（用户要求「点播也应该支持绑定外部播放器，和磁力区分开」）：
    *  点播外部播放器（探测 / 用当前播放地址拉起）—— 绑定值 `vodExternalPlayer` 与磁力分开 */
   VOD_DETECT_PLAYERS: 'vod:detectPlayers',

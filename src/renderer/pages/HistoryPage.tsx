@@ -13,6 +13,8 @@ import { pickCover, preloadImage } from '../lib/coverPick';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 // ★ 2026-09-30（用户要求）：显式绑定第三方播放器时，从历史直接由它续播（起播位置作为启动参数）
 import { playVodExternal } from '../lib/externalPlay';
+// ★ 2026-10-08（用户要求）：外观开关「详情页独立窗口」——详情打开方式统一入口
+import { openDetailRoute } from '../lib/detailWin';
 
 /** 单次补图最多查询多少个不同片名（与首页同口径，避免一次性打爆 TMDB 限流） */
 const MAX_UNIQUE_QUERY = 18;
@@ -239,8 +241,9 @@ export default function HistoryPage() {
       }
       /**
        * ★ 2026-09-30（用户要求）：显式绑定了第三方播放器 → 直接由它续播（不再开内置播放器窗口）。
+       *   ★ 2026-10-08：改为**勾选项**总开关 —— 未勾选「启用点播外部播放器」时一律走内置播放器（即使填了路径）。
        *   `seek` = 本条记录的最新进度 → 按播放器类型拼成起播参数（PotPlayer /seek=… 等，见 seekArgs）。
-       *   未绑定 / 解析不出直连地址 → 回退内置播放器窗口（startTime 续播，旧链路不变）。
+       *   未勾选启用 / 未填路径 / 解析不出直连地址 → 回退内置播放器窗口（startTime 续播，旧链路不变）。
        */
       const out = await playVodExternal({
         key: latest.sourceKey || '',
@@ -281,7 +284,8 @@ export default function HistoryPage() {
   };
 
   const openDetail = (it: WatchHistory) => {
-    if (it.sourceKey && it.vodId) nav(`/detail/${encodeURIComponent(it.sourceKey)}/${encodeURIComponent(it.vodId)}`);
+    // ★ 2026-10-08（用户要求「详情页独立窗口」）：与列表点片同一入口（外观开关打开时开独立窗口）
+    if (it.sourceKey && it.vodId) void openDetailRoute((to) => nav(to), it.sourceKey, it.vodId);
     else play(it);
   };
 

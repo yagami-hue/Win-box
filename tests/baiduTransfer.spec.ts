@@ -42,6 +42,33 @@ describe('extractBaiduShare', () => {
   });
 });
 
+// ★ 2026-10-08（用户日志实证：玩偶/花卷/木偶「百度无限」线路全部黑屏且日志无线索）：
+//   jar 把分享链接塞进 do=pan 的 query 参数值时会 percent-encode（部分 jar 还会二次编码），
+//   旧实现裸正则匹配不到 → 解链静默 return null。这里锁定 encoded/二次编码/非法转义三种形态。
+describe('do=pan 的 percent-encoded 形态', () => {
+  const encPan =
+    'http://127.0.0.1:-1/proxy?do=pan&type=2&site=baidu&shareId=&fileId=https%3A%2F%2Fpan.baidu.com%2Fs%2F1jJYCvRQ47rKhE8J4wwciyw%3Fpwd%3DmoCu&fileToken=';
+
+  it('isBaiduSharePlay 识别 encoded 分享', () => {
+    expect(isBaiduSharePlay(encPan)).toBe(true);
+  });
+
+  it('extractBaiduShare 解出 encoded 分享 id 与提取码', () => {
+    expect(extractBaiduShare(encPan)).toEqual({ short: '1jJYCvRQ47rKhE8J4wwciyw', pwd: 'moCu' });
+  });
+
+  it('二次编码同样能解（≤2 轮解码）', () => {
+    const twice = 'http://x/proxy?do=pan&fileId=' + encodeURIComponent(encodeURIComponent('https://pan.baidu.com/s/1AbC_d-123?pwd=x9Y2'));
+    expect(extractBaiduShare(twice)).toEqual({ short: '1AbC_d-123', pwd: 'x9Y2' });
+    expect(isBaiduSharePlay(twice)).toBe(true);
+  });
+
+  it('非法百分号序列不抛异常（原文兜底 → null）', () => {
+    expect(() => extractBaiduShare('http://x/proxy?do=pan&fileId=%zz%')).not.toThrow();
+    expect(extractBaiduShare('http://x/proxy?do=pan&fileId=%zz%')).toBeNull();
+  });
+});
+
 describe('verifySurl', () => {
   // ★ 真机实测：带首位 1 → 恒定 errno 105；去掉后 → errno 0
   it('去掉首位 1（百度分享 id 固定以 1 开头）', () => {

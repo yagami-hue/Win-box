@@ -34,7 +34,7 @@ import type {
 import type { DanmakuAnime, DanmakuCandidate, DanmakuSettings } from '../../shared/danmaku';
 import type { MetaHit, MetaExtra, DiscoverSection, DiscoverGenre, DiscoverGenrePage, MetaImages } from '../../shared/types';
 import type { MetaSettings, MetaSettingsView, MetaSuggestion } from '../../shared/meta';
-import type { PlayerSettings } from '../../shared/player';
+import type { PlayerSettings, MpvStatus, MpvStartOptions, MpvCommand, MpvStateEvent } from '../../shared/player';
 import type { BackupExportResult, BackupImportResult } from '../../shared/backup';
 import type { DavBrowseResult, DavServer } from '../../shared/webdav';
 import type { DlnaCastResult, DlnaCastTarget, DlnaDevice } from '../../shared/dlna';
@@ -195,6 +195,9 @@ declare global {
         // ★ 2026-09-30（用户要求）：播放器置顶按钮
         setAlwaysOnTop: (on: boolean) => Promise<IpcResult<boolean>>;
         isAlwaysOnTop: () => Promise<IpcResult<boolean>>;
+        // ★ 2026-10-08（用户要求）：详情页独立窗口（已开则复用并通知换路由）
+        openDetail: (a: { key: string; id: string; query?: string }) => Promise<IpcResult<{ ok: boolean; reused: boolean }>>;
+        onNavigate: (cb: (route: string) => void) => () => void;
       };
       net: {
         onSpeed: (cb: (kbs: number) => void) => () => void;
@@ -231,6 +234,14 @@ declare global {
       playerPrefs: {
         get: () => Promise<IpcResult<PlayerSettings>>;
         set: (patch: Partial<PlayerSettings>) => Promise<IpcResult<PlayerSettings>>;
+      };
+      // ★ 2026-10-08 MPV 高兼容播放内核（独立播放器窗口内嵌；状态经 MPV_STATE 事件推送）
+      mpv: {
+        status: () => Promise<IpcResult<MpvStatus>>;
+        start: (opts: MpvStartOptions) => Promise<IpcResult<{ session: number; path: string }>>;
+        cmd: (cmd: MpvCommand) => Promise<IpcResult<{ ok: boolean }>>;
+        stop: () => Promise<IpcResult<{ ok: boolean }>>;
+        onState: (cb: (s: MpvStateEvent) => void) => () => void;
       };
       // ★ 2026-09-29 磁力（BT）：本机已安装的外部播放器（MKV/HEVC 接力；只探测不启动）
       bt: {
@@ -304,6 +315,9 @@ export const client = {
   // ★ 2026-09-30（用户要求）：播放器「置顶」按钮
   winSetAlwaysOnTop: (on: boolean) => unwrap(window.api.win.setAlwaysOnTop(on)),
   winIsAlwaysOnTop: () => unwrap(window.api.win.isAlwaysOnTop()),
+  // ★ 2026-10-08（用户要求）：详情页独立窗口
+  winOpenDetail: (a: { key: string; id: string; query?: string }) => unwrap(window.api.win.openDetail(a)),
+  winOnNavigate: (cb: (route: string) => void) => window.api.win.onNavigate(cb),
   appQuit: () => unwrap(window.api.system.quit()),
   /** ★ 2026-09-30：本次主进程启动的会话标识（渲染层判定「新一次启动」→ 丢页面状态类记忆） */
   systemSessionId: () => unwrap(window.api.system.sessionId()),
@@ -392,6 +406,12 @@ export const client = {
   /** ★ 发现页 Hero 轮播：横版剧照（≤6）/ 竖版海报（≤8），已包装 /img 中继 */
   metaImages: (mediaType: 'movie' | 'tv', tmdbId: number) => unwrap(window.api.meta.images(mediaType, tmdbId)),
   netSpeed: (cb: (kbs: number) => void) => window.api.net.onSpeed(cb),
+  /** ★ 2026-10-08 MPV 高兼容播放内核：探活/路径、启停、控制命令、状态事件（仅独立播放器窗口用） */
+  mpvStatus: () => unwrap<MpvStatus>(window.api.mpv.status()),
+  mpvStart: (opts: MpvStartOptions) => unwrap<{ session: number; path: string }>(window.api.mpv.start(opts)),
+  mpvCmd: (cmd: MpvCommand) => unwrap<{ ok: boolean }>(window.api.mpv.cmd(cmd)),
+  mpvStop: () => unwrap<{ ok: boolean }>(window.api.mpv.stop()),
+  mpvOnState: (cb: (s: MpvStateEvent) => void) => window.api.mpv.onState(cb as (s: unknown) => void),
   /** ★ 2026-09-29 磁力（BT）：探测本机外部播放器（MKV/HEVC 接力；配置页可指定路径） */
   btDetectPlayers: () => unwrap(window.api.bt.detectPlayers()),
   /** ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定）——探测本机播放器 / 用当前地址拉起 */

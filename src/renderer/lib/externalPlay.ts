@@ -3,7 +3,8 @@
 //
 // 语义（用户原话「不要在内置播放器中跳转第三方播放器，如果在设置中选定了第三方播放器，
 //   应直接由第三方播放器播放，不启动内置播放器」）：
-//   · 只有 `vodExternalPlayer` **显式绑定**（非空）才改道外部；留空 = 继续用内置播放器（保持旧行为）；
+//   · ★ 2026-10-08（用户要求「换成勾选项，不要根据路径选择是否启用；就算填了路径，不勾选依旧不使用」）：
+//     **总开关为准** = `vodExternalPlayerEnabled` 勾选 **且** `vodExternalPlayer` 路径非空；未勾选 = 一律内置播放器；
 //   · 改道前必须先解析出可播地址（`client.play`）—— 解析不出（需网页解析 / 需网盘绑定）时**回退内置播放器**，
 //     由内置播放器窗口上屏原因（否则用户只看到「点了没反应」）；
 //   · 图集（image）与桌面无载体协议（unsupported）不改道 —— 内置播放器有对应的专用界面与提示。
@@ -41,12 +42,14 @@ export interface VodExternalOutcome {
 
 /**
  * 尝试用外部播放器直接播放。
- * @returns played=false → 调用方照旧走内置播放器窗口（未绑定 / 解析不出 / 启动失败）。
+ * @returns played=false → 调用方照旧走内置播放器窗口（未勾选启用 / 未填路径 / 解析不出 / 启动失败）。
  */
 export async function playVodExternal(a: VodExternalPlayInput): Promise<VodExternalOutcome> {
   let bound = '';
   try {
     const prefs = await client.playerPrefsGet();
+    // ★ 2026-10-08：**勾选项为准** —— 未勾选时即使填了路径也用内置播放器（不再「有路径就启用」）
+    if (!prefs?.vodExternalPlayerEnabled) return { played: false };
     bound = (prefs?.vodExternalPlayer || '').trim();
   } catch {
     return { played: false }; // 读偏好失败：保守走内置播放器

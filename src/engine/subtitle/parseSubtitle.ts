@@ -136,3 +136,30 @@ export function shiftCues(cues: SubtitleCue[], offsetSec: number): SubtitleCue[]
   }
   return out;
 }
+
+/** 秒 → SRT 时间戳（`HH:MM:SS,mmm`），负数/非法按 0 处理 */
+function srtTime(sec: number): string {
+  const s = Number.isFinite(sec) && sec > 0 ? sec : 0;
+  const ms = Math.round((s % 1) * 1000);
+  const total = Math.floor(s);
+  const hh = Math.floor(total / 3600);
+  const mm = Math.floor((total % 3600) / 60);
+  const ss = total % 60;
+  const p = (n: number, w = 2): string => String(n).padStart(w, '0');
+  return `${p(hh)}:${p(mm)}:${p(ss)},${p(Math.min(999, ms), 3)}`;
+}
+
+/**
+ * cue 列表 → SRT 文本（★ 2026-10-08：MPV 内核外挂字幕用 —— mpv 走 `sub-add` 读文件，
+ * 不认我们渲染层的 VTTCue；这里把已挂载的 cue（含时间偏移，调用方先 shiftCues）重新序列化）。
+ */
+export function cuesToSrt(cues: SubtitleCue[]): string {
+  const out: string[] = [];
+  cues.forEach((c, i) => {
+    out.push(String(i + 1));
+    out.push(`${srtTime(c.start)} --> ${srtTime(c.end)}`);
+    out.push(c.text);
+    out.push('');
+  });
+  return out.join('\r\n');
+}

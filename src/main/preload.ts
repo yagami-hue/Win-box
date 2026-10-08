@@ -183,6 +183,13 @@ const api = {
     // ★ 2026-09-30（用户要求）：播放器置顶按钮（按发起窗口生效；返回设置后的真实状态）
     setAlwaysOnTop: (on: boolean) => invoke<boolean>(IPC.WIN_SET_ALWAYS_ON_TOP, !!on),
     isAlwaysOnTop: () => invoke<boolean>(IPC.WIN_IS_ALWAYS_ON_TOP),
+    // ★ 2026-10-08（用户要求）：详情页独立窗口（外观开关；已开则复用并通知换路由）
+    openDetail: (a: { key: string; id: string; query?: string }) => invoke(IPC.WIN_OPEN_DETAIL, a),
+    onNavigate: (cb: (route: string) => void) => {
+      const l = (_e: unknown, route: unknown) => cb(String(route || ''));
+      ipcRenderer.on(IPC.WIN_NAVIGATE, l);
+      return () => ipcRenderer.removeListener(IPC.WIN_NAVIGATE, l);
+    },
   },
   net: {
     // 监听主进程推送的实时网速（KB/s，源于 /play 中继真实转发字节）
@@ -245,6 +252,18 @@ const api = {
   playerPrefs: {
     get: () => invoke(IPC.PLAYER_PREFS_GET),
     set: (patch: unknown) => invoke(IPC.PLAYER_PREFS_SET, patch),
+  },
+  // ★ 2026-10-08 MPV 高兼容播放内核（独立播放器窗口内嵌；状态经 MPV_STATE 事件推送）
+  mpv: {
+    status: () => invoke(IPC.MPV_STATUS),
+    start: (opts: unknown) => invoke(IPC.MPV_START, opts),
+    cmd: (cmd: unknown) => invoke(IPC.MPV_CMD, cmd),
+    stop: () => invoke(IPC.MPV_STOP),
+    onState: (cb: (s: unknown) => void) => {
+      const l = (_e: unknown, s: unknown) => cb(s);
+      ipcRenderer.on(IPC.MPV_STATE, l);
+      return () => ipcRenderer.removeListener(IPC.MPV_STATE, l);
+    },
   },
   // ★ 2026-09-29 磁力（BT）：探测本机已安装的外部播放器（MKV/HEVC 接力；只探测不启动）
   bt: {
