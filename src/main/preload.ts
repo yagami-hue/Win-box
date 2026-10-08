@@ -102,7 +102,8 @@ const api = {
     play: (a: { key: string; flag: string; id: string }) => invoke(IPC.VOD_PLAY, a),
     // ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定）——探测本机播放器 / 用当前地址拉起
     detectPlayers: () => invoke<Array<{ id: string; name: string; path: string }>>(IPC.VOD_DETECT_PLAYERS),
-    openExternal: (a: { url: string; path?: string }) =>
+    // ★ 2026-09-30（用户要求）：`seek`（秒）—— 从历史续播时按播放器类型拼起播参数
+    openExternal: (a: { url: string; path?: string; seek?: number }) =>
       invoke<{ ok: boolean; player?: string; error?: string }>(IPC.VOD_OPEN_EXTERNAL, a),
   },
   live: {

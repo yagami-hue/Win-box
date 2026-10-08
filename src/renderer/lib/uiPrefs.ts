@@ -41,3 +41,42 @@ export function useShowDiscover(): boolean {
   }, []);
   return on;
 }
+
+/**
+ * ★ 2026-09-30（用户要求「为现在点播分类要翻页的增加一个可以一直下拉的瀑布模式」）：
+ *   点播分类浏览的「瀑布模式」（一直下滑自动加载下一页）——默认**关**（保持原来的翻页）。
+ *   持久化在 localStorage（同 uiPrefs 惯例）：用户点开详情再返回时模式不丢。
+ */
+const KEY_WATERFALL = 'winbox-waterfall';
+
+export function getWaterfall(): boolean {
+  try {
+    return localStorage.getItem(KEY_WATERFALL) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function setWaterfall(v: boolean): void {
+  try {
+    localStorage.setItem(KEY_WATERFALL, v ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+  try {
+    window.dispatchEvent(new Event(UI_PREFS_EVENT));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** React Hook：订阅「瀑布模式」（同窗口内多组件同步；跨窗口由 storage 事件兜底） */
+export function useWaterfall(): boolean {
+  const [on, setOn] = useState<boolean>(() => getWaterfall());
+  useEffect(() => {
+    const onChange = (): void => setOn(getWaterfall());
+    window.addEventListener(UI_PREFS_EVENT, onChange);
+    return () => window.removeEventListener(UI_PREFS_EVENT, onChange);
+  }, []);
+  return on;
+}

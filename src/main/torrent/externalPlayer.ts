@@ -86,12 +86,37 @@ export function detectPlayers(overridePath = ''): ExternalPlayer[] {
 }
 
 /**
+ * ★ 2026-09-30（用户要求「从历史记录启动第三方播放器，播放器也应该正确识别历史播放的位置」）：
+ * 「从第 N 秒起播」的命令行参数（纯函数，可单测）。
+ *
+ * 各播放器的语法**互不兼容**，只对确认支持的命令行传；未知播放器宁可不传 ——
+ * 传错会被当成待打开的文件名，反而弹一堆错误窗口。
+ * - PotPlayer：`/seek=hh:mm:ss`（也接受 +mm:ss）
+ * - VLC：`--start-time=<秒>`
+ * - mpv / mpv.net：`--start=<秒>`
+ * - MPC-HC 等：无稳定的起播参数（`/start` 语义随版本而变）→ 不传
+ */
+export function seekArgs(id: string, seconds: number): string[] {
+  const s = Math.floor(Number(seconds) || 0);
+  if (!Number.isFinite(s) || s <= 0) return [];
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const hhmmss = `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  if (id === 'potplayer') return [`/seek=${hhmmss}`];
+  if (id === 'vlc') return [`--start-time=${s}`];
+  if (id === 'mpv') return [`--start=${s}`];
+  return [];
+}
+
+/**
  * 拉起外部播放器播 URL（分离进程：应用退出不带走播放器）。
+ * @param extraArgs 播放器专用参数（起播位置等）—— 一律排在 URL 之前（各播放器的约定）
  * 返回是否成功 spawn（同步部分；播放器自身能否播放由它自己决定）。
  */
-export function launchPlayer(path: string, url: string): boolean {
+export function launchPlayer(path: string, url: string, extraArgs: string[] = []): boolean {
   try {
-    const child = spawn(path, [url], { detached: true, stdio: 'ignore', windowsHide: false });
+    const child = spawn(path, [...extraArgs, url], { detached: true, stdio: 'ignore', windowsHide: false });
     child.on('error', () => undefined); // spawn 失败（权限/被拦）→ 不冒泡成主进程未捕获异常
     child.unref();
     return true;

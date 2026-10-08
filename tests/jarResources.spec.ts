@@ -22,7 +22,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { JarSpiderBridge, copyJarResources, d2jHeapMb, isOomOutput, isUsableConvertedJar } from '../src/engine/spider/JarSpiderBridge';
+import { JarSpiderBridge, copyJarResources, d2jHeapMb, isOomOutput, isUsableConvertedJar, CONVERTED_CACHE_VERSION } from '../src/engine/spider/JarSpiderBridge';
 import { buildZip, listZipEntries, readZipEntries, crc32 } from '../src/engine/util/syncZip';
 import { md5Hex } from '../src/engine/util/md5';
 
@@ -276,7 +276,8 @@ describe('JarSpiderBridge — 转换产物格式版本迁移', () => {
     dirs.push(jvmDir);
     const cacheDir = join(jvmDir, 'converted');
     mkdirSync(cacheDir, { recursive: true });
-    writeFileSync(join(cacheDir, '.converted-version'), '2');
+    // 用**当前版本号**写戳（硬编码会在每次升版本时误报 —— 见 CONVERTED_CACHE_VERSION）
+    writeFileSync(join(cacheDir, '.converted-version'), String(CONVERTED_CACHE_VERSION));
     const keep = join(cacheDir, 'keepme.jar');
     writeFileSync(keep, buildZip([{ name: 'K.class', bytes: Buffer.from('k') }]));
 

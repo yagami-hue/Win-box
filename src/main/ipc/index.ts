@@ -40,7 +40,7 @@ import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow,
 // 老板键
 import { bossKey, BOSS_DEFAULT_ACCEL } from '../bossKey';
 import { playerSettings } from '../player/playerSettings';
-import { detectPlayers, launchPlayer } from '../torrent/externalPlayer';
+import { detectPlayers, launchPlayer, seekArgs } from '../torrent/externalPlayer';
 import { ok } from '../../shared/ipc-result';
 import type { IpcMainInvokeEvent } from 'electron';
 import type { BossKeySettings, EpgChannelRef, ImportReport, LiveBean, MultiConfigEntry, SiteConfig, SourceBean, SourceMoveDirection, SourceUpdatePatch } from '../../shared/types';
@@ -553,16 +553,20 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     () => detectPlayers(playerSettings.settings.vodExternalPlayer).map((p) => ({ id: p.id, name: p.name, path: p.path })),
     log,
   );
-  /** 用本机外部播放器打开当前点播地址（a.path 指定本次用哪个播放器；地址是本机 /play 中继时 header/cookie 已由中继注入） */
-  registerHandler(IPC.VOD_OPEN_EXTERNAL, (_e: any, a: { url?: string; path?: string }) => {
+  /**
+   * 用本机外部播放器打开当前点播地址（a.path 指定本次用哪个播放器；地址是本机 /play 中继时 header/cookie 已由中继注入）。
+   * ★ 2026-09-30（用户要求）：`a.seek`（秒）= 续播位置 —— 按播放器类型拼成命令行参数传给播放器（见 seekArgs）。
+   */
+  registerHandler(IPC.VOD_OPEN_EXTERNAL, (_e: any, a: { url?: string; path?: string; seek?: number }) => {
     const u = String(a?.url || '').trim();
     if (!u) return { ok: false, error: '地址为空' };
     const pick = String(a?.path || '').trim();
     const players = detectPlayers(pick || playerSettings.settings.vodExternalPlayer);
     if (!players.length) return { ok: false, error: '未检测到本机播放器（可在配置页「播放」中填写播放器路径）' };
     const p = players[0];
-    const started = launchPlayer(p.path, u);
-    log.i(`vod: 外部播放器接力「${p.name}」→ ${u.slice(0, 120)}`);
+    const seek = Math.max(0, Math.floor(Number(a?.seek) || 0));
+    const started = launchPlayer(p.path, u, seekArgs(p.id, seek));
+    log.i(`vod: 外部播放器接力「${p.name}」${seek > 0 ? `（起播 ${seek}s）` : ''}→ ${u.slice(0, 120)}`);
     return started ? { ok: true, player: p.name } : { ok: false, error: `无法启动「${p.name}」` };
   }, log);
 

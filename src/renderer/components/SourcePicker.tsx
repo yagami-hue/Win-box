@@ -1,15 +1,17 @@
 // src/renderer/components/SourcePicker.tsx
-// ★ 2026-09-24（用户定稿）：换源改成「手机 TVBox」那套 —— **源名只显示文字**，
-//   **长按（≥500ms）或右键**弹出源列表浮层选择；经典皮肤与 TopNav 皮肤共用本组件。
+// 换源入口：**源名只显示文字**，**左键单击**弹出源列表浮层选择；**鼠标离开（按钮 + 弹层）即自动收起**。
+// 经典皮肤与 TopNav 皮肤共用本组件。
+// ★ 2026-09-24（用户定稿）：换源改成「手机 TVBox」那套 —— 源名只显示文字。
 // ★ 2026-09-30（用户要求）：
 //   ① 弹层升级为「左订阅 / 右源」双栏：点左侧订阅，右侧源列表同步切换；名字过长一律省略号（hover 看全名）；
 //   ② 顶部加**源名实时检索**（在当前订阅的源里随输入过滤；回车选中首个匹配）；
-//   ③ 跨订阅点选 = 一步完成「切换档案 + 选中源」（CFG_SWITCH_PROFILE_SOURCE，单次 apply）。
+//   ③ 跨订阅点选 = 一步完成「切换档案 + 选中源」（CFG_SWITCH_PROFILE_SOURCE，单次 apply）；
+//   ④ **触发方式由「长按≥500ms 或右键」改为「左键单击」**（原长按/右键已移除），
+//      并在鼠标离开换源区域后自动收起（带 150ms 宽限，越过「按钮↔弹层」那道 6px 缝隙时不闪关）。
 // 用法：
 //   - 受控：传 sites/current/onPick（点播页 .topbar 用，直接联动 HomePage 的 chooseSource）
 //   - 自取：不传 sites 时自己 cfgGet 取源列表，选中后广播 winbox:source-changed（顶栏/侧栏用）
 import { useEffect, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent } from 'react';
 import { client } from '../api/client';
 import type { ProfileSitesView, SourceBean } from '../../shared/types';
 
@@ -23,17 +25,14 @@ export interface SourcePickerProps {
   /** 顶栏小按钮 / 侧栏文字行 */
   variant?: 'pill' | 'sidebar';
   disabled?: boolean;
-  /** 长按触发阈值（ms） */
-  holdMs?: number;
 }
 
-const LONG_PRESS_MS = 500;
-/** 长按期间允许的指针漂移（超出即视为滚动/拖拽，取消长按） */
-const MOVE_TOLERANCE = 8;
+/** 鼠标离开换源区域后多久收起弹层（宽限期：足够越过「按钮↔弹层」那道 6px 缝隙，肉眼无感） */
+const LEAVE_GRACE_MS = 150;
 /** 双栏弹层的期望宽度（与 CSS 的 max-width 对齐；用于判定左锚是否会出窗口右侧） */
 const WIDE_POP_PX = 400;
 
-export default function SourcePicker({ sites, current, onPick, variant = 'pill', disabled, holdMs = LONG_PRESS_MS }: SourcePickerProps) {
+export default function SourcePicker({ sites, current, onPick, variant = 'pill', disabled }: SourcePickerProps) {
   const [ownSites, setOwnSites] = useState<SourceBean[]>([]);
   const [ownKey, setOwnKey] = useState('');
   const [open, setOpen] = useState(false);
@@ -49,9 +48,8 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
   const srcColRef = useRef<HTMLDivElement | null>(null);
   /** ★ 2026-09-30：档案视图请求代次 —— 只认最后一次请求的响应（慢响应不得覆盖新数据） */
   const viewSeqRef = useRef(0);
-  const timerRef = useRef<number | null>(null);
-  const startRef = useRef<{ x: number; y: number } | null>(null);
-  const firedRef = useRef(false);
+  /** ★ 2026-09-30：鼠标移出的宽限计时器（移回区域内即取消，见 cancelLeave/scheduleLeave） */
+  const leaveTimerRef = useRef<number | null>(null);
 
   const selfLoad = sites === undefined || current === undefined;
   const loadOwn = (): void => {
@@ -176,31 +174,36 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
     ? paneSites.filter((s) => (s.name || s.key).toLowerCase().includes(query) || s.key.toLowerCase().includes(query))
     : paneSites;
 
-  const cancelPress = (): void => {
-    if (timerRef.current !== null) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
+  // ★ 2026-09-30（用户要求）：鼠标移出换源区域（按钮 + 弹层，弹层是 wrapper 的 DOM 子节点）即自动收起。
+  //   弹层与按钮之间隔着 6px 的绝对定位缝隙，指针穿过时 wrapper 会先收到一次 mouseleave →
+  //   所以不立刻关，留 LEAVE_GRACE_MS 宽限；指针在这段时间内回到区域内（弹层上）就取消。
+  const cancelLeave = (): void => {
+    if (leaveTimerRef.current !== null) {
+      clearTimeout(leaveTimerRef.current);
+      leaveTimerRef.current = null;
     }
   };
-  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
+  const scheduleLeave = (): void => {
+    if (!open) return;
+    cancelLeave();
+    leaveTimerRef.current = window.setTimeout(() => {
+      leaveTimerRef.current = null;
+      setOpen(false);
+    }, LEAVE_GRACE_MS);
+  };
+  // 卸载时清掉宽限计时器
+  useEffect(
+    () => () => {
+      if (leaveTimerRef.current !== null) clearTimeout(leaveTimerRef.current);
+    },
+    [],
+  );
+
+  /** 左键单击开关弹层（原「长按 ≥500ms / 右键」已移除） */
+  const toggleOpen = (): void => {
     if (disabled || !list.length) return;
-    if (e.button !== 0) return; // 右键走 onContextMenu
-    firedRef.current = false;
-    startRef.current = { x: e.clientX, y: e.clientY };
-    cancelPress();
-    timerRef.current = window.setTimeout(() => {
-      firedRef.current = true;
-      setOpen(true);
-    }, holdMs);
-  };
-  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>): void => {
-    const s = startRef.current;
-    if (!s) return;
-    if (Math.abs(e.clientX - s.x) > MOVE_TOLERANCE || Math.abs(e.clientY - s.y) > MOVE_TOLERANCE) cancelPress();
-  };
-  const onPointerUp = (): void => {
-    cancelPress();
-    startRef.current = null;
+    cancelLeave();
+    setOpen((v) => !v);
   };
 
   const pick = async (k: string): Promise<void> => {
@@ -245,20 +248,19 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
 
   const isSidebar = variant === 'sidebar';
   return (
-    <div ref={wrapRef} className={`srcpick${isSidebar ? ' srcpick-side' : ''}`}>
+    <div
+      ref={wrapRef}
+      className={`srcpick${isSidebar ? ' srcpick-side' : ''}`}
+      onMouseEnter={cancelLeave}
+      onMouseLeave={scheduleLeave}
+    >
       <div
         className={`srcpick-name${disabled ? ' disabled' : ''}`}
         role="button"
         tabIndex={0}
-        title={`当前源：${label}\n长按（≥${Math.round(holdMs / 1000 * 10) / 10} 秒）或右键切换源`}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerLeave={onPointerUp}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          if (!disabled && list.length) setOpen(true);
-        }}
+        title={`当前源：${label}\n点击切换源`}
+        onClick={toggleOpen}
+        onContextMenu={(e) => e.preventDefault()}
       >
         {isSidebar ? <span className="srcpick-label">当前源</span> : null}
         <span className="srcpick-text">{label}</span>
@@ -271,7 +273,7 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
         >
           <div className="srcpick-pop-tip">
             {views
-              ? `长按/右键切换源 · 共 ${filtered.length} 个${multi ? ` · ${views.profiles.length} 份订阅` : ''}`
+              ? `点击源名切换 · 共 ${filtered.length} 个${multi ? ` · ${views.profiles.length} 份订阅` : ''}`
               : '正在加载订阅…'}
           </div>
           <input

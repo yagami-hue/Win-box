@@ -11,6 +11,12 @@ export interface HomeSearchMem {
   searchAllSources: boolean;
   /** 搜索结果（SearchAllReport 可 JSON 序列化） */
   agg: { items: unknown[]; perSource: unknown[]; hitSources: number; failedSources: number; totalRaw: number } | null;
+  /**
+   * ★ 2026-09-30（用户报「其他接口的盘搜类型源搜索结果看不了内容」）：
+   * 当前是否停留在某个**文件夹**（`vod_tag=folder`，如盘搜的「夸克 (92个)」）里 ——
+   * 内容由 `categoryContent(tid)` 展开。存进搜索态，从详情页返回时文件夹视图能原样恢复。
+   */
+  folder?: { key: string; tid: string; name: string } | null;
 }
 export interface HomeMem {
   key: string;
@@ -167,6 +173,21 @@ export function recordWatch(meta: RecordWatchInput): void {
     updatedAt: Date.now(),
   });
   schedulePersist(); // ★ 变更即落盘，避免只靠退出时保存（崩溃/强杀不丢）
+}
+
+/**
+ * ★ 2026-09-30（用户要求「从历史记录启动第三方播放器，播放器也应该正确识别历史播放的位置」）：
+ * 同一集已有进度（秒）—— 拉起外部播放器时作为起播位置。
+ * 不同集（或没有记录）→ 0（外部播放器无法回传进度，跨集沿用旧位置会"跳错集"）。
+ */
+export function sameEpProgress(sourceKey: string | undefined, vodId: string | undefined, rawUrl: string): number {
+  const ep = (rawUrl || '').trim();
+  if (!ep) return 0;
+  const key = historyGroupKey({ sourceKey, vodId, url: ep });
+  const it = uiMem.history.get(key) || uiMem.history.get(ep);
+  if (!it) return 0;
+  const same = (it.rawUrl || it.url) === ep;
+  return same ? Math.max(0, Math.floor(it.time || 0)) : 0;
 }
 
 /**

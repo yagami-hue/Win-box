@@ -157,6 +157,12 @@ export interface VodItem {
   area: string;
   type: string;
   sourceKey: string;
+  /**
+   * ★ 2026-09-30（用户报「其他接口的盘搜类型源搜索结果无法展示详情」）：
+   * 源侧 `vod_tag` 原样透传 —— `folder` = **文件夹条目**（盘搜/网盘的「夸克 (92个)」这类），
+   * 点击应拿它的 id 走 `categoryContent`（文件夹展开），而不是进详情页（详情必空）。
+   */
+  tag?: string;
 }
 
 export interface Episode {

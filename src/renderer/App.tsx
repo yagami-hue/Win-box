@@ -16,7 +16,9 @@ import HistoryPage from './pages/HistoryPage';
 import AboutPage from './pages/AboutPage';
 /** ★ 2026-09-29：启动强制更新门禁（本地版本低于 GitHub 最新 Release 时遮挡全界面） */
 import UpdateGate from './components/UpdateGate';
-import { loadUiMemory, saveUiMemory } from './lib/uiMemory';
+import { loadUiMemory, sameEpProgress, saveUiMemory } from './lib/uiMemory';
+// ★ 2026-09-30（用户要求）：显式绑定第三方播放器时点播直接由它播放（详见 lib/externalPlay.ts）
+import { playVodExternal } from './lib/externalPlay';
 import { useShowDiscover } from './lib/uiPrefs';
 import { useTheme } from './lib/theme';
 import { client } from './api/client';
@@ -306,6 +308,8 @@ function AppShell() {
 
   // 详情页"播放"：改为在独立播放器窗口打开（主窗口仍停在选集页）。
   // 传入完整集列表 + 当前集，便于播放器窗口内自换集；主窗口换集经 player:switchEp 同步。
+  // ★ 2026-09-30（用户要求）：若在设置里**显式绑定**了第三方播放器 → 直接由它播放，不启动内置播放器窗口；
+  //   未绑定 / 解析不出直连地址（需网页解析、需网盘绑定）→ 回退内置播放器窗口（由它上屏原因）。
   const onDetailPlay = (
     _url: string,
     name: string,
@@ -327,23 +331,40 @@ function AppShell() {
     const target = eps[idx];
     // ★ 剧名副名优先用详情页 detail.name（meta.title）；无则回退从 name 反推首段
     const base = (meta?.title?.trim() || name.split(' - ')[0] || '').trim();
-    void client.playerOpen({
+    const openBuiltin = (): void => {
+      void client.playerOpen({
+        key: fromKey,
+        flag: meta?.flag || '',
+        episodes: eps,
+        epIndex: idx,
+        title: base,
+        subtitleTitle: base, // ★ 供字幕检索的剧名副名（独立于集名，避免从集名反推失败）
+        lastUrl: target?.url || _url,
+        lastName: target ? `${base} - ${target.name}` : name,
+        meta: {
+          pic: meta?.pic,
+          remarks: meta?.remarks,
+          sourceName: meta?.sourceName,
+          vodId: meta?.vodId,
+          fromKey,
+          id,
+        },
+      });
+    };
+    const rawUrl = target?.url || _url;
+    void playVodExternal({
       key: fromKey,
       flag: meta?.flag || '',
-      episodes: eps,
-      epIndex: idx,
-      title: base,
-      subtitleTitle: base, // ★ 供字幕检索的剧名副名（独立于集名，避免从集名反推失败）
-      lastUrl: target?.url || _url,
-      lastName: target ? `${base} - ${target.name}` : name,
-      meta: {
-        pic: meta?.pic,
-        remarks: meta?.remarks,
-        sourceName: meta?.sourceName,
-        vodId: meta?.vodId,
-        fromKey,
-        id,
-      },
+      rawUrl,
+      display: target ? `${base} - ${target.name}` : name,
+      pic: meta?.pic,
+      remarks: meta?.remarks,
+      sourceName: meta?.sourceName,
+      vodId: meta?.vodId,
+      // 同集已有进度 → 外部播放器直接续播（外部播放器无法回传进度，故保留历史里的位置）
+      seek: sameEpProgress(fromKey, meta?.vodId, rawUrl),
+    }).then((out) => {
+      if (!out.played) openBuiltin();
     });
   };
 

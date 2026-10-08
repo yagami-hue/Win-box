@@ -15,7 +15,7 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { JarSpiderBridge } from '../src/engine/spider/JarSpiderBridge';
+import { JarSpiderBridge, CONVERTED_CACHE_VERSION } from '../src/engine/spider/JarSpiderBridge';
 import { md5Hex } from '../src/engine/util/md5';
 import { buildZip } from '../src/engine/util/syncZip';
 
@@ -213,6 +213,6 @@ describe('JarSpiderBridge — 转换脱离 App 进程（detached / 收编 / 接�
     // 陪伴文件（raw）不应被当成「转换产物」交给 JVM
     const jars = readdirSync(cacheDir).filter((f) => f.endsWith('.jar'));
     expect(jars.every((f) => !f.endsWith('.part.jar'))).toBe(true);
-    expect(readFileSync(join(cacheDir, '.converted-version'), 'utf8').trim()).toBe('2');
+    expect(readFileSync(join(cacheDir, '.converted-version'), 'utf8').trim()).toBe(String(CONVERTED_CACHE_VERSION));
   });
 });

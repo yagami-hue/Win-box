@@ -11,6 +11,8 @@ import { recentWatch, clearUiMemory, deleteWatch, restoreWatch, loadUiMemory, lo
 import { client } from '../api/client';
 import { pickCover, preloadImage } from '../lib/coverPick';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
+// ★ 2026-09-30（用户要求）：显式绑定第三方播放器时，从历史直接由它续播（起播位置作为启动参数）
+import { playVodExternal } from '../lib/externalPlay';
 
 /** 单次补图最多查询多少个不同片名（与首页同口径，避免一次性打爆 TMDB 限流） */
 const MAX_UNIQUE_QUERY = 18;
@@ -234,6 +236,27 @@ export default function HistoryPage() {
         } catch {
           /* 读取/切换失败不阻塞播放（仍按记录里的 key 解析） */
         }
+      }
+      /**
+       * ★ 2026-09-30（用户要求）：显式绑定了第三方播放器 → 直接由它续播（不再开内置播放器窗口）。
+       *   `seek` = 本条记录的最新进度 → 按播放器类型拼成起播参数（PotPlayer /seek=… 等，见 seekArgs）。
+       *   未绑定 / 解析不出直连地址 → 回退内置播放器窗口（startTime 续播，旧链路不变）。
+       */
+      const out = await playVodExternal({
+        key: latest.sourceKey || '',
+        flag: latest.flag || '',
+        rawUrl: latest.rawUrl || latest.url,
+        display: latest.name || '播放',
+        pic: latest.pic,
+        remarks: latest.remarks,
+        sourceName: latest.sourceName,
+        vodId: latest.vodId,
+        seek: latest.time,
+      });
+      if (out.played) {
+        setNotice(`已用「${out.player || '外部播放器'}」播放${latest.time > 0 ? `（从 ${fmtTime(latest.time)} 继续）` : ''}`);
+        refresh(); // 外部播放器已拉起：历史本条（及进度保留）立即反映到列表
+        return;
       }
       void client.playerOpen({
         key: latest.sourceKey || '',

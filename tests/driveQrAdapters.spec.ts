@@ -203,24 +203,25 @@ describe('阿里云盘族适配器 — 包装现有 easy-token 通道（行为�
 });
 
 describe('适配层注册表', () => {
-  it('QR_SUPPORTED_PROVIDERS = ali/alipan/quark/uc', () => {
-    expect([...QR_SUPPORTED_PROVIDERS]).toEqual(['ali', 'alipan', 'quark', 'uc']);
+  it('QR_SUPPORTED_PROVIDERS = ali/alipan/quark/uc/baidu', () => {
+    expect([...QR_SUPPORTED_PROVIDERS]).toEqual(['ali', 'alipan', 'quark', 'uc', 'baidu']);
   });
   it('getAdapter 返回对应 provider；空串默认 ali', () => {
     expect(getAdapter('ali').provider).toBe('ali');
     expect(getAdapter('alipan').provider).toBe('alipan');
     expect(getAdapter('quark').provider).toBe('quark');
     expect(getAdapter('uc').provider).toBe('uc');
+    expect(getAdapter('baidu').provider).toBe('baidu');
     expect(getAdapter('').provider).toBe('ali');
     expect(getAdapter('QUARK').provider).toBe('quark'); // 大小写归一
   });
   it('未知 provider 抛可读错误', () => {
-    expect(() => getAdapter('baidu')).toThrow(/不支持的扫码网盘 provider/);
+    expect(() => getAdapter('115')).toThrow(/不支持的扫码网盘 provider/);
   });
   it('isQrSupported 判定', () => {
     expect(isQrSupported('quark')).toBe(true);
     expect(isQrSupported('uc')).toBe(true);
-    expect(isQrSupported('baidu')).toBe(false);
+    expect(isQrSupported('baidu')).toBe(true);
     expect(isQrSupported('115')).toBe(false);
   });
 });

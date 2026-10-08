@@ -15,6 +15,7 @@ import {
   recordWatch,
   historyGroupKey,
   latestOf,
+  sameEpProgress,
   watchedEpisodeOf,
   latestEpisodeOf,
   type WatchHistory,
@@ -41,6 +42,27 @@ afterEach(() => {
   // 清掉 2s 防抖定时器，避免测试结束后仍触发落盘
   saveUiMemory();
   clearUiMemory();
+});
+
+describe('sameEpProgress — 外部播放器续播位置（★ 2026-09-30）', () => {
+  it('同一集：取已记录的进度（用于拉起第三方播放器时带位置）', () => {
+    seed({ url: 'ep1', rawUrl: 'ep1', name: '某剧 第1集', sourceKey: 's1', vodId: 'v1', time: 723 });
+    expect(sameEpProgress('s1', 'v1', 'ep1')).toBe(723);
+  });
+
+  it('不同集：返回 0（外部播放器无法回传进度，跨集沿用旧位置会"跳错集"）', () => {
+    seed({ url: 'ep1', rawUrl: 'ep1', name: '某剧 第1集', sourceKey: 's1', vodId: 'v1', time: 723 });
+    expect(sameEpProgress('s1', 'v1', 'ep2')).toBe(0);
+  });
+
+  it('没有记录 / 空地址：0；负数/小数兜底为 0 或整秒', () => {
+    expect(sameEpProgress('s1', 'v1', 'nope')).toBe(0);
+    expect(sameEpProgress('s1', 'v1', '')).toBe(0);
+    seed({ url: 'neg', name: 'neg', sourceKey: 's2', vodId: 'v2', time: -5 });
+    expect(sameEpProgress('s2', 'v2', 'neg')).toBe(0);
+    seed({ url: 'frac', name: 'frac', sourceKey: 's3', vodId: 'v3', time: 12.9 });
+    expect(sameEpProgress('s3', 'v3', 'frac')).toBe(12);
+  });
 });
 
 describe('deleteWatch — 单条移除', () => {

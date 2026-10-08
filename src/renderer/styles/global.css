@@ -243,6 +243,10 @@ h3 { font-size: 18px; } h4 { font-size: 14px; color: var(--text); }
 
 /* ---- 点播网格 ---- */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(138px, 1fr)); gap: 14px; }
+/* ★ 2026-09-30（瀑布模式，防卡顿）：离开视口的卡片**跳过渲染与布局**（Chromium content-visibility）——
+   瀑布连翻十几页时 DOM 里会有上千张卡，这一条让滚动/追加的开销只花在可视区上。
+   contain-intrinsic-size 是「未渲染时的占位尺寸」（≈ 138 宽列下的卡高 240），只影响滚动条长度估算。 */
+.grid .card-media { content-visibility: auto; contain-intrinsic-size: 138px 240px; }
 /* 站级 style=list 的列表式布局 */
 .list { display: flex; flex-direction: column; gap: 8px; }
 .list-item { display: flex; align-items: center; gap: 10px; background: linear-gradient(180deg, var(--bg-elev), var(--bg1)); border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 6px 10px; cursor: pointer; position: relative; }

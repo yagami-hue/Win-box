@@ -1,4 +1,4 @@
-﻿// tests/jvmSpawnArgs.spec.ts — 任务 A：JVM 桥 spawn 必须强制 UTF-8（JRE17 zh-CN Windows 管道默认 GBK，蜘蛛返回中文必乱码）。
+// tests/jvmSpawnArgs.spec.ts — 任务 A：JVM 桥 spawn 必须强制 UTF-8（JRE17 zh-CN Windows 管道默认 GBK，蜘蛛返回中文必乱码）。
 // JEP400(Java18) 才默认 UTF-8；JDK17 中 System.out 实际由 sun.stdout.encoding 控制，三旗标齐加最稳。
 // 只 mock child_process.spawn（不触网、不跑真 JVM），断言 argv 形状与结果回传。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -12,6 +12,14 @@ import { NullLogger } from '../src/engine/util/logger';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
+// ★ 2026-09-30 蜘蛛沙箱盘：jailSpawnCwd 在单测（VITEST）下恒为空串 → 这里固定成 V:\ 以便断言
+//   「JVM 子进程带 cwd / Python 子进程不带」这条把 `/data/…` 收进数据目录的关键接线。
+//   只覆盖 jailSpawnCwd，ensureJailDrive 仍是真实实现（VITEST 下返回空串 → argv 形状不变）。
+const JAIL_CWD = 'V:\\';
+vi.mock('../src/engine/util/jailDrive', async (orig) => ({
+  ...(await orig<typeof import('../src/engine/util/jailDrive')>()),
+  jailSpawnCwd: () => JAIL_CWD,
+}));
 
 /** 假子进程：只需 stdout/stderr EventEmitter + error/close 事件 */
 function fakeChild(): EventEmitter & { stdout: EventEmitter; stderr: EventEmitter } {
@@ -150,6 +158,30 @@ describe('JarSpiderBridge.call — spawn argv 强制 UTF-8（任务 A）', () =>
     const p2 = bridge.call([join(dir, 'a.jar')], 'X', 'm', []);
     (spawnMock.mock.results[1].value as ReturnType<typeof fakeChild>).emit('error', new Error('nope'));
     await expect(p2).resolves.toBe('');
+  });
+
+  // ★ 2026-09-30 蜘蛛沙箱盘：这是把第三方 jar 写的 `/data/…`（无盘符根路径）收进数据目录的
+  //   **决定性接线** —— 真机 A/B 实测只有子进程 cwd 能改变真实落点，`-Duser.dir` 只改路径串。
+  //   只给 JVM 子进程加；Python 源不经安卓路径，必须维持历史 cwd 行为。
+  it('JVM 子进程带 cwd=沙箱盘根；Python 等非 JVM 子进程不带 cwd', async () => {
+    const { bridge, dir } = makeBridge();
+    dirs.push(dir);
+    const p = bridge.call([join(dir, 'a.jar')], 'X', 'm', []);
+    const child = spawnMock.mock.results[0].value as ReturnType<typeof fakeChild>;
+    child.stdout.emit('data', Buffer.from('[]'));
+    child.emit('close', 0);
+    await p;
+    expect((spawnMock.mock.calls[0][2] as { cwd?: string }).cwd).toBe(JAIL_CWD);
+
+    // 非 JVM（Python runner 走同一条 runSubprocess）→ 不得改 cwd
+    const rs = (bridge as unknown as {
+      runSubprocess: (exe: string, argv: string[], cls: string, method: string) => Promise<string>;
+    }).runSubprocess.call(bridge, join(dir, 'py', 'python.exe'), ['r.py'], 'X', 'm');
+    const py = spawnMock.mock.results[1].value as ReturnType<typeof fakeChild>;
+    py.stdout.emit('data', Buffer.from('[]'));
+    py.emit('close', 0);
+    await rs;
+    expect('cwd' in (spawnMock.mock.calls[1][2] as object)).toBe(false);
   });
 });
 

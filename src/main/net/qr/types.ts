@@ -3,14 +3,21 @@
 // state 沿用阿里云盘 easy-token 的语义：0=等待 / 10=已扫待确认 / 20=成功 / 30=过期 / 40=取消 / -1=未知。
 import type { HttpClient, Logger } from '../../../shared/types';
 
-/** 当前支持的扫码 provider（阿里云盘族 + 夸克 + UC） */
-export type DriveProvider = 'ali' | 'alipan' | 'quark' | 'uc';
+/** 当前支持的扫码 provider（阿里云盘族 + 夸克 + UC + 百度） */
+export type DriveProvider = 'ali' | 'alipan' | 'quark' | 'uc' | 'baidu';
 
 /** 生成二维码后的会话（content=二维码文本；sid=轮询凭据，不透明，由各适配层自解释） */
 export interface QrSession {
   provider: DriveProvider;
   /** 二维码文本内容（渲染层用 qrcode 库渲染） */
   content: string;
+  /**
+   * ★ 2026-09-30：**图片型二维码**（data:image/png;base64,…）。
+   *   百度 passport 的二维码是**服务端直接出的 PNG**（`imgurl`），其载荷不是可重绘成文字的 URL ——
+   *   只能原样展示图片，不能用 `qrcode` 库按 `content` 重绘（会画成一张「指向图片地址」的码，扫不开）。
+   *   有值 ⇒ 渲染层显示图片；无值 ⇒ 走既有 QRCode(content) 文字渲染。
+   */
+  imageDataUrl?: string;
   /** 轮询凭据（渲染层原样回传，适配层内部解析） */
   sid: string;
 }

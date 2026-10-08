@@ -174,8 +174,8 @@ export default function ConfigPage() {
       setBtMsg({ text: `保存失败：${(e as Error).message}`, kind: 'err' });
     }
   };
-  // ★ 2026-09-30（用户要求「点播也应该支持绑定外部播放器，和磁力区分开」）：
-  //   点播外部播放器 —— 播放器控制条「外部播放器」按钮用它打开当前视频（留空 = 自动探测常见安装位置）
+  // ★ 2026-09-30（用户要求「点播也应该支持绑定外部播放器，和磁力区分开」+「选定后直接由它播放」）：
+  //   点播外部播放器 —— **填了路径 = 点播直接用该播放器播放（不开内置播放器）**；留空 = 用内置播放器
   const [vodPlayerDraft, setVodPlayerDraft] = useState<string | null>(null);
   const [vodPlayers, setVodPlayers] = useState<Array<{ id: string; name: string; path: string }>>([]);
   const [vodMsg, setVodMsg] = useState<{ text: string; kind: 'ok' | 'err' } | null>(null);
@@ -199,7 +199,9 @@ export default function ConfigPage() {
       setPlayPrefs(s);
       setVodPlayerDraft(null);
       setVodMsg({
-        text: s.vodExternalPlayer ? '已保存：点播将用该播放器打开（播放器里点「外部播放器」按钮）' : '已清空：恢复自动检测（PotPlayer → VLC → mpv → MPC-HC）',
+        text: s.vodExternalPlayer
+          ? '已保存：点播将直接用该播放器播放（不再开内置播放器；从历史续播会自动带上次位置）'
+          : '已清空：点播改用内置播放器',
         kind: 'ok',
       });
     } catch (e) {
@@ -1540,13 +1542,13 @@ export default function ConfigPage() {
           )}
         </div>
       </div>
-      {/* ★ 2026-09-30（用户要求）：点播外部播放器 —— 与磁力分开绑定；播放器控制条「外部播放器」按钮用它拉起 */}
+      {/* ★ 2026-09-30（用户要求）：点播外部播放器 —— 与磁力分开绑定；**填了路径 = 点播直接由它播放** */}
       <div className="card" id="cfg-vod-player" style={{ padding: 12, marginBottom: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <span style={{ fontWeight: 600 }}>点播外部播放器（PotPlayer 等）</span>
           <span className="muted" style={{ fontSize: 11 }}>
-            点播播放器控制条上的「外部播放器」按钮用它打开当前视频（走本机中继，header / cookie 已注入，可边下边播）。
-            与磁力分开绑定；留空 = 自动检测。
+            填了路径，点播就<b>直接用它播放</b>（不再开内置播放器；走本机中继，header / cookie 已注入）；
+            从历史播放会自动带上次进度。留空 = 用内置播放器。与磁力分开绑定。
           </span>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
             <input

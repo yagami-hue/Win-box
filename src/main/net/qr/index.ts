@@ -3,17 +3,19 @@ import type { DriveProvider, DriveQrAdapter } from './types';
 import { aliAdapter, alipanAdapter } from './ali';
 import { quarkAdapter } from './quark';
 import { ucAdapter } from './uc';
+import { baiduAdapter } from './baidu';
 
 export type { DriveProvider, DriveQrAdapter, QrPollResult, QrSession } from './types';
 
 /** 支持扫码的 provider（UI 门槛 / 校验共用唯一来源） */
-export const QR_SUPPORTED_PROVIDERS: readonly DriveProvider[] = ['ali', 'alipan', 'quark', 'uc'];
+export const QR_SUPPORTED_PROVIDERS: readonly DriveProvider[] = ['ali', 'alipan', 'quark', 'uc', 'baidu'];
 
 const REGISTRY: Record<DriveProvider, DriveQrAdapter> = {
   ali: aliAdapter,
   alipan: alipanAdapter,
   quark: quarkAdapter,
   uc: ucAdapter,
+  baidu: baiduAdapter,
 };
 
 /** 是否支持扫码 */

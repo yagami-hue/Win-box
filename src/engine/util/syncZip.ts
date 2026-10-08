@@ -9,9 +9,10 @@
 //
 // 只实现真正需要的部分：
 // - 读：中央目录 → 本地头 → `deflate`/`store` 解压
-// - 写：全部以 `store`（method 0）写入 —— 资源文件通常已被压缩（.so/.guard），
-//   再 deflate 收益极小，而 store 让实现无压缩状态机、字节可预测，便于单测。
-import { inflateRawSync } from 'node:zlib';
+// - 写：默认 `store`（method 0），可选 `deflate` —— 资源文件通常已被压缩（.so/.guard），
+//   再 deflate 收益极小，而 store 让实现无压缩状态机、字节可预测，便于单测；
+//   但类文件（classFix 的字节码修补产物）体积大，用 deflate 避免缓存膨胀（见 buildZip）。
+import { inflateRawSync, deflateRawSync } from 'node:zlib';
 
 export interface ZipEntryData {
   /** zip 内路径（目录条目以 `/` 结尾） */
@@ -76,8 +77,17 @@ export function looksLikeZip(buf: Buffer): boolean {
   return buf.length >= 4 && buf.readUInt32LE(0) === LOC_SIG;
 }
 
-/** 用 `store` 方式构建 zip。`entries` 顺序即写入顺序，重复名以后者为准（调用方负责去重）。 */
-export function buildZip(entries: ZipEntryData[]): Buffer {
+/**
+ * 用 zip 构建（默认 `store`，`opts.deflate=true` 时用 deflate）。
+ * `entries` 顺序即写入顺序，重复名以后者为准（调用方负责去重）。
+ *
+ * 为什么默认 store：资源文件通常已被压缩（.so/.guard），再 deflate 收益极小，
+ * 而 store 让实现无压缩状态机、字节可预测，便于单测。
+ * ★ 2026-09-30：类文件（classFix 的字节码修补）在几 MB~十几 MB 量级，store 会让缓存
+ *   膨胀到数倍 → 提供 deflate 档（仍只依赖 node:zlib，不引第三方库）。
+ */
+export function buildZip(entries: ZipEntryData[], opts?: { deflate?: boolean }): Buffer {
+  const deflate = !!opts?.deflate;
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];
   let offset = 0;
@@ -87,19 +97,24 @@ export function buildZip(entries: ZipEntryData[]): Buffer {
 
   for (const e of entries) {
     const nameBuf = Buffer.from(e.name, 'utf8');
-    const data = e.bytes;
-    const crc = crc32(data);
+    const raw = e.bytes;
+    // deflate 仅在「确实变小」时用（小文件压缩头反而更大）
+    const packed = deflate ? deflateRawSync(raw, { level: 6 }) : null;
+    const useDeflate = !!packed && packed.length < raw.length;
+    const data = useDeflate ? (packed as Buffer) : raw;
+    const method = useDeflate ? 8 : 0;
+    const crc = crc32(raw);
 
     const local = Buffer.alloc(30 + nameBuf.length);
     local.writeUInt32LE(LOC_SIG, 0);
     local.writeUInt16LE(20, 4); // version needed
     local.writeUInt16LE(0x0800, 6); // 通用标志：UTF-8 文件名
-    local.writeUInt16LE(0, 8); // method = store
+    local.writeUInt16LE(method, 8);
     local.writeUInt16LE(dosTime, 10);
     local.writeUInt16LE(dosDate, 12);
     local.writeUInt32LE(crc, 14);
     local.writeUInt32LE(data.length, 18);
-    local.writeUInt32LE(data.length, 22);
+    local.writeUInt32LE(raw.length, 22);
     local.writeUInt16LE(nameBuf.length, 26);
     local.writeUInt16LE(0, 28); // extra len
     nameBuf.copy(local, 30);
@@ -111,12 +126,12 @@ export function buildZip(entries: ZipEntryData[]): Buffer {
     cen.writeUInt16LE(20, 4); // version made by
     cen.writeUInt16LE(20, 6); // version needed
     cen.writeUInt16LE(0x0800, 8);
-    cen.writeUInt16LE(0, 10); // method
+    cen.writeUInt16LE(method, 10);
     cen.writeUInt16LE(dosTime, 12);
     cen.writeUInt16LE(dosDate, 14);
     cen.writeUInt32LE(crc, 16);
     cen.writeUInt32LE(data.length, 20);
-    cen.writeUInt32LE(data.length, 24);
+    cen.writeUInt32LE(raw.length, 24);
     cen.writeUInt16LE(nameBuf.length, 28);
     cen.writeUInt16LE(0, 30); // extra
     cen.writeUInt16LE(0, 32); // comment

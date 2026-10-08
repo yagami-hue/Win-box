@@ -21,9 +21,22 @@ import {
   type DisguiseAttempt,
 } from '../util/fetchWithDisguise';
 import { NullLogger } from '../util/logger';
+// ★ 2026-09-30：蜘蛛沙箱盘 —— 把第三方 jar 写的安卓绝对路径（/data/…）收进数据目录（见 jailDrive 头注释）
+import { ensureJailDrive, jailSpawnCwd, releaseJailDrive, JAIL_DIR_NAME } from '../util/jailDrive';
 import { buildZip, listZipEntries, looksLikeZip, readZipEntries, zipEntrySizes, type ZipEntryData } from '../util/syncZip';
 import { SpiderProcPool, poolEnabled, servePoolKey, WARM_METHOD, type PoolResult } from './SpiderProcPool';
+import { fixSelfSuperCallsInJarFile } from './classFix';
 import { LOCAL_PROXY_BASE } from '../../shared/constants';
+
+/**
+ * ★ 转换产物格式版本（导出：单测与诊断用；**改变了「产物内容」就必须 +1**）。
+ * 历史：
+ * - v1：只写 dex2jar 输出（**丢掉了 assets/**，加固壳因此全废，第十二轮修复）
+ * - v2：补齐 raw jar 的非 dex 资源（assets/**、META-INF/** 等）
+ * - v3：修补「super 调用被转成自递归 invokespecial」（classFix.ts）—— 旧产物里这些类
+ *       一调用就 StackOverflowError（整族盘搜蜘蛛受影响），必须作废重转才生效
+ */
+export const CONVERTED_CACHE_VERSION = 3;
 
 export interface JarBridgeOptions {
   /** resources/jvm 目录（含 jre/d2j/stubs/libs） */
@@ -303,8 +316,13 @@ export class JarSpiderBridge {
     // 池默认启用（生产）；VITEST 或 TVBOX_DISABLE_SPIDER_POOL=1 关闭（单测走一次性路径，argv 断言零改动）
     if (poolEnabled()) {
       this.pool = new SpiderProcPool((spec) => {
+        // ★ 2026-09-30 蜘蛛沙箱盘：cwd 必须是沙箱盘根，否则第三方 jar 写的 `/data/…`
+        //   （无盘符根路径）会按**当前盘**解析、落到系统盘根目录（见 util/jailDrive 头注释）。
+        //   只给 JVM 子进程加（Python 源不经安卓路径，维持原 cwd 行为）。
+        const jailCwd = spec.exe === this.javaExePath() ? jailSpawnCwd() : '';
         const child = spawn(spec.exe, spec.serveArgv, {
           windowsHide: true,
+          ...(jailCwd ? { cwd: jailCwd } : {}),
           // ★ serve 进程 stdout 走行协议（池按物理行分帧），stderr 必须**消费**而不是 'ignore'：
           //   一是防 64KB 管道写满挂死蜘蛛，二是采集 SpiderLog 失败原因（空结果时上屏的人话提示）。
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -390,8 +408,13 @@ export class JarSpiderBridge {
     this.globalJar = (url || '').trim();
   }
 
+  /** 随包 JRE 的 java.exe 路径（**不做存在性检查**，供「是否 JVM 子进程」这类判定用；不抛异常） */
+  private javaExePath(): string {
+    return join(this.jvmDir, 'jre', 'bin', 'java.exe');
+  }
+
   private javaExe(): string {
-    const p = join(this.jvmDir, 'jre', 'bin', 'java.exe');
+    const p = this.javaExePath();
     if (!existsSync(p)) {
       // 附带 jvmDir 实况，便于区分「资源目录定位错」与「资源真的没打进去」
       let probe = '';
@@ -468,18 +491,14 @@ export class JarSpiderBridge {
   }
 
   /**
-   * ★ 转换产物格式版本 —— 改变了「产物内容」就必须 +1。
+   * 转换产物格式版本 —— 改变了「产物内容」就必须 +1（历史见 CONVERTED_CACHE_VERSION）。
    *
-   * 历史：
-   * - v1：只写 dex2jar 输出（**丢掉了 assets/**，加固壳因此全废，第十二轮修复）
-   * - v2：补齐 raw jar 的非 dex 资源（assets/**、META-INF/** 等）
-   *
-   * 为什么必须有版本号：老用户机器上 `<cache>/spider/converted/<md5>.jar` 是 v1 产物，
-   * 命中缓存就直接用了 —— 新代码的 assets 补齐逻辑**永远不会执行**，
-   * 修复形同虚设。这里在缓存目录里放一个版本戳，版本不符就把转换产物整体作废重转
+   * 为什么必须有版本号：老用户机器上 `<cache>/spider/converted/<md5>.jar` 是旧版产物，
+   * 命中缓存就直接用了 —— 新代码的修补逻辑**永远不会执行**，修复形同虚设。
+   * 这里在缓存目录里放一个版本戳，版本不符就把转换产物整体作废重转
    * （只删 `.jar`，不动别的；raw jar 一并删掉以保证重新下载最新内容）。
    */
-  private static readonly CACHE_VERSION = 2;
+  private static readonly CACHE_VERSION = CONVERTED_CACHE_VERSION;
   private static readonly CACHE_STAMP = '.converted-version';
 
   /** 版本不符时清空转换产物，强制重转。失败只警告，不影响主流程。 */
@@ -935,6 +954,13 @@ export class JarSpiderBridge {
     // ★★ 把 raw jar 里 dex2jar「不认」的资源原样搬回转换产物 —— 加固/壳类蜘蛛的生死线 ★★
     //   见 copyJarResources 的详细说明（缺 assets/*.so 会让 DexNative.<clinit> 直接 NPE）。
     copyJarResources(rawJar, part, this.host);
+    // ★★ 修补 dex2jar 的「super 调用被转成自递归 invokespecial」—— 否则调用即 StackOverflowError ★★
+    //   实测影响整族盘搜蜘蛛（sun.json 的 Pan/MiPan/PanSou/Baiku/KuLe/… 全部 init 就崩），
+    //   见 classFix.ts 文件头。属于增强步骤：失败只记日志，不让「能用的产物」变成失败。
+    fixSelfSuperCallsInJarFile(part, [join(this.jvmDir, 'stubs', 'stubs.jar'), ...this.libJars()], {
+      i: (m) => this.host?.logger.i(m),
+      w: (m) => this.host?.logger.w(m),
+    });
     // 原子改名：先清掉同名旧产物（可能正是「已失效」那位），再 rename（同盘 rename 不会留半个文件）
     try { rmSync(target, { force: true }); } catch { /* ignore */ }
     try { renameSync(part, target); } catch { /* ignore */ }
@@ -1826,6 +1852,12 @@ export class JarSpiderBridge {
     } catch {
       /* 建不了就交给 runner 用默认目录 */
     }
+    // ★★ 2026-09-30 蜘蛛沙箱盘（见 util/jailDrive 头注释，勿删）★★
+    //   第三方 jar 会写**安卓绝对路径**（`/data/data/…`、`/data/user/0/<pkg>/…`），
+    //   而 Windows 对「不带盘符的根路径」按**进程当前盘**解析 → 装在 D 盘就稳定往 `D:\data` 写垃圾。
+    //   ★ 真机 A/B 实测：`-Duser.dir` 只能改 Java 侧打印的路径串，**改不动真实落点**；
+    //     决定落点的是子进程 cwd —— 故两边都要给（见下方的 spawn cwd）。
+    const jailRoot = ensureJailDrive(join(this.cacheDir, '..', JAIL_DIR_NAME), this.host?.logger);
     return [
       // ★ 关闭字节码校验（-noverify）。原因：jar(dex) 经 dex2jar 转换后，
       //   分支处的 StackMapTable 帧往往不完整；Android 的 ART 不依赖这些帧，
@@ -1884,6 +1916,10 @@ export class JarSpiderBridge {
       `-Dtvbox.d2j.java=${this.javaExe()}`,
       `-Dtvbox.d2j.cp=${this.dirJars(join(this.jvmDir, 'd2j')).join(';')}`,
       `-Dtvbox.d2j.cache=${join(this.cacheDir, 'runtime-dex')}`,
+      // ★ 2026-09-30 蜘蛛沙箱盘：让 Java 侧看到的「当前目录」= subst 虚拟盘根 →
+      //    spider 打印/存储的 `/data/…` 路径串与真实落点一致（真正决定落点的是 spawn 的 cwd）。
+      //   机制/取证见 util/jailDrive 头注释；建立失败时 jailRoot 为空串（不追加，行为与历史一致）。
+      ...(jailRoot ? [`-Duser.dir=${jailRoot}`] : []),
       '-cp', cp,
     ];
   }
@@ -1909,9 +1945,14 @@ export class JarSpiderBridge {
     return new Promise<string>((resolve) => {
       // ★ 网络代理环境变量（Python 蜘蛛/子进程的 requests 等会读它；JVM 侧另由 -D 参数负责）
       const proxyEnv = this.proxyProvider?.().env ?? {};
+      // ★ 2026-09-30 蜘蛛沙箱盘：cwd = subst 虚拟盘根（见 util/jailDrive 头注释）——
+      //   这是第三方 jar 写 `/data/…` 时真实落点的决定项；未建立映射时为空串（不传 cwd，行为同历史）。
+      //   只给 JVM 子进程加（Python 源不经安卓路径，维持原 cwd 行为）。
+      const jailCwd = exe === this.javaExePath() ? jailSpawnCwd() : '';
       const child = spawn(exe, argv, {
         windowsHide: true,
         timeout: timeoutMs ?? this.callTimeoutMs,
+        ...(jailCwd ? { cwd: jailCwd } : {}),
         env: { ...process.env, ...proxyEnv, ...(env || {}) },
       });
       let out = '';
@@ -2030,6 +2071,8 @@ export class JarSpiderBridge {
       }
     }
     this.activeChildren.clear();
+    // ★ 2026-09-30：子进程都停了再解除蜘蛛沙箱盘的 subst 映射（留着会多个盘符；失败无所谓）
+    releaseJailDrive(this.host?.logger);
   }
 }
 

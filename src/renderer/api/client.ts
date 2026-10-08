@@ -115,7 +115,7 @@ declare global {
         play: (a: { key: string; flag: string; id: string }) => Promise<IpcResult<PlayResult>>;
         /** ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定）——探测本机播放器 / 用当前地址拉起 */
         detectPlayers: () => Promise<IpcResult<Array<{ id: string; name: string; path: string }>>>;
-        openExternal: (a: { url: string; path?: string }) => Promise<IpcResult<{ ok: boolean; player?: string; error?: string }>>;
+        openExternal: (a: { url: string; path?: string; seek?: number }) => Promise<IpcResult<{ ok: boolean; player?: string; error?: string }>>;
       };
       live: {
         load: (index: number) => Promise<IpcResult<{ groups: LiveGroup[]; liveName: string }>>;
@@ -177,7 +177,8 @@ declare global {
         get: () => Promise<IpcResult<Record<string, string>>>;
         set: (a: { provider: string; token: string }) => Promise<IpcResult<void>>;
         remove: (provider: string) => Promise<IpcResult<void>>;
-        qrCreate: (provider?: string) => Promise<IpcResult<{ provider: string; content: string; sid: string }>>;
+        // ★ 2026-09-30：imageDataUrl = 图片型二维码（百度 passport 直接出图，见 main/net/qr/types.ts）
+        qrCreate: (provider?: string) => Promise<IpcResult<{ provider: string; content: string; imageDataUrl?: string; sid: string }>>;
         qrPoll: (
           provider: string,
           sid: string,
@@ -395,7 +396,8 @@ export const client = {
   btDetectPlayers: () => unwrap(window.api.bt.detectPlayers()),
   /** ★ 2026-09-30（用户要求）：点播外部播放器（与磁力分开绑定）——探测本机播放器 / 用当前地址拉起 */
   vodDetectPlayers: () => unwrap(window.api.vod.detectPlayers()),
-  vodOpenExternal: (url: string, path?: string) => unwrap(window.api.vod.openExternal({ url, path })),
+  /** `seek`（秒）：显式绑定外部播放器时，从历史续播的位置（按播放器类型拼起播参数） */
+  vodOpenExternal: (url: string, path?: string, seek?: number) => unwrap(window.api.vod.openExternal({ url, path, seek })),
   /** ★ 2026-09-29 启动强制更新：检查 / 下载 / 拉起安装程序（进度走 onUpdateProgress） */
   updateCheck: () => unwrap(window.api.update.check()),
   updateDownload: () => unwrap(window.api.update.download()),

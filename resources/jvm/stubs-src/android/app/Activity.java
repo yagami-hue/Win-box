@@ -36,4 +36,15 @@ public class Activity extends android.content.Context {
     public ComponentName getComponentName() {
         return new ComponentName("com.github.tvbox.osc", "com.github.tvbox.osc.Main");
     }
+
+    /**
+     * ★ 2026-09-30（用户报「其他接口的盘搜类型源点搜索结果进不了详情」）：
+     * 盘搜/网盘族蜘蛛（实测 小米订阅 `csp_MiSou`）在 detailContent 的**类初始化**里调用
+     * `Activity.requestPermissions(String[], int)`（写外部存储前向系统申请权限，API 23+）；
+     * 桩里缺这个方法 → `NoSuchMethodError` → `ExceptionInInitializerError` → 详情整体失败
+     * （现象：搜索结果能出来、点进去详情空/自动跳全源搜索）。
+     * 桌面版无运行时权限模型（也不是 Activity）→ 空实现即可（等价于"已授权"）。
+     */
+    public void requestPermissions(String[] permissions, int requestCode) {
+    }
 }

@@ -181,6 +181,10 @@ export class SourceViewModel {
           '',
       );
       const name = String(v['vod_name'] ?? v['name'] ?? '');
+      // ★ 2026-09-30（用户报「其他接口的盘搜类型源搜索结果看不了内容」）：
+      //   透传源侧 vod_tag（`folder` = 文件夹条目）。渲染层据此走 categoryContent 展开
+      //   而不是进详情页（详情必空）；存进 DTO 里也让 UI 能给文件夹卡加 📁 标识。
+      const tag = String(v['vod_tag'] ?? '');
       return {
         // ★ 空 id → 片名兜底（片单类蜘蛛没有 vod_id；空串会让「按 id 记的坏图/补图/key」全塌到同一键）
         id: normalizeVodId(v['vod_id'] ?? v['id'], name),
@@ -192,6 +196,7 @@ export class SourceViewModel {
         area: String(v['vod_area'] ?? v['area'] ?? ''),
         type: String(v['type_name'] ?? v['type'] ?? ''),
         sourceKey: key,
+        ...(tag ? { tag } : {}),
       };
     });
     return {

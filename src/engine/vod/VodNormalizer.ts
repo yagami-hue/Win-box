@@ -34,6 +34,8 @@ export function toVodItem(v: Video, sourceKey: string): VodItem {
     area: v.area,
     type: v.type,
     sourceKey,
+    // ★ 2026-09-30：源侧 vod_tag（`folder` = 文件夹条目，点击应由渲染层展开而非进详情）
+    ...(v.tag ? { tag: v.tag } : {}),
   };
 }
 

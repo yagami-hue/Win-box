@@ -141,6 +141,16 @@ describe('VodNormalizer — Movie → DTO', () => {
     expect(it.remarks).toBe('共30集,更新至12集');
     expect(it.sourceKey).toBe('src1');
   });
+  it('toVodItem：vod_tag=folder 原样透传（盘搜文件夹条目 → 渲染层走 categoryContent 展开）', () => {
+    // ★ 2026-09-30：盘搜族源搜索结果里 vod_tag=folder 是「夸克 (92个)」这类分组，不能当片子进详情
+    const folderVod = JSON.parse(JSON_SAMPLE).list[0];
+    folderVod.vod_tag = 'folder';
+    const abs = parseAbsJson(JSON.stringify({ list: [folderVod] }), 'src1')!;
+    expect(toVodItem(abs.movie!.videoList[0], 'src1').tag).toBe('folder');
+    // 没有 tag 的条目不带该字段（保持对象形状与历史一致）
+    const plain = parseAbsJson(JSON_SAMPLE, 'src1')!;
+    expect('tag' in toVodItem(plain.movie!.videoList[0], 'src1')).toBe(false);
+  });
   it('movieToVodItems：空 movie → []', () => {
     expect(movieToVodItems(null, 'x')).toEqual([]);
   });

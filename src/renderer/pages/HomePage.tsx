@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../api/client';
 import type { SourceBean, VodItem, SearchAllReport, AggVodItem, FilterGroup } from '../../shared/types';
@@ -7,6 +7,9 @@ import { isDoubanLikeSource } from '../../engine/config/sourceKind';
 import { mergeSearchResults, type AggSearchInput } from '../../engine/vod/aggSearch';
 import { uiMem, schedulePersist, saveUiMemory, type HomeSearchMem } from '../lib/uiMemory';
 import { getSessionSort, setSessionSort } from '../lib/sessionSort';
+import { makeStaleGuard } from '../lib/staleGuard';
+import { appendUniqueItems, pageSignature } from '../lib/listAppend';
+import { useWaterfall, setWaterfall as setWaterfallPref } from '../lib/uiPrefs';
 import { wrapImageUrlForRelay, needsDriveBind } from '../../shared/driveProvider';
 import { pickCover, preloadImage } from '../lib/coverPick';
 import DriveBindModal from '../components/DriveBindModal';
@@ -27,6 +30,28 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const [items, setItems] = useState<VodItem[]>([]);
   const [pg, setPg] = useState(1);
   const [pageInfo, setPageInfo] = useState({ page: 0, pagecount: 0, total: 0 });
+  /**
+   * ★ 2026-09-30（用户要求「为现在点播分类要翻页的增加一个可以一直下拉的瀑布模式」）：
+   *   分类浏览的**瀑布模式** —— 一直下滑自动追加下一页（替代逐页翻页）。偏好持久化（lib/uiPrefs）。
+   *   卡顿对策：① 追加按 id 去重、无新增不动数组（`lib/listAppend`）；② 单飞 + 列表代数守卫
+   *   （晚到的旧页不上屏）；③ 哨兵提前一屏（rootMargin 700px）预取；④ 卡片 memo + CSS
+   *   `content-visibility`（只渲染可视区）—— 见下方 VodCard 与 global.css。
+   */
+  const waterfall = useWaterfall();
+  /** 瀑布加载单飞：一次只追加一页（哨兵在加载期间可能反复命中） */
+  const wfBusyRef = useRef(false);
+  /** 底部哨兵：可见（含预取边距）即加载下一页 */
+  const wfSentinelRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 瀑布「到底」标记 —— 两条来源：① 翻到末页；② **本页内容与上一页完全一致（零新增）**。
+   * 后者是护栏：TVBox 源常把 `pagecount` 报成 `2147483647`（没给真实总页数），
+   * 也有源压根不支持翻页（页码被忽略、恒返回第 1 页）—— 没有这道护栏，哨兵会无限拉取下一页。
+   */
+  const [wfNoMore, setWfNoMore] = useState(false);
+  /** 上一页响应的内容签名（见 lib/listAppend.pageSignature） */
+  const wfSigRef = useRef('');
+  /** 分类浏览的**列表代数**：replace / append 都 next()，晚到的响应一律不上屏 */
+  const listGen = useRef(makeStaleGuard());
   const [wd, setWd] = useState('');
   /** ★ 外部入口：/search?agg=<关键词>（详情页演员/推荐、发现页卡片点击跳来）→ 自动执行一次全源搜索 */
   const [searchParams, setSearchParams] = useSearchParams();
@@ -56,6 +81,20 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   const [aggCap, setAggCap] = useState(60);
   /** ★ 2026-09-25：全源搜索结果的「按源筛选」当前选中的源 key（'' = 全部） */
   const [aggSrc, setAggSrc] = useState('');
+  /**
+   * ★ 2026-09-30（用户报「其他接口的盘搜类型源搜索出来的结果无法正常展示详情」）：
+   * **文件夹条目**（`vod_tag=folder`，盘搜/网盘的「夸克 (92个)」这类）的展开视图 ——
+   * 点它不进详情页（详情必空），而是拿它的 id 走 `categoryContent`（`client.category`）列出内容。
+   * 非空即表示当前停留在文件夹里（返回搜索/退出搜索时清空）。
+   */
+  const [folder, setFolder] = useState<{ key: string; tid: string; name: string } | null>(null);
+  /** 进文件夹前的搜索结果快照（返回搜索时原样恢复；跨页返回走 uiMem 的搜索态） */
+  const folderBackRef = useRef<{ agg: SearchAllReport | null; aggScope: 'current' | 'all'; aggSrc: string } | null>(null);
+  /**
+   * ★ 2026-09-30：**搜索代数**（见 doSearch 注释）——进文件夹 / 退出搜索 / 换源都 next() 一次，
+   * 让在途的全源搜索（边搜边出）整体作废，晚到的 flush 不会顶掉用户当前看的内容。
+   */
+  const searchGen = useRef(makeStaleGuard());
   const keyRef = useRef('');
   /** ★ 2026-09-26：`/search?agg=` 外部入口的本轮关键词（非空即需要跑一次全源搜索） */
   const aggParam = (searchParams.get('agg') || '').trim();
@@ -362,6 +401,11 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
      *   之后任意一次「详情 → 返回」都会被它拉回上一次的搜索结果页。
      */
     setHomeSearch(null); // ★ 打版本号：进浏览态后，盘上残留的旧搜索态不能再把界面拉回搜索页
+    // ★ 2026-09-30（补全搜索代数的承诺点）：换源/切档案也要作废在途搜索 ——
+    //   否则它的收尾 `saveSearchMem` 会把刚清掉的搜索态又写回 uiMem（又回到上面这条 2026-09-26 的老 bug）。
+    searchGen.current.next();
+    // ★ 2026-09-30：进浏览态同样作废在途的**分类页**响应（瀑布追加/翻页的旧页不能回写到新源的列表上）
+    listGen.current.next();
     // ★ 2026-09-27：这是「重新浏览某个源」→ 之前的浏览态快照作废（见 browseSnapRef）
     browseSnapRef.current = null;
     keyRef.current = k;
@@ -516,9 +560,13 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aggParam]);
 
-  async function loadCategory(t: string, page: number, extend: Record<string, string> = {}) {
+  /**
+   * @param append 瀑布模式用：**追加**下一页（按 id 去重）而不是整表替换；失败时保留已加载的页。
+   */
+  async function loadCategory(t: string, page: number, extend: Record<string, string> = {}, append = false) {
     const k = keyRef.current;
     if (!k) return;
+    const gen = listGen.current.next(); // 单一代数：换分类 / 换筛选 / 换源后，在途响应整体作废
     setLoading(true);
     setErr('');
     setFallback(false); // 明确点分类 = 用户主动浏览，不再是首页回退
@@ -526,15 +574,53 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       const r = t
         ? await client.category({ key: k, tid: t, pg: String(page), extend })
         : await client.home(k);
-      setItems(r.items);
+      if (!listGen.current.isCurrent(gen)) return; // ★ 过期（用户已换分类/换源/进搜索）：不上屏、不覆盖
+      if (append) {
+        // ★ 瀑布护栏：本页与上一页签名一致（零新增）⇒ 该源没有真分页/已到末页 → 停住，别无限拉
+        const sig = pageSignature(r.items);
+        if (sig === wfSigRef.current) setWfNoMore(true);
+        wfSigRef.current = sig;
+        setItems((prev) => appendUniqueItems(prev, r.items));
+      } else {
+        setItems(r.items);
+        wfSigRef.current = pageSignature(r.items);
+        setWfNoMore(false); // 新的一轮浏览（换分类/换筛选/换源）：护栏复位
+      }
       setPageInfo({ page: r.page, pagecount: r.pagecount, total: r.total });
       setPg(page);
     } catch (e) {
+      if (!listGen.current.isCurrent(gen)) return;
       setErr((e as Error).message);
-      setItems([]);
+      if (!append) setItems([]); // 追加失败：保留已加载的页（只上屏错误），别把用户滚过的内容清掉
     } finally {
-      setLoading(false);
+      if (listGen.current.isCurrent(gen)) setLoading(false);
     }
+  }
+
+  /**
+   * ★ 2026-09-30（用户要求「瀑布模式」）：滑到底自动追加下一页。
+   *   闸门：仅分类浏览（tid 非空；tid='' 走 home 无页码）· 非搜索态 · 单飞 · 未在加载 · 还有下一页。
+   */
+  function loadMoreForWaterfall(): void {
+    if (aggMode || !waterfall || !tid) return;
+    if (wfNoMore) return;
+    if (wfBusyRef.current || loading) return;
+    if (items.length === 0) return;
+    if (pageInfo.pagecount <= 1 || (pageInfo.pagecount <= 999 && pg >= pageInfo.pagecount)) return; // 已到底
+    wfBusyRef.current = true;
+    void loadCategory(tid, pg + 1, filtersActive, true).finally(() => { wfBusyRef.current = false; });
+  }
+
+  /**
+   * 瀑布模式底部状态文案。
+   * ★ 分母口径：TVBox 源常把 `pagecount` 报成 `2147483647`（= 没给真实总页数）→ 不显示分母，
+   *   只显示「已加载 N 页 · 共 M 条」；`wfNoMore` 时明说「该源已无更多新内容」，避免用户空等。
+   */
+  function wfStatusText(): string {
+    if (loading) return '正在加载下一页…';
+    if (wfNoMore) return `已加载 ${pg} 页 · 共 ${items.length} 条 · 该源已无更多新内容（可能不支持真分页）`;
+    if (pageInfo.pagecount <= 999 && pg >= pageInfo.pagecount) return `已全部加载 · 共 ${items.length} 条`;
+    return `已加载 ${pg} 页 · 共 ${items.length} 条 · 继续下滑自动加载`;
   }
 
   /** 当前分类的 SortClass（含 filters），无选中分类返回 undefined */
@@ -545,7 +631,9 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
 
   /** 切换分类（含「全部」）：记住上一个分类的筛选/页码，恢复目标分类的会话内状态。 */
   function chooseCategory(t: string) {
-    if (tid) setSessionSort(keyRef.current, tid, { filter: filtersActive, pg });
+    // ★ 2026-09-30（瀑布模式）：瀑布下 `pg` = 「已连续加载到第几页」，与「翻页模式的第 N 页」不是一个语义
+    //   （items 里是 1..N 页的合集）→ 会话记忆固定存 1，切走再切回从第 1 页重看、下滑继续追加。
+    if (tid) setSessionSort(keyRef.current, tid, { filter: filtersActive, pg: waterfall ? 1 : pg });
     if (!t) {
       setTid('');
       setFiltersActive({});
@@ -636,6 +724,26 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   }, []);
 
   /**
+   * ★ 2026-09-30（用户要求「瀑布模式」）：底部哨兵的可见性驱动加载下一页。
+   *   · `root` = 内容滚动容器（`.content`），`rootMargin: 700px` = **提前一屏预取**（滚到底不等待）；
+   *   · 只在「瀑布开 + 分类浏览（tid 非空，有分页）」时挂载；搜索态（aggMode）不参与；
+   *   · 依赖里带上 pg/loading/items.length → 每次状态落定后重挂一次：
+   *     ——若一屏还没被填满（末页检测/新分类），哨兵仍可见 → 自动续上一页（无需用户再滑）。
+   */
+  useEffect(() => {
+    if (!waterfall || aggMode || wfNoMore || !tid || pageInfo.pagecount <= 1) return;
+    const root = contentRef.current;
+    const sentinel = wfSentinelRef.current;
+    if (!root || !sentinel || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) loadMoreForWaterfall();
+    }, { root, rootMargin: '700px 0px' });
+    io.observe(sentinel);
+    return () => io.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waterfall, aggMode, wfNoMore, tid, pg, pageInfo.pagecount, items.length, loading, filtersActive, key]);
+
+  /**
    * 搜索。
    * - 默认（searchAllSources=false）：只搜当前选中源 —— 快，行为与上游 TVBox 的
    *   `filter__home` 模式一致（切换源即切换搜索范围）。
@@ -672,6 +780,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     setAggMode(true);
     setAggScope(mem.aggScope);
     setSearchAllSources(mem.searchAllSources);
+    // ★ 2026-09-30：文件夹视图（盘搜的「夸克 (92个)」）一并恢复（从详情页返回时不会掉回搜索列表）
+    setFolder(mem.folder ?? null);
     requestAnimationFrame(() => {
       if (contentRef.current && uiMem.home.scrollTop) contentRef.current.scrollTop = uiMem.home.scrollTop;
     });
@@ -679,7 +789,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
 
   /** 保存搜索态到 uiMem（搜索 → 详情 → 返回时恢复搜索结果界面）；同步写 URL 并**立即落盘** */
   function saveSearchMem(term: string, agg: SearchAllReport | null, scope: 'current' | 'all', allScope = searchAllSources) {
-    setHomeSearch({ wd: term, aggMode: true, aggScope: scope, searchAllSources: allScope, agg });
+    // ★ 新一次搜索 = 离开文件夹视图（folder 只在“打开文件夹”时单独写入）
+    setHomeSearch({ wd: term, aggMode: true, aggScope: scope, searchAllSources: allScope, agg, folder: null });
     syncSearchUrl(term);
     saveUiMemory(); // 立即落盘：不等 2s 防抖，避免另一窗口 / 焦点回调读到「上一次搜索」
   }
@@ -693,6 +804,16 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     if (!term) return;
     const allScope = forceAllScope ?? searchAllSources;
     const k = keyRef.current;
+    /**
+     * ★ 2026-09-30（用户报「盘搜文件夹点开后内容不对」）：**搜索代数** ——
+     *   全源搜索是「边搜边出」（每 200ms 把累计结果 flush 上屏）。若用户在搜索还没跑完时
+     *   点开一个文件夹（openFolder 把 agg 换成文件夹内容），**在途搜索的 flush 会把文件夹内容顶掉**
+     *   （实测：点「UC (1个)」后网格里出现的却是聚合搜索的 315 条）。
+     *   开一代：文件夹/退出搜索/换源都会 next() 让在途搜索整体作废（晚到的结果不再上屏）。
+     */
+    const gen = searchGen.current.next();
+    // ★ 2026-09-30：进搜索同样作废在途的分类页响应（否则它会把 loading 提前清掉 / 回写浏览列表）
+    listGen.current.next();
     /**
      * ★ 2026-09-27：进搜索前拍一份「浏览态快照」（见 browseSnapRef）——
      *   退出搜索时直接恢复，避免重跑整条 home 管线。
@@ -737,6 +858,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           clearTimeout(flushTimer);
           flushTimer = null;
         }
+        // ★ 过期代数（用户已点开文件夹/退出搜索）：晚到的在途结果一律不上屏
+        if (!searchGen.current.isCurrent(gen)) return;
         setAgg(mergeSearchResults(acc));
         if (progressed) setAggProgress(progressed);
       };
@@ -749,6 +872,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       try {
         off = client.onSearchAllProgress((ev) => {
           if (ev.wd !== term) return;
+          if (!searchGen.current.isCurrent(gen)) return; // 过期代数：不再累积/上屏
           // ★ 快速窗口的「tick」不带 source（只更新进度文字），只有带 source 的才入库
           if (ev.source) acc.push(ev.source);
           progressed = { done: ev.done, total: ev.total, pending: ev.pending ?? Math.max(0, ev.total - ev.done) };
@@ -758,6 +882,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       } catch { /* 订阅不可用：仅失去逐源进度，不影响结果 */ }
       try {
         const r = await client.searchAll(term, { refresh: force });
+        if (!searchGen.current.isCurrent(gen)) return; // 过期：用户已进文件夹/退出搜索，不再覆盖 agg
         flush(); // 收尾：把节流窗口里最后一批结果落屏
         setAgg(r);
         saveSearchMem(term, r, 'all', true);
@@ -803,6 +928,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     const t0 = Date.now();
     try {
       const items = await client.search({ key: k, wd: term });
+      if (!searchGen.current.isCurrent(gen)) return; // 过期：用户已进文件夹/退出搜索
       const merged = mergeSearchResults([
         {
           key: k,
@@ -815,6 +941,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       setAgg(merged);
       saveSearchMem(term, merged, 'current');
     } catch (e) {
+      if (!searchGen.current.isCurrent(gen)) return; // 过期：不覆盖当前视图（含文件夹内容）
       const msg = (e as Error).message;
       // 不写 err（否则顶部大错误块会盖住下面更有用的「出错源」清单），
       // 让 perSource.status='error' 走统一的异常列表渲染。
@@ -831,6 +958,10 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     setAggMode(false);
     setAgg(null);
     setAggSrc('');
+    // ★ 2026-09-30：文件夹视图随搜索态一起收起（返回浏览 = 离开整条搜索链）；在途搜索一并作废
+    searchGen.current.next();
+    setFolder(null);
+    folderBackRef.current = null;
     setHomeSearch(null);
     syncSearchUrl(''); // 退出搜索 → URL 不再带关键词，否则重进/返回又会被拉回搜索态
     saveUiMemory();
@@ -892,12 +1023,92 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    *   让用户直接换到「能出剧集」的源。非豆瓣源保持原行为（进详情）。
    */
   const goAggSearch = (name: string): void => { nav(`/search?agg=${encodeURIComponent(name)}`); };
+  /**
+   * ★ 2026-09-30（用户报「其他接口的盘搜类型源搜索结果看不了内容 → 无法正常展示详情」）：
+   * 展开**文件夹条目**（`vod_tag=folder`）：盘搜/网盘族源的搜索结果不是片子，而是「夸克 (92个)」这类
+   * **网盘分组**；它们的 id（= 网盘类型）要交给 `categoryContent` 才列出真实资源（分享链接）。
+   * 与安卓 TVBox 的处置一致（`Result.folder(item)` → FolderActivity → 分类列表）。
+   *
+   * 为什么不能进详情页：这类源的 `detailContent` 只吃**分享链接**，喂分组 id 只会返回空
+   * （用户看到的就是「点进去什么都没有」）。
+   */
+  const openFolder = async (sourceKey: string, id: string, name: string): Promise<void> => {
+    const k = sourceKey || keyRef.current;
+    if (!k) return;
+    const site = sites.find((s) => s.key === k);
+    // ★ 作废在途搜索：否则它的「边搜边出」flush 会把文件夹内容顶掉（见 doSearch 注释）
+    searchGen.current.next();
+    folderBackRef.current = { agg, aggScope, aggSrc };
+    setLoading(true);
+    setErr('');
+    try {
+      const r = await client.category({ key: k, tid: id, pg: '1' });
+      const items = (r?.items || []).map((it) => ({ ...it, sourceKey: it.sourceKey || k }));
+      const rep = mergeSearchResults([
+        {
+          key: k,
+          name: `${site?.name || k} · ${name}`,
+          status: items.length > 0 ? 'ok' : 'empty',
+          items,
+        },
+      ]);
+      setFolder({ key: k, tid: id, name });
+      setAggMode(true);
+      setAggScope('current');
+      setAgg(rep);
+      setAggSrc('');
+      setAggCap(60);
+      // 写进搜索态：进详情/换页返回后文件夹视图原样恢复（见 HomeSearchMem.folder）
+      setHomeSearch({ wd, aggMode: true, aggScope: 'current', searchAllSources, agg: rep, folder: { key: k, tid: id, name } });
+      saveUiMemory();
+    } catch (e) {
+      setErr(`展开「${name}」失败：${(e as Error).message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** 从文件夹返回上一层搜索结果：有内存快照就直接恢复，否则按当前关键词重搜（同词 5 分钟内命中缓存，秒回） */
+  const exitFolder = (): void => {
+    const snap = folderBackRef.current;
+    folderBackRef.current = null;
+    setFolder(null);
+    searchGen.current.next(); // 作废在途搜索（与原搜索态/快照对齐，见 doSearch 注释）
+    setHomeSearch(
+      snap
+        ? { wd, aggMode: true, aggScope: snap.aggScope, searchAllSources: snap.aggScope === 'all', agg: snap.agg as HomeSearchMem['agg'], folder: null }
+        : null,
+    );
+    if (snap) {
+      setAgg(snap.agg);
+      setAggScope(snap.aggScope);
+      setAggSrc(snap.aggSrc);
+      setAggCap(60);
+      return;
+    }
+    setAgg(null);
+    if (wd.trim()) void doSearch(false, wd, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  };
   const openItem = (it: VodItem): void => {
+    if (it.tag === 'folder') { void openFolder(key, it.id, it.name); return; }
     if (isDoubanLikeSource(curSite)) { goAggSearch(it.name); return; }
     onOpenDetail(key, it.id, picOf(it), it.name);
   };
+  /**
+   * ★ 2026-09-30（瀑布模式配套，防卡顿）：给 memo 卡片用的**稳定身份**回调 ——
+   *   `openItem` / `picErr` 每次渲染都是新函数（读的 state 也多），直接当 props 会让 memo 失效；
+   *   这里用 ref 指向「最新那份」，对外只暴露恒定的包装函数（调用时永远是最新闭包，语义不变）。
+   */
+  const openItemRef = useRef(openItem);
+  useEffect(() => { openItemRef.current = openItem; });
+  const openItemStable = useCallback((it: VodItem) => openItemRef.current(it), []);
+  const picErrRef = useRef(picErr);
+  useEffect(() => { picErrRef.current = picErr; });
+  const handleImgErr = useCallback((it: VodItem, e: React.SyntheticEvent<HTMLImageElement>) => picErrRef.current(it)(e), []);
   /** 聚合搜索结果卡：来自豆瓣类源的条目同样直接全源搜索（它自己的详情必空） */
   const openAggItem = (it: AggVodItem): void => {
+    if (it.tag === 'folder') { void openFolder(it.sourceKey, it.id, it.name); return; }
     const site = sites.find((s) => s.key === it.sourceKey);
     if (isDoubanLikeSource(site)) { goAggSearch(it.name); return; }
     onOpenDetail(it.sourceKey, it.id, aggPicOf(it), it.name);
@@ -970,17 +1181,20 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         */}
       {aggMode && (
       <div className="topbar">
-        <button onClick={exitSearch}>返回浏览</button>
+        {folder ? (
+          // ★ 2026-09-30：文件夹视图的出口 —— 回到上一层搜索结果（不重跑搜索；无快照时命中搜索缓存）
+          <button onClick={exitFolder}>← 返回搜索</button>
+        ) : (
+          <button onClick={exitSearch}>返回浏览</button>
+        )}
         <span className="status" style={{ marginLeft: 'auto' }}>
           {loading
             ? aggScope === 'all'
               ? `全源搜索中…${aggProgress ? `已出 ${aggProgress.done}/${aggProgress.total} 个源的结果${aggProgress.pending > 0 ? ` · 其余 ${aggProgress.pending} 个仍在补搜（出现即自动加上）` : ''}` : '（遍历全部源，结果边搜边出）'}`
-              : '搜索中…'
-            : aggMode
-              ? `命中 ${agg?.items.length ?? 0} 条`
-              : pageInfo.total
-                ? `${pageInfo.total} 条`
-                : ''}
+              : folder ? `正在展开「${folder.name}」…` : '搜索中…'
+            : folder
+              ? `「${folder.name}」${agg?.items.length ?? 0} 条`
+              : `命中 ${agg?.items.length ?? 0} 条`}
         </span>
       </div>
       )}
@@ -1020,6 +1234,14 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           agg && !err ? (
             <>
               {/* 汇总条 */}
+              {folder ? (
+                // ★ 2026-09-30：文件夹视图（盘搜的「夸克 (92个)」）—— 内容来自 categoryContent，
+                //   条目就是网盘分享链接，点进去才是正常的详情页（剧集/文件列表）
+                <div className="banner" style={{ borderLeftColor: agg.items.length ? 'var(--accent-2)' : 'var(--warn)' }}>
+                  📁「{folder.name}」共 {agg.items.length} 条 · 来自「{sites.find((s) => s.key === folder.key)?.name || folder.key}」
+                  <span className="muted">（点条目查看内容；点左上「← 返回搜索」回到搜索结果）</span>
+                </div>
+              ) : (
               <div className="banner" style={{ borderLeftColor: agg.items.length ? 'var(--accent-2)' : 'var(--warn)' }}>
                 {aggScope === 'all' ? (
                   <>
@@ -1048,6 +1270,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                   </>
                 )}
               </div>
+              )}
 
               {/* ★ 按源筛选条（全源搜索命中 ≥2 源时出现）：点一下只看该源的结果 */}
               {aggSrcChips.length > 1 && (
@@ -1097,11 +1320,13 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 </>
               ) : (
                 <div className="empty">
-                  {aggSrc
-                    ? `该源没有「${wd}」的匹配结果。`
-                    : aggScope === 'all'
-                      ? `全部源均无「${wd}」的匹配结果。`
-                      : `当前源无「${wd}」的匹配结果。`}
+                  {folder
+                    ? `「${folder.name}」里没有可展示的条目。`
+                    : aggSrc
+                      ? `该源没有「${wd}」的匹配结果。`
+                      : aggScope === 'all'
+                        ? `全部源均无「${wd}」的匹配结果。`
+                        : `当前源无「${wd}」的匹配结果。`}
                   {agg.failedSources > 0 && (
                     <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
                       其中 {agg.failedSources} 个源查询出错，可能掩盖了结果，请参照下方异常列表重试或更换关键词。
@@ -1131,10 +1356,14 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           ) : (
             <div className="empty">
               {loading
-                ? aggScope === 'all'
-                  ? `正在逐源检索${aggProgress ? `（已出 ${aggProgress.done}/${aggProgress.total} 个源的结果${aggProgress.pending > 0 ? `，其余 ${aggProgress.pending} 个仍在补搜` : ''}）` : '（首次调用 jar 蜘蛛较慢）'}，请稍候…`
-                  : '搜索中…'
-                : '搜索中，请稍候…'}
+                ? folder
+                  ? `正在展开「${folder.name}」…`
+                  : aggScope === 'all'
+                    ? `正在逐源检索${aggProgress ? `（已出 ${aggProgress.done}/${aggProgress.total} 个源的结果${aggProgress.pending > 0 ? `，其余 ${aggProgress.pending} 个仍在补搜` : ''}）` : '（首次调用 jar 蜘蛛较慢）'}，请稍候…`
+                    : '搜索中…'
+                : err
+                  ? '搜索/展开失败：见上方错误信息'
+                  : '搜索中，请稍候…'}
             </div>
           )
         ) : (
@@ -1219,30 +1448,32 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
                 ) : (
                 <div className="grid">
                   {items.map((it) => (
-                    <div key={it.id} className="card-media" onClick={() => openItem(it)}>
-                      <div className="card">
-                        <div style={{ position: 'relative' }}>
-                          {/* ★ 空封面（搜索未命中 + 源图坏）→ 渲染占位块，绝不渲染坏图/灰影 */}
-                          {picOf(it)
-                            ? <img src={picOf(it)} onError={picErr(it)} loading="lazy" decoding="async" />
-                            : <div className="no-cover">暂无封面</div>}
-                          {it.remarks && <span className="badge">{it.remarks}</span>}
-                        </div>
-                        <div className="meta">
-                          <div className="name" title={it.name}>{it.name}</div>
-                        </div>
-                      </div>
-                    </div>
+                    <VodCard key={it.id} it={it} pic={picOf(it)} onOpen={openItemStable} onImgErr={handleImgErr} />
                   ))}
                 </div>
                 )}
-                {pageInfo.pagecount > 1 && (
+                {/* ★ 2026-09-30（瀑布模式）：底部哨兵 —— 进入预取范围即自动追加下一页（见上方 effect） */}
+                {waterfall && tid !== '' && pageInfo.pagecount > 1 && (
+                  <div ref={wfSentinelRef} style={{ height: 1 }} aria-hidden="true" />
+                )}
+                {pageInfo.pagecount > 1 && (waterfall && tid !== '' ? (
+                  // 瀑布模式：底部只留进度（加载由哨兵自动驱动，无需按钮）
+                  <div className="row" style={{ justifyContent: 'center', marginTop: 16 }}>
+                    <span className="status">{wfStatusText()}</span>
+                    <button onClick={() => setWaterfallPref(false)} title="切回逐页翻页">切回翻页</button>
+                  </div>
+                ) : (
                   <div className="row" style={{ justifyContent: 'center', marginTop: 16 }}>
                     <button disabled={pg <= 1 || loading} onClick={() => { const p = pg - 1; setPg(p); loadCategory(tid, p, filtersActive); }}>上一页</button>
-                    <span className="status">{pg} / {pageInfo.pagecount}</span>
+                    <span className="status">{pageInfo.pagecount > 999 ? `${pg} 页` : `${pg} / ${pageInfo.pagecount}`}</span>
                     <button disabled={pg >= pageInfo.pagecount || loading} onClick={() => { const p = pg + 1; setPg(p); loadCategory(tid, p, filtersActive); }}>下一页</button>
+                    {/* ★ 2026-09-30（用户要求）：分类浏览可切「瀑布模式」（一直下滑自动加载下一页）。
+                        只在有分页的分类里给入口（tid='' 走 home 接口，没有页码语义）。 */}
+                    {tid !== '' && (
+                      <button onClick={() => setWaterfallPref(true)} title="开启后：一直下滑，自动加载下一页">瀑布模式</button>
+                    )}
                   </div>
-                )}
+                ))}
               </>
             )}
           </>
@@ -1263,6 +1494,39 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
     </>
   );
 }
+
+/**
+ * ★ 2026-09-30（瀑布模式配套，防卡顿）：点播网格卡抽成 **memo** 组件 ——
+ *   追加一页时，已显示的几百张卡 props 全不变（`pic` 是解析后的字符串、两个回调身份恒定）
+ *   → React 直接跳过它们的渲染，只渲染新入页的卡。此前整张列表内联在本页，
+ *   任何 state 变化（loading / 补图 / 翻页）都要重建全部卡片 —— 瀑布连翻十几页时的卡顿主因。
+ *   渲染成本再叠一层 CSS：`.grid .card-media { content-visibility: auto }`（只渲染可视区，见 global.css）。
+ */
+const VodCard = memo(function VodCard({
+  it, pic, onOpen, onImgErr,
+}: {
+  it: VodItem;
+  pic: string;
+  onOpen: (it: VodItem) => void;
+  onImgErr: (it: VodItem, e: React.SyntheticEvent<HTMLImageElement>) => void;
+}) {
+  return (
+    <div className="card-media" onClick={() => onOpen(it)}>
+      <div className="card">
+        <div style={{ position: 'relative' }}>
+          {/* ★ 空封面（搜索未命中 + 源图坏）→ 渲染占位块，绝不渲染坏图/灰影 */}
+          {pic
+            ? <img src={pic} onError={(e) => onImgErr(it, e)} loading="lazy" decoding="async" />
+            : <div className="no-cover">暂无封面</div>}
+          {it.remarks && <span className="badge">{it.remarks}</span>}
+        </div>
+        <div className="meta">
+          <div className="name" title={it.name}>{it.name}</div>
+        </div>
+      </div>
+    </div>
+  );
+});
 
 /** 聚合结果卡：带来源徽标；同片多源提示；点击进对应源详情（pic 由外部注入 = TMDB 补全优先） */
 function AggCard({ it, pic, onOpen, onErr }: { it: AggVodItem; pic: string; onOpen: () => void; onErr: (e: React.SyntheticEvent<HTMLImageElement>) => void }) {
@@ -1286,7 +1550,11 @@ function AggCard({ it, pic, onOpen, onErr }: { it: AggVodItem; pic: string; onOp
           </span>
         </div>
         <div className="meta">
-          <div className="name" title={it.name}>{it.name}</div>
+          <div className="name" title={it.name}>
+            {/* ★ 2026-09-30：文件夹条目（盘搜的网盘分组）标个 📁，一眼看出「点进去是列表，不是详情」 */}
+            {it.tag === 'folder' && <span title="文件夹：点开列出里面的资源">📁 </span>}
+            {it.name}
+          </div>
         </div>
       </div>
     </div>

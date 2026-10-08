@@ -926,7 +926,11 @@ private imgProxy(u: URL, res: ServerResponse): void {
       const loc = r.headers['location'];
       if (r.statusCode >= 300 && r.statusCode < 400 && loc && i < 10) {
         cur = new URL(Array.isArray(loc) ? loc[0] : loc, cur).toString();
-        await (r.body as unknown as { cancel(): Promise<void> }).cancel().catch(() => { /* ignore */ });
+        // ★ 2026-09-30 修复（百度 dlink 必 302 到 CDN，暴露此坑）：undici `request` 的 body 是
+        //   Node 可读流，**没有 `cancel()`** —— 旧代码调它会抛 `r.body.cancel is not a function`，
+        //   异常冒泡成未捕获 rejection 且 /play 永不回应 → 播放器一直「缓冲中」。
+        //   改用同文件既有的 `dump()`（undici BodyReadable 提供）释放旧响应体。
+        await r.body.dump().catch(() => { /* 旧响应体丢弃失败无妨 */ });
         continue;
       }
       return { status: r.statusCode || 200, headers: r.headers as Record<string, unknown>, body: r.body, finalUrl: cur };

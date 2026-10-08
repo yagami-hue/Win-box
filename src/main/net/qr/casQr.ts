@@ -48,7 +48,7 @@ interface CasTicketResp {
 }
 
 /** HttpResponse.content → 文本（buffer 模式下是字节数组） */
-function textOf(content: string | number[]): string {
+export function textOf(content: string | number[]): string {
   return typeof content === 'string' ? content : Buffer.from(content).toString('utf-8');
 }
 
@@ -62,7 +62,7 @@ function parseJson<T>(text: string): T | null {
 }
 
 /** 从响应头取 Set-Cookie（undici 会以小写 'set-cookie' 返回，值为 string[]） */
-function setCookies(res: HttpResponse): string[] {
+export function setCookies(res: HttpResponse): string[] {
   const out: string[] = [];
   for (const [k, v] of Object.entries(res.headers || {})) {
     if (k.toLowerCase() === 'set-cookie') {
@@ -73,8 +73,8 @@ function setCookies(res: HttpResponse): string[] {
   return out;
 }
 
-/** 按 cookie 名累积的简易 cookie jar（同名覆盖，输出 `k=v; k2=v2`） */
-class CookieJar {
+/** 按 cookie 名累积的简易 cookie jar（同名覆盖，输出 `k=v; k2=v2`）；百度适配器同样复用 */
+export class CookieJar {
   private map = new Map<string, string>();
   /** 追加 Set-Cookie 头数组（自动去掉 Path/HttpOnly 等属性段） */
   add(setCookie: string[]): void {

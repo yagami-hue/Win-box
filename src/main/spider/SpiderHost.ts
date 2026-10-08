@@ -8,6 +8,11 @@ import { parsePkgUrl } from '../../engine/config/localPkg';
 import { getAdapter } from '../net/qr';
 import { runDriveWebLogin } from '../net/webLogin';
 import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid, extractEpisodeName } from '../net/quarkTransfer';
+// ★ 2026-09-30：UC 分享取流（**免转存直链优先**，回退才转存；jar 侧那套 do=pan 路由桌面端没有）
+import { ucResolveShare, ucFileDelete, isUcSharePlay, extractUcShare } from '../net/ucTransfer';
+// ★ 2026-09-30：百度分享取流（**只能转存** —— 免转存的 share/list 子目录接口已被百度关停；
+//   dlink 必须用网盘客户端 UA 拉，浏览器 UA 恒定 403 31326）
+import { baiduResolveShare, baiduFileDelete, isBaiduSharePlay, extractBaiduShare } from '../net/baiduTransfer';
 import { fileLogger } from '../util/logger';
 import { parseSiteConfig, parseSiteConfigWithBase, looksLikeSubscribeJson, type ParseResult } from '../../engine/config/ApiConfigParser';
 import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName, pickRepoLine, splitRepoLine, type MultiRepo } from '../../engine/config/multiRepo';
@@ -224,7 +229,7 @@ export class SpiderHost {
   /** ★ 元数据来源配置（TMDB 自填 Key / API 代理地址 / 图片镜像地址 / 来源策略） */
   private metaSettings: MetaSettingsStore;
   /** ★ 夸克已落盘待清理队列（关闭播放/窗口/退出时删除，进度仍保留在本地历史；持久化防重启丢失） */
-  private pendingQuarkDeletes: Array<{ cookie: string; pdirFid: string; fid: string; dirFid?: string; at: number }> = [];
+  private pendingQuarkDeletes: Array<{ cookie: string; pdirFid: string; fid: string; dirFid?: string; path?: string; at: number; provider?: 'quark' | 'uc' | 'baidu' }> = [];
   private pendingQuarkStore: JsonStore;
   /** ★ 2026-09-24：解析接口链（parses → 直连地址；含隐藏窗口嗅探兜底） */
   private parseService: ParseService;
@@ -329,11 +334,20 @@ export class SpiderHost {
     this.applyMetaRuntime();
     this.autoRefreshStore = new JsonStore(join(userDataDir(), 'auto-refresh.json'));
     this.pendingQuarkStore = new JsonStore(join(userDataDir(), 'pending-quark-delete.json'));
-    const pendingRaw = this.pendingQuarkStore.getObject<Array<{ cookie?: string; pdirFid?: string; fid?: string; dirFid?: string; at?: number }> | null>('list', null);
+    const pendingRaw = this.pendingQuarkStore.getObject<Array<{ cookie?: string; pdirFid?: string; fid?: string; dirFid?: string; path?: string; at?: number; provider?: string }> | null>('list', null);
     if (Array.isArray(pendingRaw)) {
       this.pendingQuarkDeletes = pendingRaw
-        .filter((x) => x && typeof x.cookie === 'string' && typeof x.fid === 'string' && x.cookie && x.fid)
-        .map((x) => ({ cookie: x.cookie as string, pdirFid: (x.pdirFid || '') as string, fid: x.fid as string, dirFid: x.dirFid || undefined, at: typeof x.at === 'number' ? x.at : Date.now() }));
+        // ★ 百度项按**路径**删（fid 为空），故判据放宽到「cookie 有 且 (fid 或 path) 有」
+        .filter((x) => x && typeof x.cookie === 'string' && x.cookie && (typeof x.fid === 'string' ? x.fid : '') + (x.path || '') !== '')
+        .map((x) => ({
+          cookie: x.cookie as string,
+          pdirFid: (x.pdirFid || '') as string,
+          fid: (x.fid || '') as string,
+          dirFid: x.dirFid || undefined,
+          path: x.path || undefined,
+          at: typeof x.at === 'number' ? x.at : Date.now(),
+          provider: (x.provider === 'uc' || x.provider === 'baidu' ? x.provider : undefined) as 'quark' | 'uc' | 'baidu' | undefined,
+        }));
     }
     this.manager.setOnChange((snap, kind) => this.onUserConfigChange(snap, kind));
     if (this.manager.load()) {
@@ -893,11 +907,17 @@ export class SpiderHost {
       try {
         // ★ 优先「整会话子目录删除」：子目录（tr_xxx）内只有本次转存文件，删目录 = 删文件 + 清目录；
         //   目录删除不支持/失败时回退单文件删除（旧记录无 dirFid 也走单文件）。
+        //   ★ 2026-09-30：百度按**路径**删（/api/filemanager?opera=delete），不吃 fid/dirFid 那套。
         let ok = false;
-        if (item.dirFid) ok = await quarkFileDelete(item.cookie, item.dirFid, item.dirFid, this.logger);
-        if (!ok) ok = await quarkFileDelete(item.cookie, item.pdirFid, item.fid, this.logger);
+        if (item.provider === 'baidu') {
+          ok = await baiduFileDelete(item.cookie, item.path || '', this.logger);
+        } else {
+          const del = item.provider === 'uc' ? ucFileDelete : quarkFileDelete;
+          if (item.dirFid && item.provider !== 'uc') ok = await quarkFileDelete(item.cookie, item.dirFid, item.dirFid, this.logger);
+          if (!ok) ok = await del(item.cookie, item.pdirFid, item.fid, this.logger);
+        }
         if (ok) {
-          this.logger.i(`quark 已删除落盘文件 fid=${item.fid.slice(0, 8)}...` + (item.dirFid ? ` dir=${item.dirFid.slice(0, 8)}...` : ''));
+          this.logger.i(`quark 已删除落盘文件 fid=${item.fid.slice(0, 8)}...` + (item.dirFid ? ` dir=${item.dirFid.slice(0, 8)}...` : '') + (item.path ? ` path=${item.path}` : ''));
         } else if (Date.now() - item.at < 24 * 3600 * 1000) {
           remain.push(item); // 失败保留 ≤24h 再试
         } else {
@@ -918,6 +938,42 @@ export class SpiderHost {
       this.pendingQuarkStore.flush();
     } catch {
       /* 落盘失败不影响播放 */
+    }
+  }
+
+  /**
+   * jar 的 `do=pan` 代理地址里带**百度分享链接** → 走原生解链（成功返回播放结果，失败返回 null）。
+   * 实测 jar 形态：`http://127.0.0.1:-1/proxy?do=pan&site=baidu&shareId=&fileId=<分享URL>&fileToken=`。
+   * 这条兜底覆盖「episode id 本身不是分享链接、只有 jar 才知道要播哪个分享」的源。
+   */
+  private async baiduFromPanUrl(url: string, flag: string): Promise<PlayResult | null> {
+    const share = extractBaiduShare(url);
+    if (!share) return null;
+    const cookie = (this.driveList() as Record<string, string>)['baidu'] || '';
+    if (!cookie) return null;
+    try {
+      const t = await baiduResolveShare(share.short, share.pwd, cookie, { logger: fileLogger });
+      if (!t.ok || !t.url) {
+        fileLogger.w(`baiduTransfer(do=pan) 未成功(${t.reason || '未知原因'})`);
+        return null;
+      }
+      if (t.path) {
+        this.pendingQuarkDeletes.push({ provider: 'baidu', cookie, pdirFid: '', fid: '', path: t.path, at: Date.now() });
+        if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift();
+        this.persistPendingQuark();
+      }
+      fileLogger.i(`baiduTransfer(do=pan) 直链 ok（${t.path || ''}）`);
+      return {
+        parse: 0,
+        url: wrapPlayUrlWithHeaders(t.url, t.header || {}),
+        playUrl: '',
+        flag,
+        header: t.header || {},
+        jx: 0,
+      };
+    } catch (e) {
+      fileLogger.w(`baiduTransfer(do=pan) 异常: ${(e as Error).message}`);
+      return null;
     }
   }
 
@@ -1771,7 +1827,110 @@ export class SpiderHost {
         quarkFail = '未绑定夸克账号（Cookie 缺失）';
       }
     }
-    return this.vm.play(b, flag, id, this.vipFlags).then((r) => {
+    // ★ 2026-09-30（用户要求「实现 UC 桌面端解链」）：UC 分享型播放（episode 是 drive.uc.cn/s/…）
+    //   且已绑定 UC → 用原生 ucResolveShare 取直链（**免转存优先**，不占用户网盘空间），
+    //   绕开 jar 侧那套依赖 App「do=pan」路由的地址（桌面端没有该路由，jar 会给
+    //   `http://127.0.0.1:-1/proxy?do=pan&…`，中继必失败）。
+    let ucFail = '';
+    if (isUcSharePlay(id)) {
+      const ucCookie = (this.driveList() as Record<string, string>)['uc'] || '';
+      const share = extractUcShare(id);
+      if (!ucCookie) {
+        ucFail = '未绑定 UC 账号（Cookie 缺失）';
+      } else if (share) {
+        try {
+          const t = await ucResolveShare(share.pwdId, share.passcode, ucCookie, {
+            innerFid: extractEpisodeFid(id),
+            innerName: extractEpisodeName(id),
+            logger: fileLogger,
+          });
+          if (t.ok && t.url) {
+            fileLogger.i(`ucTransfer 直链 ok: ${t.url.slice(0, 90)}...`);
+            if (t.fid) {
+              this.pendingQuarkDeletes.push({ provider: 'uc', cookie: ucCookie, pdirFid: t.pdirFid || '', fid: t.fid, at: Date.now() });
+              if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift();
+              this.persistPendingQuark();
+            }
+            // 与夸克一致：直链必须经 /play 中继注入 Cookie/Referer/UA（缺 Cookie 会被 CDN 403）
+            return {
+              parse: 0,
+              url: wrapPlayUrlWithHeaders(t.url, t.header || {}),
+              playUrl: '',
+              flag,
+              header: t.header || {},
+              jx: 0,
+            };
+          }
+          ucFail = t.reason || '未知原因';
+          fileLogger.w(`ucTransfer 未成功(${ucFail})，回退蜘蛛`);
+        } catch (e) {
+          ucFail = (e as Error).message;
+          fileLogger.w(`ucTransfer 异常回退: ${ucFail}`);
+        }
+      }
+    }
+    // ★ 2026-09-30（用户要求「实现百度网盘桌面端解链」）：百度分享型播放（episode 本身就是
+    //   `pan.baidu.com/s/…`，如「盘搜/百酷」这类聚合源）且已绑定百度 → 原生 baiduResolveShare 取直链。
+    //   ★ 百度**没有免转存直链**（share/list 子目录接口已关停，实测 errno 140/2 恒定），只能「转存 → 取链」，
+    //     落盘到应用专用目录「Win-Box缓存」，播完即删（走 pendingQuarkDeletes 队列）。
+    let bdFail = '';
+    if (isBaiduSharePlay(id)) {
+      const bdCookie = (this.driveList() as Record<string, string>)['baidu'] || '';
+      const share = extractBaiduShare(id);
+      if (!bdCookie) {
+        bdFail = '未绑定百度账号（Cookie 缺失）';
+      } else if (share) {
+        try {
+          const t = await baiduResolveShare(share.short, share.pwd, bdCookie, {
+            innerName: extractEpisodeName(id),
+            logger: fileLogger,
+          });
+          if (t.ok && t.url) {
+            fileLogger.i(`baiduTransfer 直链 ok（${t.path || ''}）`);
+            if (t.path) {
+              this.pendingQuarkDeletes.push({ provider: 'baidu', cookie: bdCookie, pdirFid: '', fid: '', path: t.path, at: Date.now() });
+              if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift();
+              this.persistPendingQuark();
+            }
+            // 直链必须经 /play 中继注入 Cookie/Referer/**网盘 UA**（浏览器 UA 拉 dlink 必 403 31326）
+            return {
+              parse: 0,
+              url: wrapPlayUrlWithHeaders(t.url, t.header || {}),
+              playUrl: '',
+              flag,
+              header: t.header || {},
+              jx: 0,
+            };
+          }
+          bdFail = t.reason || '未知原因';
+          fileLogger.w(`baiduTransfer 未成功(${bdFail})，回退蜘蛛`);
+        } catch (e) {
+          bdFail = (e as Error).message;
+          fileLogger.w(`baiduTransfer 异常回退: ${bdFail}`);
+        }
+      }
+    }
+    return this.vm.play(b, flag, id, this.vipFlags).then(async (r) => {
+      // ★★ 2026-09-30（真机实测）：jar 侧「App 网盘代理」地址在桌面端**没有对应路由** ——
+      //   形如 `http://127.0.0.1:-1/proxy?do=pan&type=2&site=baidu&…`（安卓由 App 的 Pan 子系统承担），
+      //   交给 /play 中继只会 `new URL('http://127.0.0.1:-1/…')` 抛 Invalid URL → 用户看到黑屏、
+      //   且真正原因（转存失败）被吞掉。这类地址一律视为「蜘蛛没给可用地址」，走下面的原因上屏。
+      if (r.url && (/[?&]do=pan\b/i.test(r.url) || /127\.0\.0\.1:-1/i.test(r.url))) {
+        // ★ 落**参数名清单**：这条日志是排查「网盘线路播不了」的唯一线索，只记 key 等于没有。
+        //   注意**不能**用 `new URL` 解析 —— 端口是 `:-1`（非法），一定抛异常；
+        //   值可能带 token/签名，故只记参数名。
+        const panKeys = (r.url.split('?')[1] || '')
+          .split('&')
+          .map((kv) => kv.split('=')[0])
+          .filter(Boolean)
+          .join(',');
+        this.logger.w(`play: 蜘蛛返回桌面端无路由的网盘代理地址（do=pan）→ 视为无地址: ${key} | keys=${panKeys}`);
+        // ★ 2026-09-30：这个地址里若带**百度分享链接**（实测形态 `do=pan&site=baidu&shareId=&fileId=<分享URL>`），
+        //   改走原生解链（比上面的 episode id 判据更晚，覆盖「id 不是分享链接、jar 才拼出分享」的源）。
+        const viaBaidu = await this.baiduFromPanUrl(r.url, flag);
+        if (viaBaidu) return viaBaidu;
+        r = { ...r, url: '' };
+      }
       // ★ 2026-09-29：协议识别（用户选定「先做 A：协议解析 + 链路识别」）
       //   · thunder:// → 解出内层 http(s) 直链，替换后用既有链路播（此前原样交给 <video> ⇒ 黑屏）；
       //   · magnet/ed2k/ftp → 无载体：{url:'', parse:1, message} 上屏原因 + externalLink（IPC 层复制剪贴板）。
@@ -1853,6 +2012,38 @@ export class SpiderHost {
             message: needLogin
               ? `夸克登录已失效：请重新登录「夸克」后再播（转存失败原因：${quarkFail.slice(0, 80)}）`
               : `夸克转存失败：${quarkFail}（分享可能已失效/更新，或该集文件已不在分享内 —— 建议换线路或换源）`,
+          };
+        }
+        // ★ 2026-09-30：UC 解链失败 + 蜘蛛也没给出可用地址 → 同样把原因上屏（不让用户对着黑屏猜）
+        if (!r.url && ucFail) {
+          const needLogin = /401|403|未登录|登录已|login/i.test(ucFail);
+          if (needLogin) this.markDriveBindNeeded(key);
+          this.logger.w(`play: UC 解链失败且蜘蛛无地址 → 上屏原因: ${key} — ${ucFail}`);
+          return {
+            ...r,
+            parse: 1,
+            url: '',
+            playUrl: '',
+            ...(needLogin ? { needDriveCookieBind: 'uc' } : {}),
+            message: needLogin
+              ? `UC 登录已失效：请重新登录「UC 网盘」后再播（原因：${ucFail.slice(0, 80)}）`
+              : `UC 网盘取流失败：${ucFail}（分享可能已失效/更新，或网盘空间不足 —— 建议换线路或换源）`,
+          };
+        }
+        // ★ 2026-09-30：百度解链失败 + 蜘蛛也没给出可用地址 → 同样把原因上屏
+        if (!r.url && bdFail) {
+          const needLogin = /401|403|未登录|登录已|login|bdstoken/i.test(bdFail);
+          if (needLogin) this.markDriveBindNeeded(key);
+          this.logger.w(`play: 百度解链失败且蜘蛛无地址 → 上屏原因: ${key} — ${bdFail}`);
+          return {
+            ...r,
+            parse: 1,
+            url: '',
+            playUrl: '',
+            ...(needLogin ? { needDriveCookieBind: 'baidu' } : {}),
+            message: needLogin
+              ? `百度登录已失效：请重新登录「百度网盘」后再播（原因：${bdFail.slice(0, 80)}）`
+              : `百度网盘取流失败：${bdFail}（分享可能已失效/更新，或网盘空间不足 —— 建议换线路或换源）`,
           };
         }
         return r;

@@ -10,8 +10,8 @@ import QRCode from 'qrcode';
 import { client } from '../api/client';
 import { driveProviderLabel, WEB_LOGIN_PROVIDERS } from '../../shared/driveProvider';
 
-/** 应用内二维码（CAS）支持的 provider */
-const QR_SUPPORTED = ['ali', 'alipan', 'quark', 'uc'];
+/** 应用内二维码（CAS / passport）支持的 provider；★ 2026-09-30 增百度 */
+const QR_SUPPORTED = ['ali', 'alipan', 'quark', 'uc', 'baidu'];
 // ★ 2026-09-28：网页登录清单来自 shared（与主进程 webLogin.ts 共用，避免"后台支持了但 UI 没按钮"）
 
 interface Props {
@@ -24,6 +24,8 @@ interface Props {
 export default function DriveLogin({ provider, onBound }: Props) {
   const [qrOpen, setQrOpen] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState('');
+  /** ★ 2026-09-30：图片型二维码（百度 passport 直接出 PNG，不能按文本重绘） */
+  const [qrImage, setQrImage] = useState('');
   const [qrUuid, setQrUuid] = useState('');
   const [qrHint, setQrHint] = useState('');
   const [qrBusy, setQrBusy] = useState(false);
@@ -35,8 +37,13 @@ export default function DriveLogin({ provider, onBound }: Props) {
   const qrOverallStart = useRef(0);
 
   const label = driveProviderLabel(provider);
+  /**
+   * ★ 2026-09-30（用户要求「真机验证 UC 和百度的扫码登录拿 cookie 播放」）：
+   *   **应用内二维码不再让位给网页登录** —— UC/百度/夸克 两者都具备，两条入口都给，
+   *   应用内排前（不弹网页窗口、不切上下文）；网页登录保留作兜底。
+   */
+  const viaCas = QR_SUPPORTED.includes(provider);
   const viaWeb = WEB_LOGIN_PROVIDERS.includes(provider);
-  const viaCas = !viaWeb && QR_SUPPORTED.includes(provider);
 
   function stopQrPoll(): void {
     if (qrTimer.current) { clearInterval(qrTimer.current); qrTimer.current = null; }
@@ -55,11 +62,16 @@ export default function DriveLogin({ provider, onBound }: Props) {
   /** 生成二维码 + 轮询；到期自动刷新（缓解「频繁过期导致绑定失败」） */
   async function genQr(p: string): Promise<void> {
     stopQrPoll();
-    setQrDataUrl(''); setQrUuid(''); setQrHint('正在生成二维码…'); setQrExpired(false); setQrBusy(true);
+    setQrDataUrl(''); setQrImage(''); setQrUuid(''); setQrHint('正在生成二维码…'); setQrExpired(false); setQrBusy(true);
     try {
       const sess = await client.driveQrCreate(p);
       setQrUuid(sess.sid);
-      setQrDataUrl(await QRCode.toDataURL(sess.content, { width: 220, margin: 1 }));
+      if (sess.imageDataUrl) {
+        // 图片型二维码（百度）：服务端直接出的 PNG，原样展示
+        setQrImage(sess.imageDataUrl);
+      } else {
+        setQrDataUrl(await QRCode.toDataURL(sess.content, { width: 220, margin: 1 }));
+      }
       setQrHint(`请用「${driveProviderLabel(p)}」App「扫一扫」扫码，然后在手机上确认登录`);
       let wait = 0;
       qrTimer.current = setInterval(async () => {
@@ -132,18 +144,23 @@ export default function DriveLogin({ provider, onBound }: Props) {
   return (
     <>
       <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+        {viaCas && (
+          <button
+            className="primary"
+            disabled={qrBusy}
+            onClick={() => void startQrLogin()}
+            title={`${label}：应用内二维码，扫码授权后自动写入绑定`}
+          >
+            {qrBusy ? '…' : '📱 应用内扫码'}
+          </button>
+        )}
         {viaWeb && (
           <button
             disabled={webBusy}
             onClick={() => void doWebLogin()}
-            title={`${label}：打开网盘登录页，用 App 扫其中的二维码后自动抓取完整 Cookie（推荐，能带上 __pus/__puus）`}
+            title={`${label}：打开网盘登录页，用 App 扫其中的二维码后自动抓取完整 Cookie（兜底路径）`}
           >
-            {webBusy ? '登录中…' : '📱 扫码登录（自动抓 Cookie）'}
-          </button>
-        )}
-        {viaCas && (
-          <button disabled={qrBusy} onClick={() => void startQrLogin()} title={`${label}：应用内二维码，扫码授权后自动写入绑定`}>
-            {qrBusy ? '…' : '📱 扫码获取'}
+            {webBusy ? '登录中…' : '🌐 网页扫码登录'}
           </button>
         )}
         {!viaWeb && !viaCas && <span className="muted" style={{ fontSize: 11 }}>该网盘不支持扫码，请手动粘贴 Cookie</span>}
@@ -168,8 +185,8 @@ export default function DriveLogin({ provider, onBound }: Props) {
               <button className="linkbtn" style={{ marginLeft: 'auto' }} onClick={closeQr}>关闭</button>
             </div>
             <div style={{ display: 'flex', justifyContent: 'center', minHeight: 232 }}>
-              {qrDataUrl ? (
-                <img src={qrDataUrl} alt="授权二维码" style={{ width: 220, height: 220, borderRadius: 10, imageRendering: 'pixelated' }} />
+              {qrImage || qrDataUrl ? (
+                <img src={qrImage || qrDataUrl} alt="授权二维码" style={{ width: 220, height: 220, borderRadius: 10, imageRendering: 'pixelated' }} />
               ) : (
                 <div className="muted" style={{ display: 'flex', alignItems: 'center' }}>{qrHint || '生成中…'}</div>
               )}
