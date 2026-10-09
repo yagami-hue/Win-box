@@ -8,7 +8,7 @@ import { EXT_TEMPLATES, validateExtJson } from '../../engine/config/extHelper';
 import { sourceKindInfo } from '../../engine/config/sourceKind';
 import type { AuditItem, SourceDebugReport } from '../../shared/types';
 import { applyTheme, currentTheme } from '../lib/theme';
-import { getShowDiscover, setShowDiscover, getDetailWindowPref, setDetailWindowPref } from '../lib/uiPrefs';
+import { getShowDiscover, setShowDiscover, getDetailWindowPref, setDetailWindowPref, getMotionPref, setMotionPref, type MotionPref } from '../lib/uiPrefs';
 import { THEME_LABELS, type Theme } from '../lib/themeTokens';
 import { DEFAULT_META_SETTINGS, type MetaSettings, type MetaSource } from '../../shared/meta';
 import { DEFAULT_PLAYER_SETTINGS, type PlayerSettings, type MpvStatus } from '../../shared/player';
@@ -88,6 +88,8 @@ export default function ConfigPage() {
   const [showDiscover, setShowDiscoverState] = useState<boolean>(() => getShowDiscover());
   /** ★ 2026-10-08（用户要求）：详情页是否单独窗口展示（默认关；切换即时生效，见 lib/detailWin.ts） */
   const [detailWindow, setDetailWindowState] = useState<boolean>(() => getDetailWindowPref());
+  /** ★ 2026-10-08：界面动效三态（跟随系统 / 始终开启 / 关闭）—— 本机系统「动画效果」为关时也能强制开启动效 */
+  const [motion, setMotionState] = useState<MotionPref>(() => getMotionPref());
   // 外挂字幕（多源：SubtitleCat 免 token / assrt 需 token）
   const [subToken, setSubToken] = useState('');
   const [subTokenSaved, setSubTokenSaved] = useState(false);
@@ -811,6 +813,7 @@ export default function ConfigPage() {
         {TABS.map((t) => (
           <button
             key={t.id}
+            className={'cfg-tab' + (tab === t.id ? ' active' : '')}
             onClick={() => selectTab(t.id)}
             style={{
               background: tab === t.id ? 'var(--bg-elev2)' : 'transparent',
@@ -1497,12 +1500,38 @@ export default function ConfigPage() {
               title={
                 t === 'netflix' ? '网飝（默认皮肤）'
                   : t === 'bilibili' ? '哔哔'
-                    : '大果（Apple / macOS 风格）'
+                    : t === 'apple' ? '大果（Apple / macOS 风格）'
+                      : '大豆（Material 3 Expressive × 豆瓣风格）'
               }
             >
               {label} {theme === t ? '✓' : ''}
             </span>
           ))}
+        </div>
+      </div>
+
+      {/* ★ 2026-10-08（用户要求「整体重做界面视觉与动效交互」）：界面动效三态。
+          默认跟随系统；若系统关了「动画效果」（Windows 设置 → 辅助功能 → 视觉效果），
+          系统偏好会让浏览器折叠一切动画 —— 这里可强制开启。 */}
+      <div className="card" id="cfg-motion" style={{ padding: 12, marginBottom: 16 }}>
+        <div className="row" style={{ marginBottom: 8 }}>
+          <span className="muted" style={{ fontWeight: 600 }}>界面动效</span>
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          {([['auto', '跟随系统'], ['on', '始终开启'], ['off', '关闭动效']] as [MotionPref, string][]).map(([v, label]) => (
+            <span
+              key={v}
+              className={`tag ${motion === v ? 'active' : ''}`}
+              onClick={() => { setMotionState(v); setMotionPref(v); }}
+            >
+              {label} {motion === v ? '✓' : ''}
+            </span>
+          ))}
+        </div>
+        <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+          {motion === 'auto' && typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+            ? '检测到系统已关闭「动画效果」，当前界面不做过渡动画 —— 想更灵动请点「始终开启」。'
+            : '「跟随系统」时，若 Windows 关闭了动画效果，界面将不做过渡动画；想让界面更灵动可改「始终开启」。'}
         </div>
       </div>
 
@@ -1742,7 +1771,7 @@ export default function ConfigPage() {
             </div>
           </div>
         ) : (
-          <div className="empty">加载中…</div>
+          <div className="empty"><span className="spinner" aria-hidden="true" />加载中…</div>
         )}
       </div>
 
@@ -1789,7 +1818,7 @@ export default function ConfigPage() {
             </div>
           </div>
         ) : (
-          <div className="empty">加载中…</div>
+          <div className="empty"><span className="spinner" aria-hidden="true" />加载中…</div>
         )}
       </div>
       </>

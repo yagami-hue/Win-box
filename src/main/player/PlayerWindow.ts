@@ -52,6 +52,17 @@ export function onPlayerWindowClosed(cb: () => void): void {
   closeHooks.push(cb);
 }
 
+/**
+ * ★★ 2026-10-08（用户报「b蓝光 / 自建 4K-2 有声音无图像」根因修复）★★
+ *   本窗口是**透明窗**（mpv 画面从播放区透明处透出），任何把它改回不透明底色的路径
+ *   都会把 mpv 画面整块盖住（实测：`setBackgroundColor('#0a0c10')` 后透明失效、屏幕全黑）。
+ *   已知来源：`THEME_SET` IPC 处理器会按暗/亮给**发起窗口**设置不透明底色，而播放器窗口
+ *   自己也跑主题引导（`renderer/lib/theme.ts` → `client.setTheme`）——因此必须排除本窗口。
+ */
+export function isPlayerWindow(w: BrowserWindow | null | undefined): boolean {
+  return !!w && w === playerWin && !w.isDestroyed();
+}
+
 // ---- 小窗口模式状态 ----
 // 小窗尺寸：宽 384 × 高 216（16:9，无标题栏 —— 渲染层 mini 态改用一条 18px 细拖拽条），
 // 远小于播放器默认 1040×640；用户还可继续拖到最小 240×135。

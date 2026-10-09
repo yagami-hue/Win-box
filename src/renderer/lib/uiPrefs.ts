@@ -119,3 +119,63 @@ export function useDetailWindowPref(): boolean {
   }, []);
   return on;
 }
+
+/**
+ * ★ 2026-10-08（用户要求「整体重做界面视觉与动效交互」）：**界面动效偏好**。
+ *   Windows 的「动画效果」是系统级开关（`prefers-reduced-motion`）——本机实测该开关为关时，
+ *   浏览器会把一切动画/过渡折叠掉，用户看不到任何动效。所以给一个应用内三态：
+ *     `auto`（默认，跟随系统）/ `on`（始终开启，无视系统）/ `off`（关闭动效）。
+ *   落地方式：`<html data-motion="on|off">`（auto 时不写属性）——CSS 里据此决定是否折叠动画。
+ */
+export type MotionPref = 'auto' | 'on' | 'off';
+
+const KEY_MOTION = 'winbox-motion';
+
+export function getMotionPref(): MotionPref {
+  try {
+    const v = localStorage.getItem(KEY_MOTION);
+    return v === 'on' || v === 'off' ? v : 'auto';
+  } catch {
+    return 'auto';
+  }
+}
+
+/** 把偏好写到 `<html data-motion>`（auto = 移除属性，交给系统偏好） */
+export function applyMotionPref(v: MotionPref): void {
+  try {
+    if (v === 'auto') document.documentElement.removeAttribute('data-motion');
+    else document.documentElement.setAttribute('data-motion', v);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function setMotionPref(v: MotionPref): void {
+  try {
+    localStorage.setItem(KEY_MOTION, v);
+  } catch {
+    /* ignore */
+  }
+  applyMotionPref(v);
+  try {
+    window.dispatchEvent(new Event(UI_PREFS_EVENT));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** React Hook：订阅「界面动效」偏好（配置页切换后立即生效） */
+export function useMotionPref(): MotionPref {
+  const [v, setV] = useState<MotionPref>(() => getMotionPref());
+  useEffect(() => {
+    const onChange = (): void => setV(getMotionPref());
+    window.addEventListener(UI_PREFS_EVENT, onChange);
+    return () => window.removeEventListener(UI_PREFS_EVENT, onChange);
+  }, []);
+  return v;
+}
+
+/** 启动时应用（在 React 挂载前调用，避免首屏用错动效档） */
+export function initMotionPref(): void {
+  applyMotionPref(getMotionPref());
+}

@@ -54,6 +54,12 @@ function outboundDispatchers(targetUrl: string): Array<Agent | import('undici').
 const AGGREGATE_CHUNK = 512 * 1024;
 const AGGREGATE_CONCURRENCY = 8;
 const AGGREGATE_MIN_LEN = 1 * 1024 * 1024;
+/**
+ * ★ 2026-10-08（用户报「jd4k 点开就提示已播放完毕」根因修复）：jpg 伪装分片嗅探窗口。
+ *   分片 = [JPEG 缩略图][真 TS 载荷]（实测前导 ≈9.7KB），这里给到 128KB 足够容纳更大的缩略图；
+ *   非 JPEG 的响应读到首个 ≥2 字节即提前停止（不增加正常流的起播延迟）。
+ */
+const DETECT_HEAD_LEN = 128 * 1024;
 // ★★ 2026-09-19 回归 release65 定论：**加速节点（dl-c-zb 等）禁聚合、单连接透传**。
 //   release75 曾在加速节点加「Range 预检 + 3 并发聚合」：预检会额外消费一次 auth_key 直链请求
 //   （夸克 download_url 的 token 绑定会话，多打一次 Range 会被 CDN 拒绝后续请求 → 直接无法播放），
@@ -652,6 +658,48 @@ private imgProxy(u: URL, res: ServerResponse): void {
     //     · 其余源（其它网盘/普通源）：保留聚合，不误伤。
     const isQuarkAccelNode = /[.-]dl-c-zb/i.test(target);
     const rng = range === undefined ? '' : Array.isArray(range) ? range[0] : String(range);
+    // ★★ 2026-10-08（用户报「橘汁4K · jd4k 点开就提示已播放完毕」根因修复）★★
+    //   **jpg 伪装分片剥离**：仅对「整段起始」请求（无 Range 或 `bytes=0-`）嗅探响应头 ≤128KB；
+    //   命中 [JPEG 缩略图][TS 载荷] 拼接体 → 只把 TS 部分回给播放器（否则 ffmpeg 按 mjpeg 解析、
+    //   读包失败 ×10 → mpv 当 EOF → 「已播放完毕」假象；识别口径见 jpegPreludeLen 注释）。
+    //   非伪装响应：已读头部 unshift 回填（流仍处于 paused），聚合/透传路径一字不变。
+    //   ★ 带偏移的 Range 请求不嗅探（HLS 拖动 = 重开分片，实测 mpv/ffmpeg 均从 0 开始取）。
+    if (resp.status < 400 && resp.body && (rng === '' || parseByteRange(rng)?.start === 0)) {
+      const head = await this.readHead(resp.body as unknown as NodeJS.ReadableStream, DETECT_HEAD_LEN, (b) => {
+        if (b.length >= 2 && !(b[0] === 0xff && b[1] === 0xd8)) return true; // 非 JPEG → 立即停（普通流零延迟影响）
+        return jpegPreludeLen(b) > 0; // JPEG：找到 EOI + TS 对齐即停
+      });
+      const pre = head.length ? jpegPreludeLen(head) : 0;
+      if (pre > 0) {
+        const lenHeader = resp.headers['content-length'];
+        const total = lenHeader === undefined ? NaN : parseInt(String(lenHeader), 10);
+        const newLen = Number.isFinite(total) ? Math.max(0, total - pre) : NaN;
+        const stripHdr: Record<string, string> = { 'Content-Type': 'video/mp2t', 'Accept-Ranges': 'bytes' };
+        if (Number.isFinite(newLen)) {
+          stripHdr['Content-Length'] = String(newLen);
+          if (resp.status === 206) stripHdr['Content-Range'] = `bytes 0-${Math.max(0, newLen - 1)}/${newLen}`;
+        }
+        res.writeHead(Number.isFinite(newLen) ? resp.status : 200, stripHdr);
+        const rest = head.subarray(pre);
+        if (rest.length) res.write(rest);
+        const upstream = resp.body as unknown as NodeJS.ReadableStream;
+        // 客户端 seek 中止（AbortError）属预期，静默；其余交给管道自然结束
+        upstream.on('error', () => { /* ignore */ });
+        (upstream as unknown as { pipe(dest: ServerResponse): unknown }).pipe(res);
+        // 与常规透传同款收尾：客户端断开（seek 关旧连接）→ 立即 destroy 上游，不留悬挂流
+        req.on('close', () => {
+          if (!res.writableEnded) {
+            try { res.destroy(); } catch { /* ignore */ }
+            (upstream as { destroy?: () => void }).destroy?.();
+          }
+        });
+        this.logger.i(`proxy /play: 已剥离 jpg 伪装前导 ${pre} 字节 → TS（${redactUrl(target)}）`);
+        return;
+      }
+      if (head.length) {
+        try { (resp.body as unknown as { unshift?: (b: Buffer) => void }).unshift?.(head); } catch { /* 流已结束：忽略 */ }
+      }
+    }
     const canAggregate =
       !!rng &&
       resp.status === 206 &&
@@ -706,6 +754,39 @@ private imgProxy(u: URL, res: ServerResponse): void {
         try { res.destroy(); } catch { /* ignore */ }
         (upstream as { destroy?: () => void }).destroy?.();
       }
+    });
+  }
+
+  /**
+   * ★ 2026-10-08（jpg 伪装分片剥离配套）：从上游流预读 ≤n 字节头部后**暂停**流。
+   *   - `stop(head)` 返回 true 即提前结束（普通流读到首块就停，不拖慢起播）；
+   *   - 8s 兜底超时（流卡住时不再等，按已读内容继续）；
+   *   - 调用方负责后续：命中伪装 → 丢弃前导并 pipe 剩余；未命中 → `unshift(head)` 回填再走原路径。
+   */
+  private readHead(stream: NodeJS.ReadableStream, n: number, stop: (head: Buffer) => boolean): Promise<Buffer> {
+    return new Promise<Buffer>((resolve) => {
+      let done = false;
+      const chunks: Buffer[] = [];
+      let got = 0;
+      const timer = setTimeout(finish, 8000);
+      function finish(): void {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        stream.removeListener('data', onData as never);
+        stream.removeListener('end', finish as never);
+        try { (stream as unknown as { pause?: () => void }).pause?.(); } catch { /* ignore */ }
+        resolve(Buffer.concat(chunks));
+      }
+      function onData(c: Buffer | string): void {
+        const b = Buffer.isBuffer(c) ? c : Buffer.from(c);
+        chunks.push(b);
+        got += b.length;
+        if (got >= n || (stop && stop(Buffer.concat(chunks)))) finish();
+      }
+      stream.on('data', onData as never);
+      stream.once('end', finish as never);
+      stream.once('error', finish as never);
     });
   }
 
@@ -1017,6 +1098,33 @@ function wrapSegment(url: string, ua: string, referer: string, cookie: string): 
   if (referer) q += `&referer=${encodeURIComponent(referer)}`;
   if (cookie) q += `&cookie=${encodeURIComponent(cookie)}`;
   return `${LOCAL_PROXY_BASE}/play?${q}`;
+}
+
+/**
+ * ★★ 2026-10-08（用户报「橘汁4K · jd4k 点开就提示已播放完毕」根因修复）★★
+ * **jpg 伪装分片**识别：分片字节 = [完整 JPEG 缩略图][真正的 TS 载荷]，TS 从 JPEG 的 EOI（FF D9）
+ * 之后开始且 188 字节对齐（`0x47` 同步头）。实测来源：橘汁4K「JD4K-可下载」线路
+ * （m3u8 的分片全是 `.jpg`，CDN 如实返回 JPEG+TS 拼接体）。
+ * 不做剥离时：ffmpeg 按 mjpeg 解析分片 → `error reading packet: Invalid argument` ×10 →
+ * mpv 把它当 EOF（`demux_lavf.c` 重试计数耗尽）→ 播放器弹「已播放完」假象。
+ * @returns JPEG 前导长度（含 EOI）；0 = 不是伪装分片
+ */
+export function jpegPreludeLen(head: Buffer): number {
+  // SOI 检查（FF D8）；熵编码中 FF 必须被 0x00 转义，故首个 FF D9 必是真实 EOI
+  if (head.length < 4 || head[0] !== 0xff || head[1] !== 0xd8) return 0;
+  const eoi = head.indexOf(Buffer.from([0xff, 0xd9]), 2);
+  if (eoi < 2) return 0;
+  const off = eoi + 2;
+  return isTsAligned(head, off) ? off : 0;
+}
+
+/** [off, off+188*3) 是否每 188 字节出现 `0x47` 同步头（MPEG-TS 对齐；0x47 命中 4 次算确认） */
+export function isTsAligned(buf: Buffer, off: number): boolean {
+  for (let k = 0; k < 4; k++) {
+    const i = off + k * 188;
+    if (i >= buf.length || buf[i] !== 0x47) return false;
+  }
+  return true;
 }
 
 /**

@@ -1577,7 +1577,13 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       setIsLive(liveKindRef.current || !!(st.loaded && st.duration == null));
       if (st.eof && !eofFired) {
         eofFired = true;
-        if (canNextRef.current && onNextRef.current) startCountdown();
+        // ★ 2026-10-08（用户报「jd4k 点开就提示已播放完毕」）：mpv 的 demux_lavf 把「分片读包失败
+        //   ×10」也当 EOF（重试计数耗尽即返回文件结束）——从未真正播起来就报「已播完」是误导；
+        //   此时上屏失败原因（真播完必然时间/时长有推进）。
+        if ((st.time ?? 0) <= 1 && !(st.duration && st.duration > 1)) {
+          setMpvErr('视频流无法解析（分片读取失败）—— 可换线路或切回内置内核重试');
+          setLoading(false);
+        } else if (canNextRef.current && onNextRef.current) startCountdown();
         else setEndAll(true);
       }
       if (st.exited) {

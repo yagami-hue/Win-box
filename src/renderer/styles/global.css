@@ -21,6 +21,23 @@
   --radius-sm: 8px;
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   --side-w: 208px;
+  /* ===== ★ 2026-10-08（用户要求「整体重做界面视觉与动效交互」）：全皮肤设计令牌 =====
+     动效曲线/时长取开源规范 **Material 3**（Standard / Emphasized 三档 + Expressive 快档曲线），
+     时长按 M1「桌面端比移动端更短」的口径收紧（状态 200ms / 面板 280ms / 页面 440ms）；
+     全部皮肤共用这一套节奏 —— 换皮肤只换配色，动效语言保持一致。 */
+  --ease-standard: cubic-bezier(.2, 0, 0, 1);     /* M3 Standard：起止都在屏内的状态切换 */
+  --ease-enter: cubic-bezier(.05, .7, .1, 1);     /* M3 Emphasized decelerate：进场（全速入、缓停） */
+  --ease-exit: cubic-bezier(.3, 0, .8, .15);      /* M3 Emphasized accelerate：出场（比进场快） */
+  --ease-spring: cubic-bezier(.31, .94, .34, 1);  /* M3 Expressive 快档：按压/悬停等反馈 */
+  --dur-instant: .1s;   /* 输入确认：按压、开关翻转 */
+  --dur-quick: .15s;    /* 微交互：颜色/边框 */
+  --dur-state: .2s;     /* 状态变化：悬停、选中、浮层 */
+  --dur-panel: .28s;    /* 面板/对话框：展开收起 */
+  --dur-page: .44s;     /* 页面进场 */
+  /* 键盘可见焦点环（无障碍：全站统一） */
+  --focus-ring: 2px solid var(--accent);
+  /* 排版级差（紧凑桌面档：11 / 12 / 13.5 / 15 / 18 / 22） */
+  --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13.5px; --fs-lg: 15px; --fs-xl: 18px; --fs-2xl: 22px;
 }
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
@@ -39,7 +56,7 @@ button {
   font: inherit; cursor: pointer; color: var(--text);
   background: linear-gradient(180deg, var(--bg-elev2), var(--bg-elev));
   border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 6px 13px; transition: border-color .15s, transform .06s, box-shadow .15s, color .15s;
+  padding: 6px 13px; transition: border-color var(--dur-quick) var(--ease-standard), transform var(--dur-instant) var(--ease-spring), box-shadow var(--dur-state) var(--ease-standard), color var(--dur-quick) var(--ease-standard);
 }
 button:hover { border-color: var(--accent); color: #fff; box-shadow: 0 0 0 3px var(--accent-soft); }
 button:active { transform: translateY(1px); }
@@ -52,8 +69,9 @@ button:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
 .linkbtn.danger:hover { background: rgba(255,107,107,.12); }
 input, select, textarea {
   font: inherit; background: var(--bg-elev); color: var(--text);
-  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 11px; transition: border-color .15s;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 11px; transition: border-color var(--dur-quick) var(--ease-standard), box-shadow var(--dur-state) var(--ease-standard);
 }
+input:hover, select:hover, textarea:hover { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 ::placeholder { color: #5b6472; }
 
@@ -111,7 +129,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .sidebar .logo { font-size: 19px; font-weight: 800; letter-spacing: .3px; padding: 10px 12px 18px;
   background: linear-gradient(90deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm);
-  color: var(--text-dim); transition: all .15s; }
+  color: var(--text-dim); transition: background var(--dur-quick) var(--ease-standard), color var(--dur-quick) var(--ease-standard); }
 .nav-item:hover { background: var(--bg-elev); color: var(--text); }
 .nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .nav-ico { width: 20px; text-align: center; font-size: 15px; }
@@ -131,19 +149,16 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .topbar > .muted { min-width: 0; }
 .content { flex: 1; overflow: auto; padding: 18px; scrollbar-gutter: stable; }
 
-/* ---- ★ 2026-09-24（用户定稿）：页面切换过渡动画（苹果 / Netflix 式的轻微淡入 + 上移） ----
+/* ---- ★ 2026-09-24（用户定稿）：页面切换过渡动画（轻微淡入 + 上移） ----
    做法：App 里给路由容器加 key=pathname → 切页时容器重建 → 触发一次入场动画。
+   ★ 2026-10-08：动画本体与关键帧统一挪到文件末尾的「交互态/动效系统」里（走 --dur-page / --ease-enter 令牌）。
    注意：动画结束后 transform 回到 none（不构成 fixed 定位的包含块），页面内弹窗仍按视口定位。 */
 .page-anim {
   flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; min-height: 0;
-  animation: pageIn .3s cubic-bezier(.22, .61, .36, 1) both;
-}
-@keyframes pageIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .page-anim { animation: none; }
+  /* ★ 2026-10-08：尊重应用内「界面动效 = 始终开启」的覆盖（data-motion='on' 时不关页面动画） */
+  html:not([data-motion='on']) .page-anim { animation: none; }
 }
 
 /* ---- ★ 2026-09-24：换源（手机 TVBox 式：源名纯文字，长按/右键弹列表）与顶栏搜索面板 ---- */
@@ -185,16 +200,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .srcpick-item { padding: 7px 10px; border-radius: 6px; font-size: 13px; cursor: default; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srcpick-item:hover { background: var(--accent-soft, rgba(120,170,255,.12)); }
 .srcpick-item.active { color: var(--accent); font-weight: 650; }
-/* ★ 2026-10-08（用户要求「换源下拉框要能删源/调顺序/置顶多个源」）：源行 = 名字 + 悬停显现的管理按钮
-   （置顶 ⤒ / 上移 ↑ / 下移 ↓ / 删除 ✕；只在当前生效订阅的行出现） */
+/* ★ 2026-10-09（用户要求「删除换源下拉里调源位置的功能，不美观」）：源行回到「纯源名」——
+   行内管理按钮（⤒/↑/↓/✕）已从 SourcePicker 删除，相关样式一并移除；源管理只在配置页保留。 */
 .srcpick-col-src .srcpick-item { display: flex; align-items: center; gap: 6px; }
 .srcpick-sname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.srcpick-act { display: none; gap: 2px; flex: none; }
-.srcpick-item:hover .srcpick-act { display: inline-flex; }
-.srcpick-act button { all: unset; cursor: pointer; width: 18px; height: 18px; line-height: 18px; text-align: center; border-radius: 4px;
-  font-size: 11px; color: #cfd6e4; background: rgba(255, 255, 255, .08); }
-.srcpick-act button:hover { background: rgba(255, 255, 255, .22); color: #fff; }
-.srcpick-act button.danger:hover { background: rgba(232, 17, 35, .85); color: #fff; }
 /* 左栏订阅项：当前生效订阅加圆点标记（悬停 title 里带源数；行内 ::before，保证 ellipsis 作用在整行） */
 .srcpick-sub.cur::before { content: '● '; color: var(--accent-2); font-size: 8px; vertical-align: 2px; }
 .srcpick-sub.active { background: var(--accent-soft, rgba(120,170,255,.12)); font-weight: 600; }
@@ -238,7 +247,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 }
 .sp-rank-no.top { color: #fff; font-weight: 700; border-radius: 4px; background: linear-gradient(135deg, #4f86ff, #6a5cff); }
 h2, h3, h4 { font-weight: 650; letter-spacing: .2px; }
-h3 { font-size: 18px; } h4 { font-size: 14px; color: var(--text); }
+/* ★ 2026-10-08：标题与卡片文字统一走排版级差令牌（各皮肤仍可按需覆盖） */
+h3 { font-size: var(--fs-xl); } h4 { font-size: var(--fs-lg); color: var(--text); }
 
 /* ---- 通用组件 ---- */
 .card { background: linear-gradient(180deg, var(--bg-elev), var(--bg1)); border: 1px solid var(--border-soft);
@@ -250,7 +260,8 @@ h3 { font-size: 18px; } h4 { font-size: 14px; color: var(--text); }
 .err { color: var(--danger); }
 .status { color: var(--text-dim); font-size: 12px; }
 .tag { display: inline-block; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 999px;
-  padding: 3px 11px; font-size: 12px; margin: 2px; cursor: pointer; transition: all .13s; }
+  padding: 3px 11px; font-size: var(--fs-sm); margin: 2px; cursor: pointer;
+  transition: background var(--dur-quick) var(--ease-standard), color var(--dur-quick) var(--ease-standard), border-color var(--dur-quick) var(--ease-standard); }
 .tag:hover { border-color: var(--accent); }
 .tag.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .empty { color: var(--text-dim); text-align: center; padding: 64px 20px; }
@@ -270,17 +281,17 @@ h3 { font-size: 18px; } h4 { font-size: 14px; color: var(--text); }
 .list-item .badge { position: static; margin-left: auto; flex: 0 0 auto; }
 .card-media { position: relative; overflow: visible; }
 .card-media .card { background: none; box-shadow: none; border: 1px solid var(--border-soft); border-radius: var(--radius); overflow: hidden;
-  transition: transform .16s, border-color .16s, box-shadow .16s; }
+  transition: transform var(--dur-state) var(--ease-spring), border-color var(--dur-state) var(--ease-standard), box-shadow var(--dur-state) var(--ease-standard); }
 .card-media:hover .card { transform: translateY(-3px); border-color: rgba(91,140,255,.6); box-shadow: 0 10px 28px rgba(0,0,0,.45); }
 .card-media img { width: 100%; aspect-ratio: 2/3; object-fit: cover; display: block; background: var(--bg-elev2); }
 /* ★ 2026-09-24：无封面占位（搜索未命中 + 源图坏 → 不留坏图图标/灰影） */
 .no-cover { width: 100%; aspect-ratio: 2/3; display: flex; align-items: center; justify-content: center;
   color: var(--text-dim); font-size: 11px; background: var(--bg-elev2); }
 .card-media .badge { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,.55); color: var(--accent-2);
-  font-size: 11px; padding: 1px 7px; border-radius: 999px; backdrop-filter: blur(2px); }
+  font-size: var(--fs-xs); padding: 1px 7px; border-radius: 999px; backdrop-filter: blur(2px); }
 .card-media .meta { padding: 7px 9px; }
-.card-media .name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card-media .remarks { font-size: 11px; color: var(--accent-2); opacity: .9; }
+.card-media .name { font-size: var(--fs-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-media .remarks { font-size: var(--fs-xs); color: var(--accent-2); opacity: .9; }
 
 /* ---- ★ 2026-09-24：相关推荐横条（详情页）—— 封面尺寸强约束统一（此前个别图会被撑大） ---- */
 .rec-row { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 6px; align-items: flex-start; }
@@ -669,7 +680,8 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 .live-epg-now { color: var(--text); }
 .ep-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; }
 .ep { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 7px; cursor: pointer;
-  font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: all .12s; }
+  font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: background var(--dur-quick) var(--ease-standard), color var(--dur-quick) var(--ease-standard), border-color var(--dur-quick) var(--ease-standard); }
 .ep:hover { border-color: var(--accent); color: var(--text); }
 .ep.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
@@ -709,3 +721,119 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
 }
 
 .tb-ico { width: 18px; height: 18px; border-radius: 5px; object-fit: contain; flex: none; }
+
+/* ★★ 2026-10-08（用户要求「所有风格里的选项开关全部改成这种」）：**全皮肤统一的「药丸开关」**。
+   外观：胶囊轨道 + 白色圆钮；开启 = 皮肤强调色轨道（网飝红 / 哔哔粉 / 大果蓝 / 大豆豆绿），
+   关闭 = 半透明中性轨道（color-mix 跟随各皮肤文字色，深浅皮肤都能看清）。
+   实现：`appearance:none` 自绘；Chromium 不给 input 渲染伪元素 → 圆钮用**背景层**（radial-gradient）画，
+   `background-origin: content-box` + 2px padding 让圆钮内缩；0%↔100% 两端位置可平滑过渡（滑钮动画）。
+   ★★ 特异度（勿改回单写）：各皮肤有 `:root[data-theme='X'] input { background/border… }`（0,3,1），
+     这里**双写 [data-theme]** 取 (0,4,1) 才压得住（同 §C54/§C60 教训：底样式压不过皮肤就双写拉特异度）。 */
+:root[data-theme][data-theme] input[type='checkbox'] {
+  appearance: none; -webkit-appearance: none; flex: none;
+  width: 40px; height: 22px; margin: 0; padding: 2px; border: none; border-radius: 999px;
+  box-sizing: border-box; cursor: pointer; vertical-align: middle;
+  background-color: color-mix(in srgb, var(--text) 26%, transparent);
+  background-image: radial-gradient(circle at 50% 50%, #fff 0 6.4px, rgba(0, 0, 0, .16) 6.4px 7.4px, transparent 7.4px);
+  background-size: 18px 18px; background-position: 0% 50%; background-repeat: no-repeat;
+  background-origin: content-box;
+  transition: background-color .22s cubic-bezier(.2, 0, 0, 1), background-position .22s cubic-bezier(.2, 0, 0, 1);
+}
+:root[data-theme][data-theme] input[type='checkbox']:hover { background-color: color-mix(in srgb, var(--text) 34%, transparent); }
+:root[data-theme][data-theme] input[type='checkbox']:checked {
+  background-color: var(--accent);
+  background-position: 100% 50%;
+}
+:root[data-theme][data-theme] input[type='checkbox']:checked:hover { background-color: var(--accent); filter: brightness(1.06); }
+:root[data-theme][data-theme] input[type='checkbox']:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 例外：嵌在胶囊 chip 里的多选（配置页「合并档案」芯片）保持原生小方框 —— 开关尺寸放不进 chip。 */
+:root[data-theme][data-theme] .tag input[type='checkbox'] {
+  appearance: auto; -webkit-appearance: auto; width: auto; height: auto; padding: 0; background: none;
+}
+
+/* ============================================================================
+   ★★ 2026-10-08（用户要求「整体重做界面视觉与动效交互」）：全皮肤**交互态 / 动效 / 载入态**系统。
+   规划口径（参考开源规范 Material 3 + Expressive 的动效令牌，见 :root 里的 --ease-* / --dur-*）：
+     ① 焦点可见（无障碍）② 路由进场 ③ 弹层进场 ④ 对话框进场 ⑤ 按压反馈 ⑥ 载入/空态 ⑦ 数字等宽 ⑧ 减弱动效。
+   每一条都要"有理由"：要么补上缺失的反馈（按压/进场），要么修掉可读性/无障碍缺口。
+   ★ 特异度：按压反馈要压过各皮肤的 `:hover`（0,3,0~0,4,0），故沿用双写 `[data-theme][data-theme]`（§C54 教训）。
+   ============================================================================ */
+
+/* ① 键盘可见焦点：全站统一焦点环（鼠标点击不出现，键盘 Tab 才亮 —— 不影响鼠标观感） */
+:root[data-theme] :focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+:root[data-theme] .card-media:focus-visible { outline-offset: 3px; border-radius: var(--radius); }
+
+/* ② 路由进场：交叉淡入 + 上浮 + 极轻缩放（M3 进场曲线；企鹅式硬切改成有编排的登场） */
+.page-anim { animation: pageIn var(--dur-page) var(--ease-enter) both; }
+@keyframes pageIn {
+  from { opacity: 0; transform: translateY(14px) scale(.994); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ③ 弹层进场（搜索面板 / 换源弹层 / 歌单类浮层）：挂载即播放；关闭仍走即时卸载（出场本就该快于进场） */
+.sp-panel, .srcpick-pop { animation: popIn var(--dur-panel) var(--ease-enter) both; transform-origin: top center; }
+.srcpick-side .srcpick-pop { transform-origin: bottom center; animation-name: popUp; }
+@keyframes popIn { from { opacity: 0; transform: translateY(-7px) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes popUp { from { opacity: 0; transform: translateY(7px) scale(.97); } to { opacity: 1; transform: none; } }
+
+/* ④ 对话框进场（遮罩淡入 + 卡片上浮缩放）：免责声明 / 网盘绑定 / 更新门禁 */
+.modal-scrim { animation: scrimIn var(--dur-panel) var(--ease-standard) both; }
+@keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
+.card.modal-in, .upd-card { animation: modalIn var(--dur-panel) var(--ease-enter) both; }
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(10px) scale(.965); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ⑤ 按压反馈：按下要有"按到了"的即时反馈（100ms 内到位）；卡片用极轻回弹曲线 */
+:root[data-theme][data-theme] .card-media:active { transform: scale(.99); transition-duration: var(--dur-instant); }
+:root[data-theme][data-theme] .card-media:active .card { transform: translateY(-1px) scale(.995); transition-duration: var(--dur-instant); }
+:root[data-theme][data-theme] .tag:active,
+:root[data-theme][data-theme] .ep:active,
+:root[data-theme][data-theme] .list-item:active,
+:root[data-theme][data-theme] .srcpick-item:active,
+:root[data-theme][data-theme] .sp-item:active { transform: scale(.97); }
+button:active { transition-duration: var(--dur-instant); }
+
+/* ⑥ 载入态 / 空态：通用转圈 + 空态居中淡入（原先只有一行灰字，等半天不知道在不在动） */
+.spinner {
+  width: 18px; height: 18px; flex: none; border-radius: 50%; box-sizing: border-box;
+  border: 2px solid color-mix(in srgb, var(--text) 18%, transparent); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  animation: fadeIn var(--dur-panel) var(--ease-standard) both;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* ⑦ 数字对齐：时间 / 进度 / 速度用等宽数字（跳秒、进度推进时不再左右抖） */
+.vp-time, .vp-htip, .aud-time, .upd-speed, .vp-vpct, .vp-load-speed, .hist-time, .dav-size, .dav-time { font-variant-numeric: tabular-nums; }
+
+/* ⑧ 减弱动效：默认**跟随系统**（`prefers-reduced-motion`），载入转圈保留但放慢（信息性动画不消失）。
+   ★ 2026-10-08 实测：本机 Windows「动画效果」是关的 → 系统偏好 = reduce → 一切动效被折叠（用户看不到任何动画）。
+     故加应用内三态偏好（配置 → 外观 → 界面动效）：`<html data-motion>`：
+       · 无属性（auto，默认）→ 跟随系统（下面这段生效）
+       · data-motion="on"    → 无视系统、始终开启（选择器写 :not([data-motion='on'])，此段自然不生效）
+       · data-motion="off"   → 无论系统如何一律关闭（第二段，媒体查询之外） */
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion='on']) *,
+  html:not([data-motion='on']) *::before,
+  html:not([data-motion='on']) *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+  html:not([data-motion='on']) .spinner { animation: spin 2.4s linear infinite !important; }
+  html:not([data-motion='on']) .vp-spin { animation: vspin 2.4s linear infinite !important; }
+}
+html[data-motion='off'] *,
+html[data-motion='off'] *::before,
+html[data-motion='off'] *::after {
+  animation-duration: .01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .01ms !important;
+}
+html[data-motion='off'] .spinner { animation: spin 2.4s linear infinite !important; }
+html[data-motion='off'] .vp-spin { animation: vspin 2.4s linear infinite !important; }

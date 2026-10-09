@@ -57,7 +57,13 @@ import {
 import { join, dirname } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { JarSpiderBridge, normalizeJarUrl } from '../../engine/spider/JarSpiderBridge';
-import { removePizazzCookieFile, syncPizazzCookieFiles } from './driveCookieFiles';
+import {
+  removePizazzCookieFile,
+  removeWexCookieFile,
+  syncPizazzCookieFiles,
+  syncWexCookieFiles,
+  spiderSandboxDir,
+} from './driveCookieFiles';
 import { sourceTimeoutMs } from '../../engine/spider/SpiderFactory';
 import { mergeSearchResults, isSearchableSource, type AggSearchInput } from '../../engine/vod/aggSearch';
 import {
@@ -627,8 +633,9 @@ export class SpiderHost {
   }
   driveRemove(provider: string) {
     this.drives.remove(provider);
-    // ★ 解绑 → 清掉 Pizazz 系 cookie 文件（jar 侧「文件存在且非空」即视为已配置，必须一并清）
+    // ★ 解绑 → 清掉各系 cookie 文件（jar 侧「文件存在且非空」即视为已配置，必须一并清）
     removePizazzCookieFile(provider);
+    removeWexCookieFile(provider, spiderSandboxDir(spiderCacheDir()));
     this.resetSpidersAfterDriveChange();
   }
 
@@ -1098,12 +1105,17 @@ export class SpiderHost {
    *     `<外部存储>/TVBox/<盘>.txt`（桌面桩 = `%TEMP%\tvbox-ext\TVBox\`），内容 `{"cookie":"..."}`——
    *     详情组装播放列表前会按链接域名逐个检查这些文件，缺失即把该网盘链接降级丢弃
    *     （用户侧现象：源能进能搜、详情里却没有可播资源）。
-   *   调用点：绑定（driveSet / 网页登录）、解绑（删文件）、还原设置、启动（%TEMP% 可能被系统清理）。 */
+   *   · ★ 2026-10-09 wex 系（玩偶/花卷/木偶等壳通解家族）：`<spider 沙箱>/files/TV/.quarkcookie`
+   *     （UC = `.ucpancookie`），内容为**裸 cookie 串**——Quark/Ucpan 的 checkXXXcookie 直接读它，
+   *     缺失即报「还没有配置夸克 Cookie」（反编译实证见 driveCookieFiles.ts 头注释）。
+   *   调用点：绑定（driveSet / 网页登录）、解绑（删文件）、还原设置、启动（%TEMP%/沙箱可能被系统清理）。 */
   syncDriveFiles(): void {
     const tokens = this.drives.list();
     for (const [p, v] of Object.entries(tokens)) this.syncCloudDriveConfig(p, v);
     const written = syncPizazzCookieFiles(tokens);
     if (written.length) this.logger.i(`已同步 Pizazz 系网盘 cookie 文件：${written.join(', ')}`);
+    const wexWritten = syncWexCookieFiles(tokens, spiderSandboxDir(spiderCacheDir()));
+    if (wexWritten.length) this.logger.i(`已同步 wex 系网盘 cookie 文件：${wexWritten.join(', ')}`);
   }
 
   // fty 系网盘 jar 从 Cloud-drive 配置文件读的键名（Cloud_quark→quarkCookie / Cloud_uc→ucCookie）
@@ -2072,6 +2084,9 @@ export class SpiderHost {
           const bound = !!String((this.driveList() as Record<string, string>)[prov] || '').trim();
           if (bound && !retried) {
             this.logger.w(`play: 蜘蛛称「需登录${prov}」但本地已绑定 → 重置蜘蛛池并重试一次: ${key}`);
+            // ★ 2026-10-09：重试前**补写各系 cookie 文件**（wex 系读 `<沙箱>/files/TV/.quarkcookie` 等；
+            //   沙箱/%TEMP% 被清缓存清掉、或旧版本从未写过时，这一步自愈），再重置池让新 JVM 读到。
+            this.syncDriveFiles();
             this.resetSpidersAfterDriveChange();
             return this.playInner(key, flag, id, true);
           }

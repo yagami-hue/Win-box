@@ -1,0 +1,544 @@
+/* douban.css — Win-Box 第四套皮肤：**大豆**（Material 3 Expressive × 豆瓣，浅色）
+   ================================================================================
+   ★★ 2026-10-09 整体重做（用户口径：皮肤改叫「大豆」，风格重做、务必大改、参考更多开源 UI）：
+     · 设计语言 = **Material 3 Expressive**（2025 Google：大圆角 / 鲜明容器色 / 弹性动效 /
+       强排版对比）× **豆瓣品牌**（豆绿 #2E9629 主色 / 豆瓣橙 #F0641E 点缀 / 暖纸白底）；
+       层级光影参考 Arc / Linear（发丝线 + 精确阴影），媒体行/海报墙参考豆瓣 App 新版。
+     · 与初版（「豆风」= Material You 淡紫底 + 靛蓝 #5B5BD6）的差异：**换色系（靛蓝→豆绿）、
+       换底（淡紫→暖纸白）、导航由「独立胶囊行」→「一体式分段控制器」、FAB 圆钮→squircle、
+       详情头图→品牌渐变容器、全套控件圆角/阴影/状态层重做**。
+     · 结构类名/功能口径全部保留（App.tsx 外壳、db-wall/db-hero/搜索条宽度挂 .srcpick 等），
+       本文件只做「视觉层」重写 —— 勿回退口径见 MEMORY §C62（普通搜索条宽度、pvwin 深色、--bg 兜底）。
+   ================================================================================
+   ★ 全部规则限定在 `[data-theme='douban']` 下，其余主题不受影响。
+   ★ 特异度口径（§C54/§C60 教训）：本文件用 `:root[data-theme='douban'] .x`（0,3,0 起）压过
+     global.css 基础规则（0,1,0/0,2,0）；组件级开启态另加 `.a.b` 组合，避免被皮肤的 hover 反压。 */
+
+:root[data-theme='douban'] {
+  /* ---- 设计令牌：暖纸白底 + 豆绿主色（M3 surface / primary / container） ---- */
+  --bg0: #F2F4EF;                             /* 页面底色：暖纸白（微绿灰） */
+  --bg-glass: rgba(252, 253, 250, .93);       /* 浮层（搜索/换源弹层、字幕面板） */
+  --bg1: rgba(255, 255, 255, .86);
+  --bg-elev: #ffffff;                         /* 卡片 / 输入框：纯白 */
+  --bg-elev2: #ffffff;
+  --border: #E0E5DC;                          /* M3 outline（暖绿灰） */
+  --border-soft: rgba(26, 32, 25, .095);
+  --text: #1A1D19;                            /* M3 on-surface */
+  --text-dim: #5F675D;                        /* M3 on-surface-variant（灰绿） */
+  --accent: #2E9629;                          /* ★ 豆瓣绿（主色，替代初版靛蓝 #5B5BD6） */
+  --accent-strong: #1F7A1B;                   /* 主色深档（hover/按下） */
+  --accent-soft: rgba(46, 150, 41, .13);      /* 状态层 / 焦点环 */
+  --accent-container: #DCF2D8;                /* M3 primary container：浅绿容器底 */
+  --accent-2: #F0641E;                        /* ★ 豆瓣橙（点缀：remarks / 评分 / 播放器开启态） */
+  --danger: #D93025;
+  --warn: #B26A00;
+  --radius: 20px;
+  --radius-sm: 12px;
+  --shadow: 0 1px 2px rgba(20, 28, 18, .05), 0 12px 32px -14px rgba(20, 28, 18, .18);
+  --side-w: 208px;
+  /* 大豆专属（变量名保留，语义已随重做更新） */
+  --db-navy: #2E9629;                         /* 原「深蓝品牌」→ 现品牌豆绿 */
+  --db-orange: #F0641E;                       /* 豆瓣橙（点缀） */
+  --db-card-shadow: 0 1px 2px rgba(20, 28, 18, .045), 0 10px 26px -14px rgba(20, 28, 18, .16);
+  --db-navy-soft: rgba(46, 150, 41, .10);     /* 浅绿 hover 底（原深蓝 soft） */
+  /* ★ 运动令牌 —— 全部**别名到全站令牌**（global.css 的 --ease-* / --dur-*），
+     四套皮肤共用一套动效节奏，只换配色不换「手感」（§C63）。 */
+  --db-ease: var(--ease-standard);             /* M3 Standard：状态切换（chips/按钮/开关） */
+  --db-ease-out: var(--ease-enter);            /* M3 Emphasized decelerate：进场 */
+  --db-dur-m: var(--dur-state);                /* 200ms（桌面档：状态变化） */
+  --db-dur-l: var(--dur-page);                 /* 440ms（页面级进场） */
+  /* 免责声明 / 更新门禁弹窗内联写了 `background: var(--bg)`（global.css 未定义该变量）——
+     浅色皮肤必须给出白色兜底，否则弹窗底透明、深字压在深色遮罩上读不清。 */
+  --bg: #ffffff;
+}
+
+/* ================== 全局：暖纸白底 + 品牌微光 + 深字 ================== */
+:root[data-theme='douban'] body {
+  background:
+    radial-gradient(1200px 420px at 12% -160px, rgba(46, 150, 41, .05), transparent 68%),
+    radial-gradient(900px 380px at 92% -150px, rgba(240, 100, 30, .045), transparent 70%),
+    var(--bg0);
+  color: var(--text);
+}
+:root[data-theme='douban'] a { color: var(--accent); }
+:root[data-theme='douban'] .muted { color: var(--text-dim); }
+:root[data-theme='douban'] h2,
+:root[data-theme='douban'] h3,
+:root[data-theme='douban'] h4 { font-weight: 800; letter-spacing: -.015em; }
+
+/* ================== 外壳：悬浮毛玻璃顶栏 + 分段导航 + 内容 + 浮动圆钮 ================== */
+:root[data-theme='douban'] .app.db-app { flex-direction: column; background: transparent; }
+
+:root[data-theme='douban'] .db-head {
+  flex: 0 0 auto; position: relative; z-index: 30;
+  background: rgba(248, 250, 246, .82);
+  backdrop-filter: blur(18px) saturate(1.25);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  border-bottom: 1px solid var(--border-soft);
+}
+:root[data-theme='douban'] .db-topbar { display: flex; align-items: center; gap: 12px; height: 50px; padding: 0 14px 0 16px; -webkit-app-region: drag; }
+/* 品牌 = 豆绿渐变 squircle（原「深蓝胶囊」，重做后的最大识别点） */
+:root[data-theme='douban'] .db-brand {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 30px; padding: 0 12px 0 6px; box-sizing: border-box;
+  background: linear-gradient(135deg, #38A932, #1F7A1B); color: #fff;
+  border-radius: 10px; font-size: 11.5px; font-weight: 800; letter-spacing: .06em;
+  box-shadow: 0 2px 10px -2px rgba(46, 150, 41, .5), inset 0 1px 0 rgba(255, 255, 255, .22);
+  flex: 0 0 auto;
+}
+:root[data-theme='douban'] .db-brand-ico { width: 18px; height: 18px; border-radius: 6px; object-fit: contain; background: rgba(255, 255, 255, .92); padding: 1px; box-sizing: border-box; }
+:root[data-theme='douban'] .db-brand-dot { width: 9px; height: 9px; margin: 0 3px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px rgba(255, 255, 255, .22); }
+:root[data-theme='douban'] .db-title { font-size: 16px; font-weight: 800; letter-spacing: -.015em; color: var(--text); padding-left: 2px; flex: 0 0 auto; }
+:root[data-theme='douban'] .db-spacer { flex: 1; }
+/* 顶栏里的交互件不参与拖拽 */
+:root[data-theme='douban'] .db-topbar button,
+:root[data-theme='douban'] .db-topbar .srcpick,
+:root[data-theme='douban'] .db-topbar input { -webkit-app-region: no-drag; }
+/* 顶栏内的标题栏（窗口控制）：只留右侧按钮（`all: unset` 重置基础标题栏样式） */
+:root[data-theme='douban'] .db-topbar .titlebar {
+  flex: 0 0 auto; background: none; border: none; padding: 0; width: auto; height: auto; box-shadow: none;
+}
+:root[data-theme='douban'] .db-topbar .titlebar .tb-title { display: none; }
+:root[data-theme='douban'] .db-topbar .titlebar .tb-controls { height: auto; gap: 3px; -webkit-app-region: no-drag; }
+:root[data-theme='douban'] .db-topbar .titlebar .tb-btn { width: 34px; height: 30px; border-radius: 9px; color: var(--text-dim); }
+:root[data-theme='douban'] .db-topbar .titlebar .tb-btn:hover { background: var(--db-navy-soft); color: var(--text); box-shadow: none; }
+:root[data-theme='douban'] .db-topbar .titlebar .tb-btn.tb-close:hover { background: #E5484D; color: #fff; }
+
+/* ★ 分段控制器导航（重做）：浅底容器 + 选中白底浮起 + 豆绿字 —— 替代初版的「描边胶囊行」 */
+:root[data-theme='douban'] .db-nav {
+  display: flex; align-items: center; gap: 2px; width: fit-content; max-width: calc(100% - 32px);
+  margin: 0 16px 10px; padding: 3px; box-sizing: border-box;
+  background: rgba(26, 32, 25, .06); border-radius: 999px; overflow-x: auto;
+}
+:root[data-theme='douban'] .db-nav::-webkit-scrollbar { display: none; }
+:root[data-theme='douban'] .db-chip {
+  display: inline-flex; align-items: center; flex: 0 0 auto;
+  padding: 6px 15px; border-radius: 999px; cursor: pointer;
+  font-size: 13px; font-weight: 620; color: var(--text-dim); text-decoration: none; white-space: nowrap;
+  background: transparent; border: none;
+  transition: background var(--db-dur-m) var(--db-ease), color var(--db-dur-m) var(--db-ease),
+    box-shadow var(--db-dur-m) var(--db-ease), transform var(--db-dur-m) var(--ease-spring);
+}
+:root[data-theme='douban'] .db-chip:hover { color: var(--text); background: rgba(255, 255, 255, .72); }
+:root[data-theme='douban'] .db-chip:active { transform: scale(.96); }
+:root[data-theme='douban'] .db-chip.active {
+  background: #fff; color: var(--accent); font-weight: 750;
+  box-shadow: 0 1px 4px rgba(20, 28, 18, .14), 0 0 0 1px rgba(20, 28, 18, .04);
+}
+:root[data-theme='douban'] .db-main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* 内容区底部留白：右下角浮动圆钮不压住最后一排卡片 */
+:root[data-theme='douban'] .db-main .content { padding: 18px 22px 108px; }
+
+/* ★ 右下角浮动圆钮（重做）：squircle（圆角方）+ 白色玻璃（未选中）/ 豆绿渐变（选中） */
+:root[data-theme='douban'] .db-fabs { position: fixed; right: 22px; bottom: 22px; z-index: 40; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+:root[data-theme='douban'] .db-fab {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  background: none; border: none; padding: 0; cursor: pointer;
+}
+:root[data-theme='douban'] .db-fab-orb {
+  width: 52px; height: 52px; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, .94); border: 1px solid var(--border-soft);
+  border-radius: 18px; color: var(--text-dim);
+  box-shadow: 0 2px 6px rgba(20, 28, 18, .08), 0 14px 30px -12px rgba(20, 28, 18, .22);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  transition: transform var(--db-dur-m) var(--ease-spring), color var(--db-dur-m) var(--db-ease),
+    background var(--db-dur-m) var(--db-ease), border-color var(--db-dur-m) var(--db-ease),
+    box-shadow var(--db-dur-m) var(--db-ease);
+}
+:root[data-theme='douban'] .db-fab:hover .db-fab-orb {
+  transform: translateY(-3px); color: var(--accent); border-color: rgba(46, 150, 41, .42);
+  box-shadow: 0 4px 10px rgba(20, 28, 18, .10), 0 18px 38px -12px rgba(20, 28, 18, .26);
+}
+:root[data-theme='douban'] .db-fab:active .db-fab-orb { transform: scale(.94); }
+:root[data-theme='douban'] .db-fab.active .db-fab-orb {
+  background: linear-gradient(135deg, #38A932, #1F7A1B); border-color: transparent; color: #fff;
+  box-shadow: 0 3px 8px rgba(31, 122, 27, .3), 0 16px 34px -10px rgba(46, 150, 41, .55);
+}
+:root[data-theme='douban'] .db-fab-label { font-size: 10px; color: var(--text-dim); line-height: 1; }
+:root[data-theme='douban'] .db-fab.active .db-fab-label { color: var(--accent); font-weight: 750; }
+
+/* ================== 标题栏（详情窗口 / 播放器窗口共用） ================== */
+:root[data-theme='douban'] .titlebar { background: rgba(252, 253, 250, .92); border-bottom: 1px solid var(--border-soft); }
+:root[data-theme='douban'] .tb-title { color: var(--text); }
+:root[data-theme='douban'] .tb-sub { color: var(--text-dim); }
+:root[data-theme='douban'] .tb-dot { background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: none; }
+/* 窗口按钮：无底无框圆角块（基础 button 规则会误给白底描边 + padding，
+   见 §C62：必须显式 padding: 0; box-sizing: border-box，否则窗口按钮散位） */
+:root[data-theme='douban'] .titlebar .tb-controls { gap: 4px; }
+:root[data-theme='douban'] .titlebar .tb-btn {
+  background: none; border: none; box-shadow: none; padding: 0; box-sizing: border-box;
+  border-radius: 9px; color: var(--text-dim); width: 34px; height: 30px;
+}
+:root[data-theme='douban'] .titlebar .tb-btn:hover { background: var(--db-navy-soft); color: var(--text); box-shadow: none; }
+:root[data-theme='douban'] .titlebar .tb-btn.tb-close:hover { background: #E5484D; color: #fff; }
+/* 置顶开启态（播放器窗口）：accent 高亮 + 淡绿底（浅底上不能用白色叠加，见 global.css 同款口径） */
+:root[data-theme='douban'] .tb-btn.tb-pin-on { color: var(--accent); background: var(--accent-soft); }
+:root[data-theme='douban'] .tb-btn.tb-pin-on:hover { color: var(--accent); background: rgba(46, 150, 41, .2); }
+
+/* ★ 播放器窗口（`pvwin`）整窗深色：观看时不要浅色面板（详情窗口同用 .app.pwin，但保持浅色页面） */
+:root[data-theme='douban'] .app.pwin.pvwin,
+:root[data-theme='douban'] .app.pwin.pvwin .main { background: #000; }
+:root[data-theme='douban'] .app.pwin.pvwin .titlebar { background: #0F0F13; border-bottom: none; }
+:root[data-theme='douban'] .app.pwin.pvwin .tb-title { color: #ECECF2; }
+:root[data-theme='douban'] .app.pwin.pvwin .tb-btn { color: #9C99A8; }
+:root[data-theme='douban'] .app.pwin.pvwin .tb-btn:hover { background: rgba(255, 255, 255, .14); color: #fff; }
+:root[data-theme='douban'] .app.pwin.pvwin .tb-btn.tb-close:hover { background: #E5484D; color: #fff; }
+:root[data-theme='douban'] .app.pwin.pvwin .tb-btn.tb-pin-on { color: var(--accent-2); background: rgba(255, 255, 255, .16); }
+:root[data-theme='douban'] .mini-strip { background: rgba(15, 15, 19, .6); color: #C9C6D2; }
+/* mpv 内核：标题栏/小窗条改浮层（global.css 已给深色渐变），此处保证字色仍是浅色 */
+:root[data-theme='douban'][data-mpv] .app.pwin.pvwin .tb-title { color: #F2F2F7; }
+:root[data-theme='douban'][data-mpv] .app.pwin.pvwin .tb-btn { color: #C9C6D2; }
+
+/* ================== 通用控件：按钮 / 白卡 / chips / 输入 ================== */
+:root[data-theme='douban'] button {
+  background: #fff; border: 1px solid var(--border); color: var(--text);
+  border-radius: 12px; padding: 6px 14px; font-size: 13px; font-weight: 600;
+}
+/* 基础样式的 hover 是「白字 + 蓝色光晕」（深色底设计），浅色底必须换字色 */
+:root[data-theme='douban'] button:hover { border-color: rgba(46, 150, 41, .5); color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+:root[data-theme='douban'] button:active { transform: scale(.98); opacity: .92; }
+:root[data-theme='douban'] button.primary {
+  background: linear-gradient(135deg, #38A932, #1F7A1B); border-color: transparent; color: #fff; font-weight: 650;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .2);
+}
+:root[data-theme='douban'] button.primary:hover { background: linear-gradient(135deg, #33A02D, #1B7018); color: #fff; box-shadow: 0 6px 18px -6px rgba(46, 150, 41, .55); }
+:root[data-theme='douban'] button:disabled { opacity: .45; box-shadow: none; }
+:root[data-theme='douban'] .linkbtn { background: none; border: none; box-shadow: none; color: var(--accent); padding: 1px 6px; }
+:root[data-theme='douban'] .linkbtn:hover { background: var(--accent-soft); color: var(--accent); box-shadow: none; }
+:root[data-theme='douban'] .linkbtn.danger { color: var(--danger); }
+:root[data-theme='douban'] .linkbtn.danger:hover { background: rgba(217, 48, 37, .1); color: var(--danger); }
+/* 图标类按钮恢复「无底无框」（基础按钮规则会误伤它们） */
+:root[data-theme='douban'] .hist-ops button,
+:root[data-theme='douban'] .sp-hist-del,
+:root[data-theme='douban'] .vp-ctl { border-radius: 6px; }
+:root[data-theme='douban'] .vp-ctl { background: none; border: none; padding: 0; box-shadow: none; }
+:root[data-theme='douban'] .vp-ctl:hover { background: rgba(255, 255, 255, .16); color: #fff; box-shadow: none; }
+:root[data-theme='douban'] .mini-btn { border: none; background: none; padding: 0; box-shadow: none; }
+:root[data-theme='douban'] .mini-btn:hover { background: rgba(255, 255, 255, .16); color: #fff; box-shadow: none; }
+/* 海报上的深色小条（历史悬停操作 / 单条删除）：仍按深色胶囊画（压在图片上，不跟浅色底走） */
+:root[data-theme='douban'] .hist-ops button {
+  background: rgba(24, 22, 28, .72); border: 1px solid rgba(255, 255, 255, .16); color: #fff;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+:root[data-theme='douban'] .hist-ops button:hover { background: rgba(24, 22, 28, .88); color: #fff; box-shadow: none; }
+:root[data-theme='douban'] .card-media .hist-del {
+  background: rgba(24, 22, 28, .72); border-color: rgba(255, 255, 255, .16); color: #fff;
+}
+:root[data-theme='douban'] .card-media .hist-del:hover { background: #E5484D; color: #fff; border-color: #E5484D; box-shadow: none; }
+/* 搜索历史删除 / 清空：无底细字（基础按钮规则会给出白底边框） */
+:root[data-theme='douban'] .sp-hist-del { background: none; border: none; padding: 2px 5px; color: var(--text-dim); }
+:root[data-theme='douban'] .sp-hist-del:hover { color: var(--danger); background: rgba(217, 48, 37, .08); box-shadow: none; }
+:root[data-theme='douban'] .sp-clear { background: none; border: 1px dashed var(--border); border-radius: 10px; padding: 5px 0; }
+/* 投屏面板（深色玻璃，在白字深底上）：白底规则不适用，恢复玻璃条 */
+:root[data-theme='douban'] .vp-citem {
+  background: none; border: none; color: #EDEDF2; box-shadow: none; border-radius: 8px;
+}
+:root[data-theme='douban'] .vp-citem:hover:not(:disabled) { background: rgba(255, 255, 255, .16); color: #fff; box-shadow: none; }
+:root[data-theme='douban'] .vp-crefresh { background: transparent; border-color: rgba(255, 255, 255, .18); color: rgba(255, 255, 255, .78); }
+/* 图片浏览器左右翻页键（压在图片上）：深色玻璃块，不做白底胶囊 */
+:root[data-theme='douban'] .ivi-nav-btn { background: rgba(24, 22, 28, .46); border: none; border-radius: 12px; padding: 0; color: #fff; }
+:root[data-theme='douban'] .ivi-nav-btn:hover { background: rgba(24, 22, 28, .66); color: #fff; box-shadow: none; }
+/* 跳过片头片尾的进度条右键菜单：列表行（透明底、悬停淡绿） */
+:root[data-theme='douban'] .vp-skipmenu-item { background: none; border: none; border-radius: 8px; padding: 6px 8px; color: var(--text); }
+:root[data-theme='douban'] .vp-skipmenu-item:hover { background: var(--accent-soft); color: var(--text); box-shadow: none; }
+
+:root[data-theme='douban'] input,
+:root[data-theme='douban'] select,
+:root[data-theme='douban'] textarea { background: #fff; border: 1px solid var(--border); color: var(--text); border-radius: 12px; }
+:root[data-theme='douban'] input:focus,
+:root[data-theme='douban'] select:focus,
+:root[data-theme='douban'] textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+:root[data-theme='douban'] ::placeholder { color: #9AA396; }
+/* 开关样式见 global.css 的「全皮肤药丸开关」（★ 2026-10-08 用户要求统一到全皮肤，不再在皮肤里各写一份） */
+:root[data-theme='douban'] input[type='radio'],
+:root[data-theme='douban'] input[type='range'],
+:root[data-theme='douban'] progress { accent-color: var(--accent); }
+
+:root[data-theme='douban'] .card { background: #fff; border: 1px solid var(--border-soft); border-radius: 18px; box-shadow: var(--db-card-shadow); }
+:root[data-theme='douban'] .tag {
+  background: #fff; border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 999px; padding: 5px 14px; font-size: 12.5px; font-weight: 620;
+}
+:root[data-theme='douban'] .tag:hover { border-color: rgba(46, 150, 41, .5); color: var(--accent); background: #fff; }
+:root[data-theme='douban'] .tag.active {
+  background: linear-gradient(135deg, #38A932, #1F7A1B); border-color: transparent; color: #fff; font-weight: 700;
+  box-shadow: 0 2px 10px -2px rgba(46, 150, 41, .45);
+}
+:root[data-theme='douban'] .banner {
+  background: #fff; border: 1px solid var(--border-soft); border-radius: 14px; box-shadow: var(--db-card-shadow);
+}
+:root[data-theme='douban'] .empty { color: var(--text-dim); }
+:root[data-theme='douban'] .status { color: var(--text-dim); }
+
+/* 页面顶栏（各页自带）：去边框透明底 + 大标题（M3 large title 观感） */
+:root[data-theme='douban'] .topbar {
+  background: none; border-bottom: none; padding: 4px 0 12px;
+}
+:root[data-theme='douban'] .topbar h2 { font-size: 22px; font-weight: 850; letter-spacing: -.02em; }
+:root[data-theme='douban'] .topbar button { flex: 0 0 auto; white-space: nowrap; }
+:root[data-theme='douban'] .back-btn { background: #fff; border: 1px solid var(--border); color: var(--text); box-shadow: none; border-radius: 12px; }
+:root[data-theme='douban'] .back-btn:hover { border-color: rgba(46, 150, 41, .5); color: var(--accent); background: #fff; }
+
+/* ================== 卡片 / 网格 / 列表 ================== */
+:root[data-theme='douban'] .grid { gap: 20px 18px; }
+:root[data-theme='douban'] .card-media .card {
+  border-radius: 16px; overflow: hidden;
+  box-shadow: var(--db-card-shadow); transition: transform var(--db-dur-m) var(--ease-spring), box-shadow var(--db-dur-m) var(--db-ease), border-color var(--db-dur-m) var(--db-ease);
+}
+:root[data-theme='douban'] .card-media:hover .card { transform: translateY(-4px); border-color: var(--border-soft); box-shadow: 0 6px 14px rgba(20, 28, 18, .08), 0 22px 44px -16px rgba(20, 28, 18, .2); }
+/* 海报角标：深玻璃圆角徽标 + 白字，挪到**左下角**盖在海报上 */
+:root[data-theme='douban'] .card-media .badge {
+  left: 8px; right: auto; bottom: 8px; top: auto;
+  background: rgba(24, 22, 28, .66); color: #fff; border: none; border-radius: 8px;
+  padding: 2px 7px; font-size: 11px; font-weight: 650; letter-spacing: .02em;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+/* 历史卡的右上角层（进度/删除）保持原布局，不受上面「左下角」规则影响 */
+:root[data-theme='douban'] .card-media .hist-corner .badge { position: static; left: auto; bottom: auto; }
+:root[data-theme='douban'] .card-media .meta { padding: 9px 10px 10px; }
+:root[data-theme='douban'] .card-media .name { font-size: 13px; font-weight: 560; color: #3B4237; }
+:root[data-theme='douban'] .card-media .remarks { color: var(--accent-2); font-weight: 650; }
+:root[data-theme='douban'] .no-cover { background: #EDF1EA; color: #9AA396; }
+:root[data-theme='douban'] .list-item { background: #fff; border: 1px solid var(--border-soft); border-radius: 16px; box-shadow: var(--db-card-shadow); }
+:root[data-theme='douban'] .list-item:hover { border-color: rgba(46, 150, 41, .4); box-shadow: 0 6px 18px -6px rgba(46, 150, 41, .22); }
+:root[data-theme='douban'] .rec-row > .card-media .name { color: #3B4237; }
+
+/* ================== 换源 / 搜索弹层（白卡 + 豆绿选中） ================== */
+:root[data-theme='douban'] .srcpick-name {
+  background: #fff; border: 1px solid var(--border); border-radius: 999px;
+}
+:root[data-theme='douban'] .srcpick-name:hover { border-color: rgba(46, 150, 41, .5); }
+:root[data-theme='douban'] .srcpick-caret { color: var(--text-dim); }
+:root[data-theme='douban'] .srcpick-pop,
+:root[data-theme='douban'] .sp-panel {
+  background: var(--bg-glass); border: 1px solid var(--border-soft); border-radius: 18px;
+  box-shadow: 0 8px 20px rgba(20, 28, 18, .1), 0 30px 70px -20px rgba(20, 28, 18, .3);
+  backdrop-filter: blur(20px) saturate(1.2); -webkit-backdrop-filter: blur(20px) saturate(1.2);
+}
+:root[data-theme='douban'] .srcpick-pop-tip { color: var(--text-dim); }
+:root[data-theme='douban'] .srcpick-item:hover,
+:root[data-theme='douban'] .sp-item:hover { background: var(--accent-soft); }
+:root[data-theme='douban'] .srcpick-item.active { color: var(--accent); font-weight: 700; }
+:root[data-theme='douban'] .srcpick-sub.cur::before { color: var(--accent-2); }
+:root[data-theme='douban'] .sp-rank-no.top { background: var(--accent); color: #fff; }
+:root[data-theme='douban'] .sp-clear { border-color: var(--border); color: var(--text-dim); }
+:root[data-theme='douban'] .sp-clear:hover { color: var(--danger); border-color: var(--danger); }
+
+/* ================== 详情 / 剧集 / 直播 / 存储 / 历史 ================== */
+:root[data-theme='douban'] .ep {
+  background: #fff; border: 1px solid var(--border); border-radius: 10px;
+}
+:root[data-theme='douban'] .ep:hover { border-color: rgba(46, 150, 41, .5); background: #fff; color: var(--accent); }
+:root[data-theme='douban'] .ep.active {
+  background: linear-gradient(135deg, #38A932, #1F7A1B); border-color: transparent; color: #fff; font-weight: 650;
+  box-shadow: 0 3px 12px -3px rgba(46, 150, 41, .5);
+}
+:root[data-theme='douban'] .live-player { border-radius: 16px; overflow: hidden; box-shadow: var(--db-card-shadow); }
+:root[data-theme='douban'] .dav-player { border-radius: 16px; overflow: hidden; box-shadow: var(--db-card-shadow); }
+:root[data-theme='douban'] .dav-row { border-radius: 12px; }
+:root[data-theme='douban'] .dav-row:hover { background: var(--accent-soft); }
+:root[data-theme='douban'] .hist-undo { background: #fff; border: 1px solid var(--border-soft); box-shadow: var(--db-card-shadow); }
+:root[data-theme='douban'] table th, :root[data-theme='douban'] table td { border-color: var(--border-soft); }
+:root[data-theme='douban'] tr.selectable:hover { background: rgba(46, 150, 41, .06); }
+:root[data-theme='douban'] tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rgba(46, 150, 41, .4); }
+
+/* ================== 说明页 / 更新门禁 ================== */
+:root[data-theme='douban'] .about-link { background: #fff; border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--db-card-shadow); }
+:root[data-theme='douban'] .about-link:hover { border-color: rgba(46, 150, 41, .5); color: var(--accent); }
+:root[data-theme='douban'] .about-link.about-sponsor:hover { border-color: #FF7A9A; color: #E55A7E; }
+:root[data-theme='douban'] .upd-card { background: #fff; }
+:root[data-theme='douban'] .upd-bar { background: rgba(26, 32, 25, .12); }
+:root[data-theme='douban'] .upd-fill { background: linear-gradient(135deg, #38A932, #1F7A1B); }
+
+/* ================== 播放器（暗色舞台，覆盖在视频上的控件保持白色） ================== */
+:root[data-theme='douban'] .vplayer { background: #000; border-radius: 16px; }
+:root[data-theme='douban'] .vp-big { background: rgba(24, 22, 28, .46); border: none; color: #fff; }
+:root[data-theme='douban'] .vp-big:hover { background: rgba(24, 22, 28, .66); transform: translate(-50%, -50%) scale(1.06); }
+:root[data-theme='douban'] .vp-progress { height: 6px; background: rgba(255, 255, 255, .26); border-radius: 3px; }
+:root[data-theme='douban'] .vp-buffer { background: rgba(255, 255, 255, .4); border-radius: 3px; }
+:root[data-theme='douban'] .vp-played { background: var(--accent); border-radius: 3px; }
+:root[data-theme='douban'] .vp-thumb { width: 9px; height: 9px; box-shadow: 0 0 0 2px rgba(46, 150, 41, .5), 0 1px 4px rgba(0, 0, 0, .4); }
+:root[data-theme='douban'] .vp-ctl { color: #EDEDF2; }
+:root[data-theme='douban'] .vp-ctl:disabled { color: rgba(237, 237, 242, .3); background: none; }
+/* 倍速下拉（压在视频上）：深色玻璃，不做白底（写在 select 规则之后，同特异度取后者） */
+:root[data-theme='douban'] .vp-rate { background: rgba(255, 255, 255, .14); border: 1px solid rgba(255, 255, 255, .16); color: #fff; }
+:root[data-theme='douban'] .vp-ctl.vp-on { color: var(--accent-2); background: rgba(255, 255, 255, .18); }
+:root[data-theme='douban'] .vp-ctl.vp-on:hover { color: var(--accent-2); background: rgba(255, 255, 255, .26); }
+:root[data-theme='douban'] .vp-vfill { background: var(--accent); }
+:root[data-theme='douban'] .vp-toast { background: rgba(24, 22, 28, .8); }
+/* 播放器内弹层（字幕 / 弹幕 / 画质 / 跳过 / 投屏）：白卡片 + 深字（浅色皮肤的“浅色抽屉”） */
+:root[data-theme='douban'] .vp-subpanel,
+:root[data-theme='douban'] .vp-skipmenu { background: #fff; border: 1px solid var(--border-soft); border-radius: 16px; box-shadow: 0 18px 46px rgba(0, 0, 0, .3); }
+:root[data-theme='douban'] .vp-skipmenu-item:hover { background: var(--accent-soft); }
+:root[data-theme='douban'] .vsp-btn { background: #fff; border-radius: 999px; color: var(--text); }
+:root[data-theme='douban'] .vsp-btn.primary { background: linear-gradient(135deg, #38A932, #1F7A1B); color: #fff; }
+:root[data-theme='douban'] .vsp-item { background: #fff; border: 1px solid var(--border); }
+:root[data-theme='douban'] .vp-cpanel, :root[data-theme='douban'] .vp-vpanel { background: rgba(24, 22, 28, .82); }
+
+/* ================== 音频播放器（独立窗口，保持暗色舞台） ================== */
+:root[data-theme='douban'] .aud-play { color: #fff; }
+
+/* ================== 滚动条（浅色细条） ================== */
+:root[data-theme='douban'] ::-webkit-scrollbar { width: 10px; height: 10px; }
+:root[data-theme='douban'] ::-webkit-scrollbar-track { background: transparent; }
+:root[data-theme='douban'] ::-webkit-scrollbar-thumb { background: #C7D1C2; border-radius: 6px; border: 3px solid transparent; background-clip: content-box; }
+:root[data-theme='douban'] ::-webkit-scrollbar-thumb:hover { background: #ACBAA6; background-clip: content-box; border: 3px solid transparent; }
+
+/* ================== 响应式 ================== */
+@media (max-width: 900px) {
+  :root[data-theme='douban'] .db-title { display: none; }
+  :root[data-theme='douban'] .db-main .content { padding: 14px 14px 92px; }
+  :root[data-theme='douban'] .grid { gap: 16px 14px; }
+  :root[data-theme='douban'] .db-fabs { right: 14px; bottom: 14px; }
+}
+
+/* ============================================================
+   ★★ 大改布局四件（2026-10-08 立项 / 2026-10-09 随「大豆」重做皮肤色与形态）：
+   ① 顶栏 M3 搜索条；② 海报墙（分区 pill + 网格 + 悬停播放钮）；
+   ③ 详情页品牌渐变头图（大海报 + 信息区）；④ 全套 M3 Expressive 运动。
+   ============================================================ */
+
+/* ---- ① 顶栏：M3 搜索条（占中段；粉/蓝皮肤的小胶囊不受影响，只有大豆传 bar） ---- */
+/* 宽度要写在**外层 .srcpick**上：它是 .db-topbar 的 flex 项（内层 .sp-btn 不是 flex 项，
+   只写内层会被内容宽度锁死成 ~200px —— 实测过的坑，勿改）。 */
+:root[data-theme='douban'] .db-topbar .srcpick.sp-bar-wrap { flex: 0 1 420px; max-width: 420px; min-width: 170px; }
+:root[data-theme='douban'] .db-topbar .sp-btn.sp-bar {
+  width: 100%; max-width: none; box-sizing: border-box;
+  justify-content: flex-start; gap: 9px; padding: 8px 16px;
+  background: rgba(255, 255, 255, .9); border: 1px solid var(--border); border-radius: 999px;
+  color: var(--text); font-size: 13px; box-shadow: none;
+  transition: border-color var(--db-dur-m) var(--db-ease), box-shadow var(--db-dur-m) var(--db-ease), background var(--db-dur-m) var(--db-ease);
+}
+:root[data-theme='douban'] .db-topbar .sp-btn.sp-bar:hover { border-color: rgba(46, 150, 41, .5); box-shadow: 0 0 0 3px var(--accent-soft); background: #fff; }
+:root[data-theme='douban'] .sp-bar-hint { color: #9AA396; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- 浮动圆钮：入场动画（自下而上淡入，逐枚错开） ---- */
+:root[data-theme='douban'] .db-fab { animation: dbFabIn var(--db-dur-l) var(--db-ease-out) both; }
+:root[data-theme='douban'] .db-fab:nth-child(2) { animation-delay: 60ms; }
+:root[data-theme='douban'] .db-fab:nth-child(3) { animation-delay: 120ms; }
+@keyframes dbFabIn { from { opacity: 0; transform: translateY(14px) scale(.96); } to { opacity: 1; transform: none; } }
+
+/* ---- ② 切页过渡：由 global.css 的「交互态/动效系统」统一接管（.page-anim → pageIn，--dur-page/--ease-enter） ---- */
+
+/* ---- ③ 海报墙（发现页）：分区 pill + 网格 + 悬停播放钮 ---- */
+:root[data-theme='douban'] .db-wall-chips {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 2px 0 16px;
+}
+:root[data-theme='douban'] .db-wall-chip {
+  background: #fff; border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 999px; padding: 6px 15px; font-size: 13px; font-weight: 620; cursor: pointer;
+  transition: background var(--db-dur-m) var(--db-ease), color var(--db-dur-m) var(--db-ease),
+    border-color var(--db-dur-m) var(--db-ease), box-shadow var(--db-dur-m) var(--db-ease),
+    transform var(--db-dur-m) var(--ease-spring);
+}
+:root[data-theme='douban'] .db-wall-chip:hover { color: var(--accent); border-color: rgba(46, 150, 41, .5); transform: translateY(-1px); }
+:root[data-theme='douban'] .db-wall-chip:active { transform: scale(.96); }
+:root[data-theme='douban'] .db-wall-chip.active {
+  background: linear-gradient(135deg, #38A932, #1F7A1B); border-color: transparent; color: #fff; font-weight: 700;
+  box-shadow: 0 3px 12px -3px rgba(46, 150, 41, .5);
+}
+/* 网格：5 列起（豆瓣海报墙密度），窄窗自动降列；卡片入场逐个错开（前 12 张） */
+:root[data-theme='douban'] .db-wall-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 22px 18px; }
+:root[data-theme='douban'] .db-wall-grid > * { animation: dbCardIn var(--dur-page) var(--db-ease-out) both; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(1) { animation-delay: 0ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(2) { animation-delay: 28ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(3) { animation-delay: 56ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(4) { animation-delay: 84ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(5) { animation-delay: 112ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(6) { animation-delay: 140ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(7) { animation-delay: 168ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(8) { animation-delay: 196ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(9) { animation-delay: 224ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(10) { animation-delay: 252ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(11) { animation-delay: 280ms; }
+:root[data-theme='douban'] .db-wall-grid > :nth-child(n+12) { animation-delay: 300ms; }
+@keyframes dbCardIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+/* 悬停播放钮（海报中央浮出的白圆 + 豆绿三角，豆瓣海报墙的「可播放」提示） */
+:root[data-theme='douban'] .db-card-play {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -46%) scale(.86);
+  width: 44px; height: 44px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, .94); color: var(--accent);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .6);
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--db-dur-m) var(--db-ease), transform var(--db-dur-m) var(--ease-spring);
+}
+:root[data-theme='douban'] .card-media:hover .db-card-play { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+/* 海报图片悬停缓推（0.6s 慢镜，比瞬间放大更「贵」） */
+:root[data-theme='douban'] .db-wall-grid .card-media img { transition: transform .6s var(--db-ease); }
+:root[data-theme='douban'] .db-wall-grid .card-media:hover img { transform: scale(1.05); }
+:root[data-theme='douban'] .db-year-badge { letter-spacing: .02em; }
+
+/* ---- ④ 豆瓣式「标签行」（左小标签 + 右胶囊 chips）：发现页分类/类型、点播页分类/筛选 ---- */
+:root[data-theme='douban'] .db-filters {
+  background: #fff; border: 1px solid var(--border-soft); border-radius: 18px;
+  box-shadow: var(--db-card-shadow); padding: 6px 14px; margin-bottom: 16px;
+}
+:root[data-theme='douban'] .db-filter-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0;
+}
+:root[data-theme='douban'] .db-filter-row + .db-filter-row { border-top: 1px solid var(--border-soft); }
+:root[data-theme='douban'] .db-filter-label {
+  font-size: 12px; font-weight: 750; color: var(--text-dim); letter-spacing: .02em; flex: 0 0 auto;
+}
+:root[data-theme='douban'] .db-filters .db-filter-row { padding: 8px 0; }
+:root[data-theme='douban'] .db-filters .db-filter-label { width: 48px; }
+
+/* ---- ⑤ 详情页：品牌渐变头图（大海报 172px + 信息区），下面各节都是白卡 M3 ---- */
+:root[data-theme='douban'] .db-hero {
+  display: flex; gap: 18px; align-items: flex-start;
+  background: linear-gradient(135deg, #E1F4DC 0%, #F1F9EE 42%, #FFF3EA 100%);
+  border: 1px solid rgba(46, 150, 41, .14); border-radius: 24px;
+  box-shadow: var(--db-card-shadow); padding: 20px; margin-bottom: 20px;
+  animation: dbHeroIn var(--db-dur-l) var(--db-ease-out) both;
+}
+@keyframes dbHeroIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+:root[data-theme='douban'] .db-hero-poster {
+  flex: 0 0 172px; width: 172px; border-radius: 16px; object-fit: cover;
+  border: 2px solid rgba(255, 255, 255, .9);
+  box-shadow: 0 10px 28px -10px rgba(20, 28, 18, .38);
+}
+:root[data-theme='douban'] .db-hero-nocover { display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 12px; background: #fff; }
+:root[data-theme='douban'] .db-hero-info { display: flex; flex-direction: column; gap: 3px; }
+:root[data-theme='douban'] .db-hero-title { margin: 2px 0 6px; font-size: 27px; font-weight: 850; letter-spacing: -.02em; }
+:root[data-theme='douban'] .db-hero-intro { max-height: 168px; line-height: 1.8; padding-right: 6px; }
+:root[data-theme='douban'] .db-remark-pill {
+  display: inline-flex; align-items: center; align-self: flex-start;
+  background: linear-gradient(135deg, #38A932, #1F7A1B); color: #fff;
+  border-radius: 999px; padding: 3px 11px; font-size: 12px; font-weight: 700;
+  box-shadow: 0 2px 8px -2px rgba(46, 150, 41, .45);
+}
+:root[data-theme='douban'] .db-sec-title {
+  position: relative; padding-left: 13px; font-size: 17px; font-weight: 800; letter-spacing: -.01em;
+}
+:root[data-theme='douban'] .db-sec-title::before {
+  content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  width: 4px; height: 16px; border-radius: 999px;
+  background: linear-gradient(180deg, #38A932, #F0641E);
+}
+:root[data-theme='douban'] .db-detail .ep-list { grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; }
+:root[data-theme='douban'] .db-detail .ep { text-align: center; }
+:root[data-theme='douban'] .db-detail .rec-row { gap: 16px; }
+:root[data-theme='douban'] .db-detail h2 { font-size: 22px; }
+
+/* ---- ⑥ 通用运动打磨：卡片悬停、chips 状态切换都走 M3 曲线 ---- */
+:root[data-theme='douban'] .tag { transition: background var(--db-dur-m) var(--db-ease), color var(--db-dur-m) var(--db-ease), border-color var(--db-dur-m) var(--db-ease), box-shadow var(--db-dur-m) var(--db-ease), transform var(--db-dur-m) var(--ease-spring); }
+:root[data-theme='douban'] button { transition: background var(--db-dur-m) var(--db-ease), border-color var(--db-dur-m) var(--db-ease), color var(--db-dur-m) var(--db-ease), box-shadow var(--db-dur-m) var(--db-ease), transform var(--dur-quick) var(--db-ease); }
+:root[data-theme='douban'] .ep { transition: background var(--db-dur-m) var(--db-ease), color var(--db-dur-m) var(--db-ease), border-color var(--db-dur-m) var(--db-ease), box-shadow var(--db-dur-m) var(--db-ease); }
+:root[data-theme='douban'] .list-item { transition: box-shadow var(--db-dur-m) var(--db-ease), border-color var(--db-dur-m) var(--db-ease), transform var(--db-dur-m) var(--ease-spring); }
+:root[data-theme='douban'] .list-item:hover { transform: translateY(-1px); }
+
+/* ---- ⑦ 细节修正（2026-10-09 真机截图复验发现）---- */
+/* 配置页二级 tab（内联样式驱动，跨皮肤共用）：大豆里改成 M3 tonal 片 —— 选中浅绿底 + 豆绿字
+   （内联样式优先级高于类选择器，必须 !important 压过；.cfg-tab 类名由 ConfigPage 提供） */
+:root[data-theme='douban'] .cfg-tab {
+  background: transparent !important; border: none !important; border-radius: 10px !important;
+  color: var(--text-dim) !important; font-weight: 500 !important;
+}
+:root[data-theme='douban'] .cfg-tab:hover { background: rgba(26, 32, 25, .06) !important; color: var(--text) !important; box-shadow: none !important; }
+:root[data-theme='douban'] .cfg-tab.active { background: var(--accent-container) !important; color: var(--accent-strong) !important; font-weight: 750 !important; }
+:root[data-theme='douban'] .cfg-tab.active:hover { background: #D2EDCE !important; color: var(--accent-strong) !important; box-shadow: none !important; }
+/* 详情页剧集翻页行（「上一页/下一页」靠右）避开右下角浮动圆钮，防「下一页」被盖住点不到 */
+:root[data-theme='douban'] .db-detail .ep-pager { padding-right: 64px; }

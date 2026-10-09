@@ -329,8 +329,8 @@
   border: 1px solid var(--ap-hairline); border-radius: 16px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 8px 24px rgba(0, 0, 0, .06);
 }
-:root[data-theme='apple'] .card-media .card { border-radius: 14px; overflow: hidden; transition: box-shadow .22s ease, transform .22s ease; }
-:root[data-theme='apple'] .card-media { transition: transform .22s cubic-bezier(.32, .94, .6, 1); }
+:root[data-theme='apple'] .card-media .card { border-radius: 14px; overflow: hidden; transition: box-shadow var(--dur-state) var(--ease-standard), transform var(--dur-state) var(--ease-spring); }
+:root[data-theme='apple'] .card-media { transition: transform var(--dur-state) var(--ease-spring); }
 :root[data-theme='apple'] .card-media:hover { transform: translateY(-4px); }
 :root[data-theme='apple'] .card-media:hover .card {
   transform: none; border-color: rgba(60, 60, 67, .08);

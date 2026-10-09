@@ -13,6 +13,13 @@ import {
   readPizazzCookie,
   removePizazzCookieFile,
   syncPizazzCookieFiles,
+  WEX_COOKIE_FILES,
+  spiderSandboxDir,
+  wexCookieDir,
+  wexCookiePath,
+  writeWexCookieFile,
+  removeWexCookieFile,
+  syncWexCookieFiles,
 } from '../src/main/spider/driveCookieFiles';
 
 let root = '';
@@ -69,5 +76,47 @@ describe('driveCookieFiles — Pizazz 系 cookie 文件同步', () => {
     writePizazzCookieFile('baidu', 'B1', root);
     writeFileSync(path, 'not-json', 'utf-8');
     expect(readPizazzCookie('baidu', root)).toBe('');
+  });
+});
+
+describe('driveCookieFiles — wex 系（玩偶/花卷/木偶）cookie 文件同步（2026-10-09）', () => {
+  it('目录与路径：<沙箱>/files/TV/.quarkcookie（反编译 Quark.checkquarkcookie 实证）', () => {
+    const sandbox = spiderSandboxDir(root);
+    expect(sandbox).toBe(join(root, 'sandbox'));
+    expect(wexCookieDir(sandbox)).toBe(join(root, 'sandbox', 'files', 'TV'));
+    expect(wexCookiePath('quark', sandbox)).toBe(join(root, 'sandbox', 'files', 'TV', '.quarkcookie'));
+    expect(wexCookiePath('uc', sandbox)).toBe(join(root, 'sandbox', 'files', 'TV', '.ucpancookie'));
+    expect(wexCookiePath('baidu', sandbox)).toBe(''); // 该族无映射（百度无 checkXXXcookie）
+    expect(Object.keys(WEX_COOKIE_FILES)).toEqual(['quark', 'uc']);
+  });
+
+  it('沙箱口径与 JarSpiderBridge 的 converted/../sandbox 等价（勿分别手拼）', () => {
+    expect(spiderSandboxDir(root)).toBe(join(root, 'sandbox'));
+    expect(join(root, 'converted', '..', 'sandbox')).toBe(join(root, 'sandbox')); // path 归一后同值
+  });
+
+  it('写入内容为**裸 cookie 串**（jar 侧直接 trim 使用，非 JSON）', () => {
+    const ck = '__puus=PUUS1; __pus=PUS1; ck_id=abc';
+    const path = writeWexCookieFile('quark', `  ${ck}  `, spiderSandboxDir(root));
+    expect(path).toBe(wexCookiePath('quark', spiderSandboxDir(root)));
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path, 'utf-8')).toBe(ck);
+    expect(() => JSON.parse(readFileSync(path, 'utf-8'))).toThrow(); // 裸串不是 JSON
+  });
+
+  it('空值与无映射 provider 不落盘；大小写不敏感', () => {
+    const sandbox = spiderSandboxDir(root);
+    expect(writeWexCookieFile('quark', '   ', sandbox)).toBe('');
+    expect(writeWexCookieFile('baidu', 'X', sandbox)).toBe('');
+    expect(writeWexCookieFile('Quark', 'Q1', sandbox)).toBe(wexCookiePath('quark', sandbox));
+  });
+
+  it('全量同步与解绑删除（删除后 jar 读到空 = 未配置）', () => {
+    const sandbox = spiderSandboxDir(root);
+    const written = syncWexCookieFiles({ quark: 'Q1', uc: 'U1', baidu: 'B1' }, sandbox);
+    expect(written.map((p) => p.split(/[\\/]/).pop()).sort()).toEqual(['.quarkcookie', '.ucpancookie']);
+    removeWexCookieFile('quark', sandbox);
+    expect(existsSync(wexCookiePath('quark', sandbox))).toBe(false);
+    removeWexCookieFile('quark', sandbox); // 再删不抛（force）
   });
 });

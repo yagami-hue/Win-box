@@ -69,7 +69,7 @@
 :root[data-theme='bilibili'] .content { padding: 14px 22px 26px; }
 :root[data-theme='bilibili'] .card {
   background: #fff; border: 1px solid transparent; border-radius: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, .05);
-  transition: border-color .2s ease-in-out, background .2s ease-in-out, box-shadow .2s ease-in-out, transform .2s ease-in-out;
+  transition: border-color var(--dur-state) var(--ease-standard), background var(--dur-state) var(--ease-standard), box-shadow var(--dur-state) var(--ease-standard), transform var(--dur-state) var(--ease-spring);
 }
 :root[data-theme='bilibili'] .card-media .card { border: 1px solid var(--b-line); }
 :root[data-theme='bilibili'] .card-media:hover .card {
@@ -118,7 +118,7 @@
 :root[data-theme='bilibili'] .vp-big {
   width: 68px; height: 68px; border-radius: 50%;
   background: rgba(0, 174, 236, .18); border: 2px solid rgba(255, 255, 255, .9); color: #fff;
-  transition: transform .2s ease-in-out, background .2s ease-in-out;
+  transition: transform var(--dur-state) var(--ease-spring), background var(--dur-state) var(--ease-standard);
 }
 /* ★ hover 必须保留 translate(-50%,-50%)（同 netflix 主题：缺了会跳走半个身位） */
 :root[data-theme='bilibili'] .vp-big:hover { transform: translate(-50%, -50%) scale(1.06); background: var(--b-blue); border-color: transparent; }

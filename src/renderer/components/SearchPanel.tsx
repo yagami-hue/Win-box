@@ -21,7 +21,11 @@ const DEBOUNCE_MS = 250;
 /** 热搜榜展示条数（右侧排名列） */
 const HOT_RANK_MAX = 10;
 
-export default function SearchPanel() {
+/**
+ * ★ 2026-10-08（用户要求「豆风要大改布局」）：`bar` 变体 —— 豆风皮肤顶栏把搜索做成
+ *   **M3 搜索条**（宽胶囊 + 占位文案），其余皮肤保持原来的「🔍 搜索」小胶囊（零影响）。
+ */
+export default function SearchPanel({ bar = false }: { bar?: boolean }) {
   const nav = useNavigate();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -137,15 +141,15 @@ export default function SearchPanel() {
   };
 
   return (
-    <div className="srcpick" ref={wrapRef}>
+    <div className={`srcpick${bar ? ' sp-bar-wrap' : ''}`} ref={wrapRef}>
       <div
-        className="srcpick-name sp-btn"
+        className={`srcpick-name sp-btn${bar ? ' sp-bar' : ''}`}
         role="button"
         tabIndex={0}
         title="搜索（全源搜索，结果边搜边出）"
         onClick={() => setOpen((v) => !v)}
       >
-        🔍 搜索
+        🔍 {bar ? <span className="sp-bar-hint">搜索影片、剧集、演员…</span> : '搜索'}
       </div>
       {open && (
         <div className="sp-panel" role="dialog">

@@ -13,8 +13,9 @@ import type { DiscoverItem, DiscoverSection, DiscoverGenre } from '../../shared/
 
 /** 影片卡（推荐区与分类区共用）：点击 → 全源搜索该片名；onHover 用于让 Hero 跟随鼠标（Netflix / Apple 皮肤）
    *  playBadge ★ 2026-09-29：仅 Apple 皮肤渲染的「悬停播放徽标」—— 只在 Apple 下渲染元素，
-   *  其余皮肤零痕迹（不依赖别处补 `display:none`）。 */
-function ItemCard({ it, onOpen, onHover, playBadge }: { it: DiscoverItem; onOpen: () => void; onHover?: () => void; playBadge?: boolean }) {
+   *  其余皮肤零痕迹（不依赖别处补 `display:none`）。
+   *  dbPlay/dbYear ★ 2026-10-08（豆风）：海报墙卡 —— 悬停浮出圆形播放钮 + 左下角年份角标（豆瓣海报墙观感）。 */
+function ItemCard({ it, onOpen, onHover, playBadge, dbPlay, dbYear }: { it: DiscoverItem; onOpen: () => void; onHover?: () => void; playBadge?: boolean; dbPlay?: boolean; dbYear?: boolean }) {
   return (
     <div
       className="card-media"
@@ -31,10 +32,16 @@ function ItemCard({ it, onOpen, onHover, playBadge }: { it: DiscoverItem; onOpen
               <svg width="13" height="13" viewBox="0 0 16 16"><path d="M4.9 2.9v10.2l8-5.1-8-5.1Z" fill="currentColor" /></svg>
             </span>
           )}
+          {dbPlay && (
+            <span className="db-card-play" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 16 16"><path d="M5.1 3.1v9.8l7.6-4.9-7.6-4.9Z" fill="currentColor" /></svg>
+            </span>
+          )}
+          {dbYear && it.year ? <span className="badge db-year-badge">{it.year}</span> : null}
         </div>
         <div className="meta">
           <div className="name" title={it.title}>{it.title}</div>
-          {it.year ? <div className="remarks">{it.year}</div> : null}
+          {it.year && !dbYear ? <div className="remarks">{it.year}</div> : null}
         </div>
       </div>
     </div>
@@ -48,6 +55,8 @@ export default function DiscoverPage() {
    *    但版式与配色走 apple.css（圆角剧照卡 + 页码圆点 + 内容栏），与 Netflix 满屏影院风区分。 */
   const nf = useTheme() === 'netflix';
   const ap = useTheme() === 'apple';
+  // ★ 2026-10-08（豆风）：海报墙皮肤 —— 不做 Hero，走「分类 pill + 海报网格」
+  const db = useTheme() === 'douban';
   const heroSkin = nf || ap;
   const [sections, setSections] = useState<DiscoverSection[] | null>(null);
   const [err, setErr] = useState('');
@@ -64,6 +73,8 @@ export default function DiscoverPage() {
   const [gItems, setGItems] = useState<DiscoverItem[]>([]);
   const [gTotal, setGTotal] = useState(1);
   const [gLoading, setGLoading] = useState(false);
+  /** ★ 2026-10-08（豆风）：海报墙当前分区（顶部 pill 切换 —— 替代「一行行横滑」的堆叠布局） */
+  const [wallSec, setWallSec] = useState(0);
 
   const goSearch = (title: string): void => { nav(`/search?agg=${encodeURIComponent(title)}`); };
 
@@ -217,7 +228,27 @@ export default function DiscoverPage() {
           </div>
         )}
         {/* ---- 分类条（父分类：电影/剧集；子分类：类型标签 —— 父分类未点击前不展示子分类）---- */}
-        {hasGenres && (
+        {/* ★ 2026-10-08（豆风）：改成豆瓣式「标签行」（左侧小标签 + 右侧胶囊 chips），与顶栏胶囊导航同一套观感 */}
+        {hasGenres && db && (
+          <div className="db-filters">
+            <div className="db-filter-row">
+              <span className="db-filter-label">分类</span>
+              <span className={`tag ${media === 'movie' ? 'active' : ''}`} onClick={() => switchMedia('movie')}>电影</span>
+              <span className={`tag ${media === 'tv' ? 'active' : ''}`} onClick={() => switchMedia('tv')}>剧集</span>
+            </div>
+            {media !== null && genreList.length > 0 && (
+              <div className="db-filter-row">
+                <span className="db-filter-label">类型</span>
+                {genreList.map((g) => (
+                  <span key={g.id} className={`tag ${gSel?.id === g.id ? 'active' : ''}`} onClick={() => loadGenre(g, 1)}>
+                    {g.name}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {hasGenres && !db && (
           <div className="row" style={{ marginBottom: 14 }}>
             <span className="muted">分类：</span>
             <span className={`tag ${media === 'movie' ? 'active' : ''}`} onClick={() => switchMedia('movie')}>电影</span>
@@ -240,14 +271,14 @@ export default function DiscoverPage() {
               <button style={{ flex: '0 0 auto' }} onClick={backToRecommend}>返回推荐</button>
             </div>
             {gLoading && gItems.length === 0 ? (
-              <div className="empty">加载中…</div>
+              <div className="empty"><span className="spinner" aria-hidden="true" />加载中…</div>
             ) : gItems.length === 0 ? (
               <div className="empty">该分类暂无数据</div>
             ) : (
               <>
                 <div className="grid">
                   {gItems.map((it, i) => (
-                    <ItemCard key={`${it.title}-${i}`} it={it} onOpen={() => goSearch(it.title)} />
+                    <ItemCard key={`${it.title}-${i}`} it={it} onOpen={() => goSearch(it.title)} dbPlay={db} dbYear={db} />
                   ))}
                 </div>
                 {gTotal > 1 && (
@@ -261,7 +292,7 @@ export default function DiscoverPage() {
             )}
           </>
         ) : loading && !sections ? (
-          <div className="empty">加载中…</div>
+          <div className="empty"><span className="spinner" aria-hidden="true" />加载中…</div>
         ) : err && (!sections || sections.length === 0) ? (
           <div className="err">
             {err}
@@ -276,30 +307,54 @@ export default function DiscoverPage() {
             </button>
           </div>
         ) : (
-          (sections || []).map((s) => (
-            <div key={s.id} className={nf ? 'nf-row' : ap ? 'ap-row' : undefined} style={nf || ap ? undefined : { marginBottom: 22 }}>
-              <h3 className={nf ? 'nf-row-title' : ap ? 'ap-row-title' : undefined} style={nf || ap ? undefined : { margin: '0 0 10px' }}>{s.title}</h3>
-              {/* 横向滚动条：滚轮在行内 → 横向滚动（见 HScrollRow）；行外空白 → 页面上下滚动 */}
-              <HScrollRow
-                className={nf ? 'nf-row-scroll' : ap ? 'ap-row-scroll' : undefined}
-                style={nf || ap ? undefined : { display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 6 }}
-              >
-                {s.items.map((it, i) => (
-                  // ★ 2026-09-29：minWidth:0 —— 超长片名（.name 为 nowrap）会经 flex 项 min-width:auto
-                  //   把固定宽度的项撑宽，封面随 2:3 一起变高，整行被拉高留白（Netflix 同因同修，见 netflix.css）。
-                  <div key={`${it.title}-${i}`} style={nf ? undefined : { flex: ap ? '0 0 168px' : '0 0 132px', minWidth: 0 }}>
-                    <ItemCard
-                      it={it}
-                      playBadge={ap}
-                      onOpen={() => goSearch(it.title)}
-                      // Netflix / Apple 皮肤：鼠标移到卡片 → Hero 立刻换成这一部（离开后恢复自动轮播）
-                      onHover={heroSkin ? () => { hoveringRef.current = true; setHeroItem(it); } : undefined}
-                    />
-                  </div>
+          /* ★ 2026-10-08（豆风）：**海报墙** —— 分区 pill（豆瓣「热门电影/热播剧集」那排）切换，
+             下面一屏海报网格（悬停浮出播放钮 + 左下角年份角标）；不再是一行行横向滚动。 */
+          db ? (
+            <div className="db-wall">
+              <div className="db-wall-chips" key={`chips-${sections?.length || 0}`}>
+                {(sections || []).map((s, i) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className={'db-wall-chip' + (i === wallSec ? ' active' : '')}
+                    onClick={() => setWallSec(i)}
+                  >
+                    {s.title}
+                  </button>
                 ))}
-              </HScrollRow>
+              </div>
+              <div className="grid db-wall-grid" key={`wall-${wallSec}`}>
+                {((sections || [])[Math.min(wallSec, Math.max(0, (sections || []).length - 1))]?.items || []).map((it, i) => (
+                  <ItemCard key={`${it.title}-${i}`} it={it} onOpen={() => goSearch(it.title)} dbPlay dbYear />
+                ))}
+              </div>
             </div>
-          ))
+          ) : (
+            (sections || []).map((s) => (
+              <div key={s.id} className={nf ? 'nf-row' : ap ? 'ap-row' : undefined} style={nf || ap ? undefined : { marginBottom: 22 }}>
+                <h3 className={nf ? 'nf-row-title' : ap ? 'ap-row-title' : undefined} style={nf || ap ? undefined : { margin: '0 0 10px' }}>{s.title}</h3>
+                {/* 横向滚动条：滚轮在行内 → 横向滚动（见 HScrollRow）；行外空白 → 页面上下滚动 */}
+                <HScrollRow
+                  className={nf ? 'nf-row-scroll' : ap ? 'ap-row-scroll' : undefined}
+                  style={nf || ap ? undefined : { display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 6 }}
+                >
+                  {s.items.map((it, i) => (
+                    // ★ 2026-09-29：minWidth:0 —— 超长片名（.name 为 nowrap）会经 flex 项 min-width:auto
+                    //   把固定宽度的项撑宽，封面随 2:3 一起变高，整行被拉高留白（Netflix 同因同修，见 netflix.css）。
+                    <div key={`${it.title}-${i}`} style={nf ? undefined : { flex: ap ? '0 0 168px' : '0 0 132px', minWidth: 0 }}>
+                      <ItemCard
+                        it={it}
+                        playBadge={ap}
+                        onOpen={() => goSearch(it.title)}
+                        // Netflix / Apple 皮肤：鼠标移到卡片 → Hero 立刻换成这一部（离开后恢复自动轮播）
+                        onHover={heroSkin ? () => { hoveringRef.current = true; setHeroItem(it); } : undefined}
+                      />
+                    </div>
+                  ))}
+                </HScrollRow>
+              </div>
+            ))
+          )
         )}
       </div>
     </>

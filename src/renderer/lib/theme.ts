@@ -1,7 +1,7 @@
 // src/renderer/lib/theme.ts
-// 主题：三套 —— `netflix`（网飝，**默认**）/ `bilibili`（哔哔）/ `apple`（大果）。
-// 选择持久化到 localStorage，并同步到 `<html data-theme>`，驱动 global.css + netflix.css/bilibili.css/apple.css 的 CSS 变量。
-// 同时通过 IPC 通知主进程设置 nativeTheme.themeSource（netflix/bilibili 按深色、apple 按亮色处理），让窗口底色对齐。
+// 主题：四套 —— `netflix`（网飝，**默认**）/ `bilibili`（哔哔）/ `apple`（大果）/ `douban`（豆风）。
+// 选择持久化到 localStorage，并同步到 `<html data-theme>`，驱动 global.css + netflix.css/bilibili.css/apple.css/douban.css 的 CSS 变量。
+// 同时通过 IPC 通知主进程设置 nativeTheme.themeSource（netflix/bilibili 按深色、apple/douban 按亮色处理），让窗口底色对齐。
 import { useEffect, useState } from 'react';
 import { client } from '../api/client';
 import { DEFAULT_THEME, normalizeTheme, type Theme } from './themeTokens';
@@ -30,8 +30,8 @@ export function applyTheme(t: Theme) {
   } catch {
     /* ignore */
   }
-  // 主进程只需知道亮/暗（网飝/哔哔是深色皮肤、大果是亮色皮肤），失败静默
-  void client.setTheme(theme === 'apple' ? 'light' : 'dark').catch(() => undefined);
+  // 主进程只需知道亮/暗（网飝/哔哔是深色皮肤、大果/豆风是亮色皮肤），失败静默
+  void client.setTheme(theme === 'apple' || theme === 'douban' ? 'light' : 'dark').catch(() => undefined);
   try {
     window.dispatchEvent(new Event(THEME_EVENT));
   } catch {

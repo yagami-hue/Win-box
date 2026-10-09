@@ -8,7 +8,7 @@
 //   两者都让 hls.js 抛 keyLoadError 致命错误 → 直接「播放失败」。
 //   修复：带 URI 属性的标签（KEY/MAP/MEDIA/I-FRAME-STREAM-INF/PART…）与分片一律走 /play 中继。
 import { describe, it, expect } from 'vitest';
-import { rewriteM3u8, rewriteUriAttrs } from '../src/main/server/LocalProxyServer';
+import { rewriteM3u8, rewriteUriAttrs, jpegPreludeLen, isTsAligned } from '../src/main/server/LocalProxyServer';
 
 const BASE = 'https://cdn.example.com/hls/index.m3u8';
 const UA = 'Mozilla/5.0 UA';
@@ -90,5 +90,55 @@ describe('rewriteM3u8 — 加密流密钥地址（KeyLoadError 修复）', () =>
   it('无法解析的 URI（非法/空）不破坏原行', () => {
     const line = '#EXT-X-KEY:METHOD=AES-128,URI=""';
     expect(rewriteUriAttrs(line, BASE, UA, REF, CK)).toBe(line);
+  });
+});
+
+// ★ 2026-10-08（用户报「橘汁4K · jd4k 点开就提示已播放完毕」）：jpg 伪装分片识别（[JPEG 缩略图][真 TS]）。
+describe('jpegPreludeLen / isTsAligned — jpg 伪装分片（jd4k）识别', () => {
+  /** 造一段 TS 载荷：每个 188 包首字节 0x47，其余填 0xAA */
+  const tsPayload = (packets: number): Buffer => {
+    const b = Buffer.alloc(188 * packets, 0xaa);
+    for (let i = 0; i < packets; i++) b[i * 188] = 0x47;
+    return b;
+  };
+  /** 造一个最小 JPEG（SOI + APP0 + 垃圾 + EOI） */
+  const jpeg = (bodyLen: number): Buffer => Buffer.concat([
+    Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]),
+    Buffer.alloc(bodyLen, 0x33),
+    Buffer.from([0xff, 0xd9]),
+  ]);
+
+  it('JPEG(EOI) 之后是 188 对齐 TS → 返回前导长度（含 EOI）', () => {
+    const j = jpeg(9759); // 仿实测 9875 之前的缩略图体量
+    const buf = Buffer.concat([j, tsPayload(6)]);
+    const pre = jpegPreludeLen(buf);
+    expect(pre).toBe(j.length);
+    expect(buf[pre]).toBe(0x47);
+  });
+
+  it('纯 JPEG（尾随不是 TS）→ 0（普通图片响应不改写）', () => {
+    expect(jpegPreludeLen(Buffer.concat([jpeg(500), Buffer.alloc(2000, 0x00)]))).toBe(0);
+  });
+
+  it('纯 TS（0x47 开头）→ 0', () => {
+    expect(jpegPreludeLen(tsPayload(4))).toBe(0);
+  });
+
+  it('随机字节 / 过短 / 空 → 0', () => {
+    expect(jpegPreludeLen(Buffer.alloc(0))).toBe(0);
+    expect(jpegPreludeLen(Buffer.from([0xff, 0xd8]))).toBe(0);
+    expect(jpegPreludeLen(Buffer.from('not-a-jpeg-at-all....'))).toBe(0);
+  });
+
+  it('JPEG 后 TS 对齐前导不足 4 个同步头（EWOI 贴近缓冲尾部）→ 0（避免尾部样本不足误判）', () => {
+    const buf = Buffer.concat([jpeg(100), tsPayload(2)]); // 只有 2 个包，容不下 4 个同步头
+    expect(jpegPreludeLen(buf)).toBe(0);
+  });
+
+  it('isTsAligned：对齐/错位/越界', () => {
+    const buf = Buffer.concat([Buffer.alloc(3, 0x11), tsPayload(5)]);
+    expect(isTsAligned(buf, 3)).toBe(true);
+    expect(isTsAligned(buf, 4)).toBe(false);
+    expect(isTsAligned(buf, buf.length)).toBe(false);
   });
 });

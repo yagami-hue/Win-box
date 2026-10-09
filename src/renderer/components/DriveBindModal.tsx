@@ -91,6 +91,7 @@ export default function DriveBindModal({ siteName, initialProvider, reason, onCl
 
   return (
     <div
+      className="modal-scrim"
       style={{
         position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,.55)', backdropFilter: 'blur(3px)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -98,7 +99,7 @@ export default function DriveBindModal({ siteName, initialProvider, reason, onCl
       onClick={onClose}
     >
       <div
-        className="card"
+        className="card modal-in"
         style={{ width: 520, maxWidth: '92vw', padding: 18, background: 'var(--bg)', boxShadow: '0 18px 60px rgba(0,0,0,.5)' }}
         onClick={(e) => e.stopPropagation()}
       >

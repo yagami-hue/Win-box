@@ -88,7 +88,7 @@
    修：导航层提到 40（与 Apple 皮肤工具栏同值，同一先例），整棵子树（含搜索面板）稳定压在页面
    顶栏之上；页面内的弹层（.srcpick-pop 等）自身被顶栏 30 的层包住，不会反向盖住导航。 */
 .nf-logo { color: var(--nf-red); font-weight: 900; font-size: 21px; letter-spacing: 2.5px; flex: 0 0 auto; }
-.nf-link { color: #e5e5e5; font-size: 14px; font-weight: 500; padding: 2px 0; transition: color .15s; }
+.nf-link { color: #e5e5e5; font-size: 14px; font-weight: 500; padding: 2px 0; transition: color var(--dur-quick) var(--ease-standard); }
 .nf-link:hover { color: #fff; }
 .nf-link.active { color: #fff; font-weight: 700; }
 .nf-nav .nf-spacer { flex: 1; }
@@ -133,7 +133,7 @@
   background: none; border: none; box-shadow: none; border-radius: 6px; overflow: hidden;
 }
 :root[data-theme='netflix'] .card-media .card { border: none; }
-:root[data-theme='netflix'] .card-media { transition: transform .25s cubic-bezier(.32, .94, .6, 1), z-index 0s; }
+:root[data-theme='netflix'] .card-media { transition: transform var(--dur-state) var(--ease-spring), z-index 0s; }
 :root[data-theme='netflix'] .card-media:hover {
   transform: scale(1.06); z-index: 5;
 }

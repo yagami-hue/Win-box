@@ -37,6 +37,9 @@ export default function DetailPage({
    *  ★ 2026-09-29：Apple 皮肤用同源剧照背景，但排版走 Apple TV 影片页观感（玻璃信息卡 + 蓝色胶囊播放键） */
   const nf = useTheme() === 'netflix';
   const ap = useTheme() === 'apple';
+  /** ★ 2026-10-08（豆风）：豆瓣式影片页 —— 左侧大海报 + 右侧信息区（简介/演职员/操作），
+   *   下方「播放源 / 选集 / 类型 / 演员 / 相关推荐」都走浅色 M3 卡片（见 douban.css 的 .db-detail 组）。 */
+  const db = useTheme() === 'douban';
   // 从列表页经 URL query 携带的封面（fty 等源 detail 接口偶发不返回 vod_pic，用作兜底）
   const fromListPic = searchParams.get('pic') || '';
   /** ★ 2026-09-24：列表页带过来的片名 —— 「立播」等源详情接口不返回 vod_name，用它兜底 */
@@ -389,17 +392,16 @@ export default function DetailPage({
           onSaved={() => { setBindProvider(''); void play(); }}
         />
       )}
-      <div className="topbar">
-        {/* ★ 2026-10-08（用户要求「详情页独立窗口」）：独立窗口里「返回」= 关闭该窗口（无侧栏可回）；
-            主窗口内仍是「返回列表」（既有行为）。 */}
-        <BackButton
-          fallback="/home"
-          label={isDetailWin ? '关闭' : '返回列表'}
-          onClick={isDetailWin ? () => void client.winClose() : undefined}
-        />
-        <span className="muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
-      </div>
-      <div className={`content${nf ? ' nf-detail-wrap' : ap ? ' ap-detail-wrap' : ''}`} ref={contentRef}>
+      {/* ★ 2026-10-08（用户要求「独立详情页这个横条取消掉，上方已经有小按钮可以独立关闭了」）：
+          独立详情窗口**整条不渲染**（关闭走窗口标题栏的 ✕；键盘 Alt+←/Backspace 亦可，
+          见 App.goBack 的 dw 分支；片名正文里已有 h2 标题）。主窗口内保持原样。 */}
+      {!isDetailWin && (
+        <div className="topbar">
+          <BackButton fallback="/home" label="返回列表" />
+          <span className="muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
+        </div>
+      )}
+      <div className={`content${nf ? ' nf-detail-wrap' : ap ? ' ap-detail-wrap' : db ? ' db-detail' : ''}`} ref={contentRef}>
         {/* Netflix / Apple 皮肤：**横版剧照轮播**当全宽背景（同首页 Hero，交叉淡入淡出），内容压在上面 */}
         {(nf || ap) && backdropUrls.length > 0 && (
           <div className={nf ? 'nf-detail-backdrop' : 'ap-detail-backdrop'}>
@@ -407,31 +409,45 @@ export default function DetailPage({
           </div>
         )}
         {loading ? (
-          <div className="empty">加载中…</div>
+          <div className="empty"><span className="spinner" aria-hidden="true" />加载中…</div>
         ) : err ? (
           <div className="err">{err}</div>
         ) : !detail ? (
           <div className="empty">无详情</div>
         ) : (
           <>
-            <div className="row" style={{ alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
+            {/* ★ 2026-10-08（豆风）：头图区 —— 大海报卡 + 信息区（豆瓣影片页布局；不再是「小图 + 右列文字」） */}
+            <div className={db ? 'db-hero' : 'row'} style={db ? undefined : { alignItems: 'flex-start', gap: 16, marginBottom: 16 }}>
               {/** 封面（★ 搜索补图为准）：搜索命中图 > 源图（占位/兜底）；源图坏 → 中继重试 */}
               {cover ? (
-                <img src={cover} style={{ width: 120, aspectRatio: '2/3', objectFit: 'cover', borderRadius: 8, background: 'var(--bg-elev2)' }} onError={coverErr} />
+                <img
+                  src={cover}
+                  className={db ? 'db-hero-poster' : undefined}
+                  style={db ? undefined : { width: 120, aspectRatio: '2/3', objectFit: 'cover', borderRadius: 8, background: 'var(--bg-elev2)' }}
+                  onError={coverErr}
+                />
               ) : (
-                <div style={{
-                  width: 120, aspectRatio: '2/3', borderRadius: 8, background: 'var(--bg-elev2)', flex: 'none',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 11,
-                }}>暂无封面</div>
+                <div
+                  className={db ? 'db-hero-poster db-hero-nocover' : undefined}
+                  style={{
+                    width: db ? undefined : 120, aspectRatio: '2/3', borderRadius: db ? undefined : 8, background: 'var(--bg-elev2)', flex: 'none',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 11,
+                  }}
+                >暂无封面</div>
               )}
-              <div style={{ flex: 1 }}>
-                <h2 style={{ margin: '0 0 8px' }}>{displayName}</h2>
+              <div style={{ flex: 1, minWidth: 0 }} className={db ? 'db-hero-info' : undefined}>
+                <h2 className={db ? 'db-hero-title' : undefined} style={db ? undefined : { margin: '0 0 8px' }}>{displayName}</h2>
                 <div className="muted" style={{ marginBottom: 4 }}>{detail.type} · {detail.year} · {detail.area}</div>
                 {/* ★ 2026-09-24：源数据缺导演/演员时，用 TMDb 演职员补齐（不再标注「来自 TMDb」—— 属冗余说明） */}
                 {directorText && <div className="muted" style={{ marginBottom: 4 }}>导演：{directorText}</div>}
                 {actorText && <div className="muted" style={{ marginBottom: 4 }}>主演：{actorText}</div>}
-                {detail.remarks && <div style={{ color: 'var(--accent-2)', marginBottom: 4 }}>{detail.remarks}</div>}
-                <div className="muted" style={{ fontSize: 12, maxHeight: 80, overflow: 'auto', marginTop: 8 }}>
+                {detail.remarks && (db
+                  ? <div className="db-remark-pill">{detail.remarks}</div>
+                  : <div style={{ color: 'var(--accent-2)', marginBottom: 4 }}>{detail.remarks}</div>)}
+                <div
+                  className={db ? 'muted db-hero-intro' : 'muted'}
+                  style={db ? { fontSize: 13, overflow: 'auto', marginTop: 8 } : { fontSize: 12, maxHeight: 80, overflow: 'auto', marginTop: 8 }}
+                >
                   {introText}
                 </div>
               </div>
@@ -447,6 +463,7 @@ export default function DetailPage({
                   ))}
                 </div>
                 {/* ★ 2026-09-30（用户要求）：剧集分页 —— 每页至多 EP_PAGE_SIZE 集；翻页按钮只放列表下方、区域右下角 */}
+                {db && <div className="db-sec-title">选集</div>}
                 <div className="ep-list" ref={epListRef}>
                   {epPaged.items.map((e, i) => {
                     const gi = epPaged.start + i; // 全局集下标：选择/高亮/播放都按它，翻页不影响已选集

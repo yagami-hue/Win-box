@@ -4,11 +4,14 @@ import { HashRouter } from 'react-router-dom';
 import App from './App';
 import { initTheme } from './lib/theme';
 import { dropSessionUiMemoryIfRestarted } from './lib/uiMemory';
+import { initMotionPref } from './lib/uiPrefs';
 import { client } from './api/client';
 import './styles/global.css';
 import './styles/netflix.css';
 import './styles/bilibili.css';
 import './styles/apple.css';
+// ★ 2026-10-08（用户要求）：第四套皮肤「豆风」（Material You × 豆瓣，浅色）
+import './styles/douban.css';
 
 /**
  * ★ 2026-09-30（用户要求「软件关闭后，所有的墓碑机制都应该脱钩」）：
@@ -28,6 +31,8 @@ async function bootUiMemory(): Promise<void> {
 
 // 挂载前应用持久化的亮/深色主题，避免首屏白屏/闪错主题
 initTheme();
+// ★ 2026-10-08：挂载前应用「界面动效」偏好（写 <html data-motion>）——首屏就按用户档位渲染动效
+initMotionPref();
 
 void bootUiMemory().finally(() => {
   createRoot(document.getElementById('root')!).render(

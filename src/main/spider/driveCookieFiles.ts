@@ -77,6 +77,81 @@ export function removePizazzCookieFile(provider: string, tmp = tmpdir()): void {
   rmSync(path, { force: true });
 }
 
+// ---------------------------------------------------------------------------
+// ★ 2026-10-09 wex 系（玩偶 / 花卷 / 木偶等，壳通解家族）——第三通道
+//
+// 反编译实证（解密 dex 的 `Quark.checkquarkcookie()` / `Ucpan.checkuccookie()`，dex2jar + javap）：
+//   · 读文件 = `getCache("quarkcookie")` → `new File(<Context.getFilesDir()>/TV, ".quarkcookie")`
+//     （文件名规则：不以 "." 开头的资源名会被加 "." 前缀）；UC = `.ucpancookie`（资源名 ucpancookie）。
+//   · 内容为**裸 cookie 串**（UTF-8 读入后直接 trim 当 Cookie 用，**不是** JSON）——
+//     缺失/为空即报「还没有配置夸克 Cookie，请先去配置中心登录夸克」。
+//   · `Context.getFilesDir()` 落点 = SpiderRunner 的 `-Dtvbox.spiderCacheDir`（桌面桩），
+//     即 `<spider 缓存根>/sandbox/files/TV/`（SpiderRunner.java 里 `Context.setBaseDir(<sandbox>)`）。
+//
+// ★ 缺口回顾：此前桌面只同步了 fty 云盘配置与 Pizazz 的 TVBox/*.txt 两条通道，wex 系
+//   读取的 `.quarkcookie` 从未写过 → 已绑定也报「还没有配置夸克 Cookie」。
+// ---------------------------------------------------------------------------
+
+/** wex 系 cookie 文件名（provider 小写键 → 文件名）；资源名来自 jar 内字符串表（SaZ.d 解密） */
+export const WEX_COOKIE_FILES: Record<string, string> = {
+  quark: '.quarkcookie',
+  uc: '.ucpancookie',
+};
+
+/**
+ * 蜘蛛 JVM 数据沙箱根：`<spider 缓存根>/sandbox`。
+ * 口径与 JarSpiderBridge 的 `join(cacheDir, '..', 'sandbox')`（cacheDir = `<缓存根>/converted`）等价，
+ * 也是 JVM 侧 `-Dtvbox.spiderCacheDir` 的值 —— 两处必须一致，勿分别手拼。
+ */
+export function spiderSandboxDir(spiderCacheRoot: string): string {
+  return join(spiderCacheRoot, 'sandbox');
+}
+
+/** wex 系 cookie 目录 = 沙箱内 `files/TV`（Context.getFilesDir() + "/TV"） */
+export function wexCookieDir(sandboxDir: string): string {
+  return join(sandboxDir, 'files', 'TV');
+}
+
+/** 单个 provider 的 wex cookie 文件绝对路径；无映射返回 '' */
+export function wexCookiePath(provider: string, sandboxDir: string): string {
+  const file = WEX_COOKIE_FILES[String(provider || '').trim().toLowerCase()];
+  return file ? join(wexCookieDir(sandboxDir), file) : '';
+}
+
+/**
+ * 写单个 provider 的 wex cookie 文件（内容 = 裸 cookie 串，jar 侧直接 trim 使用）。
+ * provider 无映射或凭据为空 → 不写，返回 ''；成功返回写入路径。
+ */
+export function writeWexCookieFile(provider: string, value: string, sandboxDir: string): string {
+  const path = wexCookiePath(provider, sandboxDir);
+  const v = String(value || '').trim();
+  if (!path || !v) return '';
+  mkdirSync(wexCookieDir(sandboxDir), { recursive: true });
+  writeFileSync(path, v, 'utf-8');
+  return path;
+}
+
+/** 删除单个 provider 的 wex cookie 文件（解绑用；jar 侧读到空 = 未配置） */
+export function removeWexCookieFile(provider: string, sandboxDir: string): void {
+  const path = wexCookiePath(provider, sandboxDir);
+  if (!path) return;
+  rmSync(path, { force: true });
+}
+
+/**
+ * 全量同步：把 tokens 里所有有映射的 provider 落盘（wex 系）。
+ * 返回实际写入的文件绝对路径列表（无变化/无映射的跳过）。
+ */
+export function syncWexCookieFiles(tokens: Record<string, string>, sandboxDir: string): string[] {
+  const written: string[] = [];
+  for (const [p, v] of Object.entries(tokens || {})) {
+    if (typeof v !== 'string' || !v.trim()) continue;
+    const path = writeWexCookieFile(p, v, sandboxDir);
+    if (path) written.push(path);
+  }
+  return written;
+}
+
 /**
  * 全量同步：把 tokens（DriveStore 明文列表）里所有有映射的 provider 落盘。
  * 返回实际写入的文件名列表（无变化/无映射的跳过）。

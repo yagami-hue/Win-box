@@ -109,6 +109,43 @@ const AP_GROUPS: { label: string; items: typeof NAV }[] = [
 ];
 
 /**
+ * ★ 2026-10-08：豆风（豆风 = Material You × 豆瓣）右下角**浮动圆钮**的图标 ——
+ *   一色线性 SVG（20px / 1.6 描边），对应参考图右下角的「浏览 / 历史 / 设置」圆钮组。
+ */
+const DB_FAB_ICONS: Record<'discover' | 'vod' | 'history' | 'config', React.ReactNode> = {
+  // 发现（浏览）= 四宫格
+  discover: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="5.8" height="5.8" rx="1.9" />
+      <rect x="11.2" y="3" width="5.8" height="5.8" rx="1.9" />
+      <rect x="3" y="11.2" width="5.8" height="5.8" rx="1.9" />
+      <rect x="11.2" y="11.2" width="5.8" height="5.8" rx="1.9" />
+    </svg>
+  ),
+  // 点播 = 播放页（发现被关掉时顶替第一枚）
+  vod: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2.6" y="4" width="14.8" height="12" rx="3" />
+      <path d="M8.3 7.6v4.8l4.2-2.4-4.2-2.4Z" fill="currentColor" stroke="none" />
+    </svg>
+  ),
+  // 历史 = 时钟
+  history: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+      <circle cx="10" cy="10" r="7.2" />
+      <path d="M10 5.9v4.3l2.9 1.9" />
+    </svg>
+  ),
+  // 配置 = 齿轮
+  config: (
+    <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+      <circle cx="10" cy="10" r="2.7" />
+      <path d="M10 2.5v1.9M10 15.6v1.9M2.5 10h1.9M15.6 10h1.9M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" />
+    </svg>
+  ),
+};
+
+/**
  * 页面外壳（布局路由）：承载「页面切换过渡动画」。
  * ★ 2026-09-24（用户定稿）：以 pathname 为 key → 切页时容器重建并播放一次入场动画（淡入 + 轻微上移，苹果 / Netflix 式）。用布局路由 + Outlet 而非嵌套 Routes，
  *   避免相对路径解析问题；query 变化（如 HomePage 清 `?agg=`）不改 pathname → 不重播动画。
@@ -133,9 +170,18 @@ export default function App() {
 function AppShell() {
   const nav = useNavigate();
   const loc = useLocation();
-  /** ★ 2026-09-30（用户要求）：三套皮肤 —— 网飝 / 哔哔（都是「顶部导航一体化」外壳）+ 大果（独立外壳，见下）。
+  /** ★ 2026-09-30（用户要求）：皮肤体系 —— 网飝 / 哔哔（都是「顶部导航一体化」外壳）+ 大果 / 豆风（各自独立外壳，见下）。
    *  两个经典主题（经典深/浅）与 sidebar 版式已删除。 */
   const theme = useTheme();
+  /**
+   * ★ 2026-10-08（用户要求「照参考图做一套外观，允许大改 UI 布局」）：第四套皮肤**豆风**
+   *   （Material You × 豆瓣）= 又一个**独立外壳**（见下方 douban 分支）：
+   *   顶部白色工具栏（深蓝品牌胶囊 + 页面标题 + 搜索/换源 + 窗口控制）
+   *   ＋ 胶囊导航条（选中项橙色实底）
+   *   ＋ 右下角浮动圆钮组（发现 / 历史 / 配置）。
+   *   页面内部由 douban.css 统一转浅色（淡紫底 + 白卡 + 靛蓝主色 + 琥珀橙点缀）。
+   */
+  const douban = theme === 'douban';
   /**
    * ★ 2026-09-29（用户要求「完全改布局」）：Apple 皮肤 = **独立外壳**，不复用经典/Netflix 骨架：
    *   全宽 Liquid Glass 工具栏（左置交通灯 + 返回箭头 + 页面标题 + 右侧搜索/换源）
@@ -160,9 +206,10 @@ function AppShell() {
   }, [showDiscover, loc.pathname]);
   const [appIcon, setAppIcon] = useState('');
   useEffect(() => {
-    if (!apple) return;
+    // 大果（侧边栏品牌）+ 大豆（顶栏品牌块）都用应用图标
+    if (!apple && !douban) return;
     client.appIcon().then((d) => { if (d) setAppIcon(d); }).catch(() => undefined);
-  }, [apple]);
+  }, [apple, douban]);
   /** 工具栏标题（= 当前页面名，macOS 统一工具栏的居中标题位） */
   const pageTitle =
     loc.pathname === '/' ? '发现'
@@ -290,13 +337,14 @@ function AppShell() {
 
   const DisclaimerModal = (
     <div
+      className="modal-scrim"
       style={{
         position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center',
         background: 'rgba(0,0,0,.55)', backdropFilter: 'blur(4px)',
       }}
     >
       <div
-        className="card"
+        className="card modal-in"
         style={{
           width: 520, maxWidth: '92vw', maxHeight: '80vh', overflow: 'auto', padding: 22,
           background: 'var(--bg)', boxShadow: '0 18px 60px rgba(0,0,0,.5)',
@@ -400,7 +448,9 @@ function AppShell() {
   if (isPlayerWin) {
     // 独立播放器窗口：仅播放界面（无侧栏）；标题栏由 PlayerPage 内联渲染（标题=当前集）
     return (
-      <div className="app pwin">
+      // ★ 2026-10-08：额外挂 `pvwin` 类 —— 豆风皮肤的**独立详情窗口**同样复用 `.app.pwin`，
+      //   但它是浅色页面（顶栏 + 内容）；只有真正的播放器窗口需要深色壳（见 douban.css）。
+      <div className="app pwin pvwin">
         {disclaim && DisclaimerModal}
         <main className="main">
           <Routes>
@@ -501,6 +551,65 @@ function AppShell() {
             <SourcePicker variant="sidebar" />
           </aside>
           <main className="ap-main">{routesNode}</main>
+        </div>
+      </div>
+    );
+  }
+
+  /**
+   * ★ 2026-10-08（用户要求「照参考图做一套外观，允许大改 UI 布局」）：**豆风独立外壳**
+   *   （Material You × 豆瓣；样式全部在 douban.css）：
+   *   ① `.db-head` = 顶栏（深蓝品牌胶囊「WIN-BOX」+ 页面标题 + 搜索/换源 + 窗口控制）＋ 胶囊导航条；
+   *   ② `.db-main` = 路由内容（页面自身 topbar / 网格 / 卡片照常，配色由皮肤转浅）；
+   *   ③ `.db-fabs` = 右下角浮动圆钮（发现 / 历史 / 配置，参考图的三枚圆钮 + 圆下小字标签）。
+   */
+  if (douban) {
+    const fabs: { to: string; label: string; icon: React.ReactNode; active: boolean }[] = [
+      // 「发现」被配置关掉时，第一位换成「点播」（同一位置不出现死链按钮）
+      showDiscover
+        ? { to: '/', label: '发现', icon: DB_FAB_ICONS.discover, active: loc.pathname === '/' }
+        : { to: '/home', label: '点播', icon: DB_FAB_ICONS.vod, active: loc.pathname === '/home' },
+      { to: '/history', label: '历史', icon: DB_FAB_ICONS.history, active: loc.pathname.startsWith('/history') },
+      { to: '/config', label: '配置', icon: DB_FAB_ICONS.config, active: loc.pathname.startsWith('/config') },
+    ];
+    return (
+      <div className="app db-app">
+        {disclaim && DisclaimerModal}
+        <header className="db-head">
+          <div className="db-topbar">
+            <span className="db-brand" title="Win-Box">
+              {appIcon ? <img className="db-brand-ico" src={appIcon} alt="" draggable={false} /> : <span className="db-brand-dot" />}
+              WIN-BOX
+            </span>
+            <span className="db-title">{pageTitle}</span>
+            {/* ★ 2026-10-08：M3 搜索条 —— 直接占顶栏中段（原来只有右上角一个小胶囊） */}
+            <SearchPanel bar />
+            <span className="db-spacer" />
+            <SourcePicker />
+            <TitleBar />
+          </div>
+          <nav className="db-nav">
+            {navItems.map((n) => (
+              <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => 'db-chip' + (isActive ? ' active' : '')}>
+                {n.label}
+              </NavLink>
+            ))}
+          </nav>
+        </header>
+        <main className="db-main">{routesNode}</main>
+        {/* 浮动圆钮：整组 fixed 在右下角（内容区已留底部空间，见 douban.css 的 .content padding） */}
+        <div className="db-fabs">
+          {fabs.map((f) => (
+            <button
+              key={f.to}
+              className={'db-fab' + (f.active ? ' active' : '')}
+              title={f.label}
+              onClick={() => nav(f.to)}
+            >
+              <span className="db-fab-orb">{f.icon}</span>
+              <span className="db-fab-label">{f.label}</span>
+            </button>
+          ))}
         </div>
       </div>
     );

@@ -10,6 +10,7 @@ import { getSessionSort, setSessionSort } from '../lib/sessionSort';
 import { makeStaleGuard } from '../lib/staleGuard';
 import { appendUniqueItems, pageSignature } from '../lib/listAppend';
 import { useWaterfall, setWaterfall as setWaterfallPref } from '../lib/uiPrefs';
+import { useTheme } from '../lib/theme';
 import { wrapImageUrlForRelay, needsDriveBind } from '../../shared/driveProvider';
 import { pickCover, preloadImage } from '../lib/coverPick';
 import DriveBindModal from '../components/DriveBindModal';
@@ -17,6 +18,8 @@ import DriveBindModal from '../components/DriveBindModal';
 type SortClassView = { id: string; name: string; flag?: string; filters?: FilterGroup[] };
 
 export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string, id: string, pic?: string, name?: string) => void }) {
+  /** ★ 2026-10-08（豆风）：分类/筛选条走豆瓣式「标签行」（左小标签 + 右胶囊 chips），见下方 db 分支 */
+  const db = useTheme() === 'douban';
   /**
    * ★ 2026-09-24（用户定稿）：点播页**不放源内搜索与换源入口** ——
    *   三套皮肤（网飝 / 哔哔 / 大果）的顶栏/工具栏都已自带「全源搜索 + 换源」，此处再放一遍是重复。
@@ -1356,11 +1359,16 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           ) : (
             <div className="empty">
               {loading
-                ? folder
-                  ? `正在展开「${folder.name}」…`
-                  : aggScope === 'all'
-                    ? `正在逐源检索${aggProgress ? `（已出 ${aggProgress.done}/${aggProgress.total} 个源的结果${aggProgress.pending > 0 ? `，其余 ${aggProgress.pending} 个仍在补搜` : ''}）` : '（首次调用 jar 蜘蛛较慢）'}，请稍候…`
-                    : '搜索中…'
+                ? (
+                  <>
+                    <span className="spinner" aria-hidden="true" />
+                    {folder
+                      ? `正在展开「${folder.name}」…`
+                      : aggScope === 'all'
+                        ? `正在逐源检索${aggProgress ? `（已出 ${aggProgress.done}/${aggProgress.total} 个源的结果${aggProgress.pending > 0 ? `，其余 ${aggProgress.pending} 个仍在补搜` : ''}）` : '（首次调用 jar 蜘蛛较慢）'}，请稍候…`
+                        : '搜索中…'}
+                  </>
+                )
                 : err
                   ? '搜索/展开失败：见上方错误信息'
                   : '搜索中，请稍候…'}
@@ -1369,7 +1377,8 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         ) : (
           <>
             {classes.length > 0 && !err && (
-              <div className="row" style={{ marginBottom: 14 }}>
+              <div className={db ? 'db-filter-row' : 'row'} style={db ? undefined : { marginBottom: 14 }}>
+                {db && <span className="db-filter-label">分类</span>}
                 <span className={`tag ${tid === '' ? 'active' : ''}`} onClick={() => chooseCategory('')}>全部</span>
                 {classes.map((c) => (
                   <span
@@ -1384,7 +1393,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
             )}
             {/* ★ 分类筛选面板（class[].filters）：单选；选择即单次请求（见 chooseFilter） */}
             {currentClass() && currentClass()!.filters && currentClass()!.filters!.length > 0 && (
-              <div className="card" style={{ padding: 10, marginBottom: 14 }}>
+              <div className={db ? 'db-filters' : 'card'} style={db ? undefined : { padding: 10, marginBottom: 14 }}>
                 {currentClass()!.filters!.map((g) => (
                   <div key={g.key} className="row" style={{ flexWrap: 'wrap', marginBottom: 6, gap: 6, alignItems: 'center' }}>
                     <span className="muted" style={{ fontSize: 11, marginRight: 6 }}>{g.name}：</span>

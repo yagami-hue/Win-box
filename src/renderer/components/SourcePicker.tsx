@@ -11,6 +11,9 @@
 // 用法：
 //   - 受控：传 sites/current/onPick（点播页 .topbar 用，直接联动 HomePage 的 chooseSource）
 //   - 自取：不传 sites 时自己 cfgGet 取源列表，选中后广播 winbox:source-changed（顶栏/侧栏用）
+// ★ 2026-10-09（用户指令：「删除之前版本做的换源的下拉菜单调整源的位置的功能，不美观」）：
+//   源行内管理按钮（⤒置顶 / ↑上移 / ↓下移 / ✕删除）与本组件内的对应逻辑已删除 —— 源管理只在配置页保留
+//   （IPC `cfg:moveSource` / `cfg:deleteSource` 未动）。
 import { useEffect, useRef, useState } from 'react';
 import { client } from '../api/client';
 import type { ProfileSitesView, SourceBean } from '../../shared/types';
@@ -248,43 +251,6 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
 
   const isSidebar = variant === 'sidebar';
 
-  /**
-   * ★ 2026-10-08（用户要求「切换源的下拉框，要和设置中一样，可以删除源和切换源的顺序，也可以置顶多个源」）：
-   *   弹层里直接管理源 —— 每行悬停显示「置顶 / 上移 / 下移 / 删除」（与配置页同款符号与 IPC）。
-   *   ★ 只在**当前生效订阅**的源行显示（源列表只属于生效档案；其它订阅的点选仍走跨订阅换源）；
-   *   操作后立即重拉弹层视图与自身列表（主进程会广播 sources-changed 让各页同步）。
-   *   「置顶多个源」= 逐个点 ⤒（先后顺序即置顶后的排列顺序）。
-   */
-  const actBusyRef = useRef(false);
-  const actMove = async (e: React.MouseEvent, k: string, dir: 'top' | 'up' | 'down'): Promise<void> => {
-    e.stopPropagation();
-    if (actBusyRef.current) return;
-    actBusyRef.current = true;
-    try {
-      await client.cfgMoveSource(k, dir); // 边界（已在顶/底）主进程静默 no-op
-    } catch {
-      /* 失败静默：重拉后仍是原顺序 */
-    } finally {
-      actBusyRef.current = false;
-    }
-    loadViews();
-    loadOwn();
-  };
-  const actDelete = async (e: React.MouseEvent, k: string, name: string): Promise<void> => {
-    e.stopPropagation();
-    if (actBusyRef.current) return;
-    if (!window.confirm(`确定删除源「${name}」吗？\n（只从当前应用配置里删除，不改动导入的原始订阅文件；需要时可在配置页重新导入）`)) return;
-    actBusyRef.current = true;
-    try {
-      await client.cfgDeleteSource(k);
-    } catch {
-      /* 失败静默：重拉后仍在 */
-    } finally {
-      actBusyRef.current = false;
-    }
-    loadViews();
-    loadOwn();
-  };
   return (
     <div
       ref={wrapRef}
@@ -354,15 +320,6 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
                   onClick={() => void pickSource(s.key)}
                 >
                   <span className="srcpick-sname">{s.name || s.key}</span>
-                  {/* ★ 2026-10-08：源管理（仅当前生效订阅）—— 悬停显现，点击不触发换源 */}
-                  {paneIsActive && (
-                    <span className="srcpick-act">
-                      <button title="置顶" onClick={(e) => void actMove(e, s.key, 'top')}>⤒</button>
-                      <button title="上移" onClick={(e) => void actMove(e, s.key, 'up')}>↑</button>
-                      <button title="下移" onClick={(e) => void actMove(e, s.key, 'down')}>↓</button>
-                      <button className="danger" title="删除源" onClick={(e) => void actDelete(e, s.key, s.name || s.key)}>✕</button>
-                    </span>
-                  )}
                 </div>
               ))}
             </div>

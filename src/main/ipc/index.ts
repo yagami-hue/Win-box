@@ -36,7 +36,7 @@ import type { UpdateProgress } from '../../shared/update';
 import type { UpdateService } from '../update/UpdateService';
 import { md5Hex } from '../../engine/util/md5';
 // 独立播放器窗口
-import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow, playerResendInit, onPlayerWindowClosed } from '../player/PlayerWindow';
+import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow, playerResendInit, onPlayerWindowClosed, isPlayerWindow } from '../player/PlayerWindow';
 // ★ 2026-10-08 MPV 高兼容播放内核（独立播放器窗口内嵌 --wid）
 import { MpvController } from '../player/MpvController';
 // ★ 2026-10-08 详情页独立窗口（外观开关控制；见 renderer/lib/detailWin.ts）
@@ -109,8 +109,13 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     nativeTheme.themeSource = theme === 'light' ? 'light' : theme === 'dark' ? 'dark' : 'system';
     const w = winOf(_e as IpcMainInvokeEvent);
     // ★ 不透明底色：对齐主窗口 createWindow 的修复（透明背景在放大/最大化时残影异形）
+    // ★★ 2026-10-08（用户报「b蓝光 / 自建 4K-2 有声音无图像」根因修复）★★：
+    //   **播放器窗口是透明窗**（mpv 画面从播放区透明处透出），它自己也跑主题引导 → 会走到这里；
+    //   一旦给它设不透明底色，mpv 画面被整块盖住（实测复现 + `setBackgroundColor` 最小复现）。
+    //   该窗口的底色必须保持 `#00000000`（构造项），其「最大化残影」由 PlayerWindow 自身的
+    //   maximize/unmaximize → invalidate + 圆角处理兜底。
     const dark = nativeTheme.shouldUseDarkColors;
-    if (w) w.setBackgroundColor(dark ? '#0a0c10' : '#dce4ec');
+    if (w && !isPlayerWindow(w)) w.setBackgroundColor(dark ? '#0a0c10' : '#dce4ec');
   }, log);
   // 应用图标 dataURL（标题栏/窗口内展示与进程图标一致）
   registerHandler(IPC.APP_ICON, () => {
