@@ -85,6 +85,7 @@ export interface MpvStatus {
 /** 启动一次 mpv 会话（每次换集/换源 = 新会话；主进程先停旧进程） */
 export interface MpvStartOptions {
   url: string;
+  live?: boolean;
   /** 起播位置（秒，0/缺省 = 从头） */
   startTime?: number;
   /** 初始音量 0..1（缺省 1） */
@@ -123,6 +124,8 @@ export interface MpvKernelState {
   loaded: boolean;
   /** 直播（file-loaded 后 duration 仍未知） */
   live: boolean;
+  playbackStarted: boolean;
+  error: string | null;
   /** 画面尺寸（物理像素；弹幕绘制区用） */
   videoW: number;
   videoH: number;

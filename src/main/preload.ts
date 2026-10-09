@@ -211,6 +211,8 @@ const api = {
     close: () => invoke('player:close'),
     setMini: (isMini: boolean) => invoke<{ mini: boolean }>(IPC.PLAYER_SET_MINI, isMini),
     isMini: () => invoke<{ mini: boolean }>(IPC.PLAYER_IS_MINI),
+    setFullscreen: (fullscreen: boolean) => invoke<{ fullscreen: boolean }>(IPC.PLAYER_SET_FULLSCREEN, fullscreen),
+    isFullscreen: () => invoke<{ fullscreen: boolean }>(IPC.PLAYER_IS_FULLSCREEN),
     // 监听主进程推送：初始化数据 / 换集
     onInit: (cb: (init: unknown) => void) => {
       const l = (_e: unknown, init: unknown) => cb(init);
@@ -227,6 +229,11 @@ const api = {
       const l = (_e: unknown, mini: boolean) => cb(!!mini);
       ipcRenderer.on('player:mini', l);
       return () => ipcRenderer.removeListener('player:mini', l);
+    },
+    onFullscreen: (cb: (fullscreen: boolean) => void) => {
+      const l = (_e: unknown, fullscreen: boolean) => cb(!!fullscreen);
+      ipcRenderer.on('player:fullscreen', l);
+      return () => ipcRenderer.removeListener('player:fullscreen', l);
     },
   },
   boss: {

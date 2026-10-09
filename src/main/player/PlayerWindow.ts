@@ -98,12 +98,24 @@ export function playerIsMini(): boolean {
   return mini;
 }
 
+export function playerIsFullscreen(): boolean {
+  return !!playerWin && !playerWin.isDestroyed() && playerWin.isFullScreen();
+}
+
+export function playerSetFullscreen(fullscreen: boolean): boolean {
+  const w = playerWin;
+  if (!w || w.isDestroyed() || mini) return false;
+  w.setFullScreen(!!fullscreen);
+  return !!fullscreen;
+}
+
 /** 切换小窗口模式。mini=true 进入（缩小+禁全屏），false 恢复原窗口 */
 export function playerSetMini(isMini: boolean): void {
   const w = playerWin;
   if (!w || w.isDestroyed()) return;
   if (isMini === mini) return;
   if (isMini) {
+    if (w.isFullScreen()) w.setFullScreen(false);
     // 先记录正常边界：最大化时用 getNormalBounds()（Electron 记忆的还原边界）
     if (w.isMaximized()) {
       normalBounds = w.getNormalBounds();
@@ -177,6 +189,18 @@ export function openPlayerWindow(init: PlayerInit): void {
   });
   playerWin.on('unmaximize', () => {
     if (playerWin) { applyWindowCorner(playerWin, true); playerWin.webContents.invalidate(); }
+  });
+  playerWin.on('enter-full-screen', () => {
+    if (playerWin && !playerWin.isDestroyed()) {
+      playerWin.webContents.invalidate();
+      playerWin.webContents.send('player:fullscreen', true);
+    }
+  });
+  playerWin.on('leave-full-screen', () => {
+    if (playerWin && !playerWin.isDestroyed()) {
+      playerWin.webContents.invalidate();
+      playerWin.webContents.send('player:fullscreen', false);
+    }
   });
   // ★ 边界追踪：正常态记 normalBounds、小窗态记 miniBounds（进/出小窗时由 playerSetMini 先置位再改界，避免误写）
   const trackBounds = () => {

@@ -6,6 +6,7 @@
 // ★ 2026-09-29（用户要求）：搜索框做大；热搜做成**右侧排名榜**；左侧下方为**搜索历史**
 //   （逐条可删 ✕、下方「清空搜索记录」、上限 10 条，第 11 条顶掉第 1 条）。
 import { useEffect, useRef, useState } from 'react';
+import type { KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { client } from '../api/client';
 import type { MetaSuggestion } from '../../shared/meta';
@@ -140,14 +141,24 @@ export default function SearchPanel({ bar = false }: { bar?: boolean }) {
     setHist([]);
   };
 
+  const activate = (e: KeyboardEvent, action: () => void): void => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      action();
+    }
+  };
+
   return (
     <div className={`srcpick${bar ? ' sp-bar-wrap' : ''}`} ref={wrapRef}>
       <div
         className={`srcpick-name sp-btn${bar ? ' sp-bar' : ''}`}
         role="button"
         tabIndex={0}
+        aria-expanded={open}
+        aria-haspopup="dialog"
         title="搜索（全源搜索，结果边搜边出）"
         onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => activate(e, () => setOpen((v) => !v))}
       >
         🔍 {bar ? <span className="sp-bar-hint">搜索影片、剧集、演员…</span> : '搜索'}
       </div>
@@ -174,7 +185,7 @@ export default function SearchPanel({ bar = false }: { bar?: boolean }) {
               {busy && <div className="sp-item muted">联想中…</div>}
               {!busy && sug.length === 0 && <div className="sp-item muted">无联想结果，回车直接全源搜索「{q.trim()}」</div>}
               {sug.map((s) => (
-                <div key={`${s.mediaType}:${s.title}:${s.year}`} className="sp-item" onClick={() => go(s.title)}>
+                <div key={`${s.mediaType}:${s.title}:${s.year}`} className="sp-item" role="button" tabIndex={0} onClick={() => go(s.title)} onKeyDown={(e) => activate(e, () => go(s.title))}>
                   <span>{s.title}</span>
                   <span className="muted sp-meta">
                     {s.mediaType === 'tv' ? '剧集' : '电影'}
@@ -193,7 +204,7 @@ export default function SearchPanel({ bar = false }: { bar?: boolean }) {
                 ) : (
                   <div className="sp-hist-list">
                     {hist.map((t) => (
-                      <div key={t} className="sp-item sp-hist-item" onClick={() => go(t)}>
+                      <div key={t} className="sp-item sp-hist-item" role="button" tabIndex={0} onClick={() => go(t)} onKeyDown={(e) => activate(e, () => go(t))}>
                         <span className="sp-hist-txt" title={t}>{t}</span>
                         <button
                           className="sp-hist-del"
@@ -208,7 +219,7 @@ export default function SearchPanel({ bar = false }: { bar?: boolean }) {
                   </div>
                 )}
                 {hist.length > 0 && (
-                  <button className="sp-clear" onClick={clearHist}>清空搜索记录</button>
+                  <button type="button" className="sp-clear" onClick={clearHist}>清空搜索记录</button>
                 )}
               </div>
               <div className="sp-rank">
@@ -218,7 +229,7 @@ export default function SearchPanel({ bar = false }: { bar?: boolean }) {
                 ) : (
                   <div className="sp-rank-list">
                     {hot.slice(0, HOT_RANK_MAX).map((t, i) => (
-                      <div key={t} className="sp-rank-item" onClick={() => go(t)} title={t}>
+                      <div key={t} className="sp-rank-item" role="button" tabIndex={0} onClick={() => go(t)} onKeyDown={(e) => activate(e, () => go(t))} title={t}>
                         <span className={`sp-rank-no${i < 3 ? ' top' : ''}`}>{i + 1}</span>
                         <span className="sp-rank-txt">{t}</span>
                       </div>

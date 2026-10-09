@@ -27,13 +27,24 @@ vi.mock('electron', async () => {
 /** 解链结果与调用记录（mock 掉真实网络；extract/is* 等纯函数保持真实实现） */
 const hoisted = vi.hoisted(() => ({
   baidu: {
-    calls: [] as Array<{ short: string; pwd: string }>,
+    calls: [] as Array<{ short: string; pwd: string; innerName: string }>,
     result: {
       ok: true,
       url: 'https://d11.baidu-cdn.test/file/x.mp4?token=1',
       header: { 'User-Agent': 'netdisk;P2SP;3.0.0;windows;;;', Cookie: 'BDUSS=t', Referer: 'https://pan.baidu.com/' },
       path: '/Win-Box缓存/x.mp4',
     },
+  },
+  baiduFsid: {
+    calls: [] as Array<{ fsid: string }>,
+    result: {
+      ok: true,
+      url: 'https://d12.baidu-cdn.test/f/own.mp4?token=9',
+      header: { 'User-Agent': 'netdisk;P2SP;3.0.0;windows;;;', Cookie: 'BDUSS=t', Referer: 'https://pan.baidu.com/' },
+    },
+  },
+  baiduShared: {
+    resolve: vi.fn(),
   },
   uc: {
     calls: [] as Array<{ pwdId: string; passcode: string }>,
@@ -53,10 +64,15 @@ const hoisted = vi.hoisted(() => ({
 
 vi.mock('../src/main/net/baiduTransfer', async (orig) => ({
   ...(await orig<typeof import('../src/main/net/baiduTransfer')>()),
-  baiduResolveShare: async (short: string, pwd: string) => {
-    hoisted.baidu.calls.push({ short, pwd });
+  baiduResolveShare: async (short: string, pwd: string, _cookie: string, opts?: { innerName?: string }) => {
+    hoisted.baidu.calls.push({ short, pwd, innerName: opts?.innerName || '' });
     return { ...hoisted.baidu.result };
   },
+  baiduDirectLinkByFsid: async (fsid: string) => {
+    hoisted.baiduFsid.calls.push({ fsid });
+    return { ...hoisted.baiduFsid.result };
+  },
+  baiduResolveSharedFile: hoisted.baiduShared.resolve,
 }));
 
 vi.mock('../src/main/net/ucTransfer', async (orig) => ({
@@ -128,11 +144,83 @@ describe('parsePanProxyQuery（端口 -1，不能用 new URL）', () => {
 });
 
 describe('SpiderHost：do=pan → 原生解链', () => {
+  const sharedFile = { shareId: '49252031905', uk: '1100830236519', fsid: '812960976845060', sekey: 'key%2Bvalue%3D', name: '01.mp4' };
+  const sharedDescriptor = JSON.stringify({
+    share_id: sharedFile.shareId, uk: sharedFile.uk, fs_id: sharedFile.fsid,
+    seKey: sharedFile.sekey, surl: '1cP37TojYh6xoMuxzHxpPMg', path: '/1-100/01.mp4', isdir: '0',
+  });
+
+  it('FTY 完整详情描述 → 直接转存所选文件，不等待 jar playerContent 超时', async () => {
+    hoisted.baiduShared.resolve.mockReset().mockResolvedValue({ ...hoisted.baidu.result });
+    const { host, key } = makeHost('', { baidu: 'BDUSS=t' });
+    const play = vi.fn(async () => { throw new Error('playerContent timeout'); });
+    (host as unknown as { vm: { play: unknown } }).vm.play = play;
+    const r = await host.play(key, '嘟嘟无限', sharedDescriptor);
+    expect(r.parse).toBe(0);
+    expect(r.url).toContain('/play?');
+    expect(hoisted.baiduShared.resolve).toHaveBeenCalledWith(sharedFile, 'BDUSS=t', expect.anything());
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it('FTY 转存空间不足 → 准确原因上屏，不再重复转存或等待 jar 超时', async () => {
+    hoisted.baiduShared.resolve.mockReset().mockResolvedValue({ ok: false, url: '', header: {}, reason: '剩余空间不足，无法转存' });
+    const { host, key } = makeHost('', { baidu: 'BDUSS=t' });
+    const play = vi.fn();
+    (host as unknown as { vm: { play: unknown } }).vm.play = play;
+    const r = await host.play(key, '嘟嘟无限', sharedDescriptor);
+    expect(r).toMatchObject({ parse: 1, url: '' });
+    expect(r.message).toContain('剩余空间不足');
+    expect(r.needDriveCookieBind).toBeUndefined();
+    expect(hoisted.baiduShared.resolve).toHaveBeenCalledTimes(1);
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it('完整详情描述未绑定 → 引导绑定，不调用 jar 或原生转存', async () => {
+    hoisted.baiduShared.resolve.mockReset();
+    const { host, key } = makeHost('');
+    (host as unknown as { drives: { remove: (k: string) => void } }).drives.remove('baidu');
+    const r = await host.play(key, '嘟嘟无限', sharedDescriptor);
+    expect(r).toMatchObject({ parse: 1, url: '', needDriveCookieBind: 'baidu' });
+    expect(hoisted.baiduShared.resolve).not.toHaveBeenCalled();
+  });
+
+  it('xiaosa 空 shareId 的数字 fileId → 按所属 JVM 恢复会话，不当作本人盘 ID', async () => {
+    hoisted.baiduShared.resolve.mockReset().mockResolvedValue({ ...hoisted.baidu.result });
+    hoisted.baiduFsid.calls.length = 0;
+    const pan = `http://127.0.0.1:-1/proxy?do=pan&type=2&site=baidu&shareId=&fileId=${sharedFile.fsid}&fileToken=`;
+    const { host, key } = makeHost(pan, { baidu: 'BDUSS=t' });
+    (host as unknown as { vm: { proxyPortFor: unknown } }).vm.proxyPortFor = () => 20042;
+    const context = vi.fn(async () => sharedFile);
+    (host as unknown as { baiduContextFromJvm: unknown }).baiduContextFromJvm = context;
+    (host as unknown as { probeSelfResolveUrl: unknown }).probeSelfResolveUrl = async () => false;
+    const r = await host.play(key, '百度无限#1', '01.mp4__812960976845060');
+    expect(context).toHaveBeenCalledWith(20042, sharedFile.fsid);
+    expect(hoisted.baiduShared.resolve).toHaveBeenCalledWith(sharedFile, 'BDUSS=t', expect.anything());
+    expect(hoisted.baiduFsid.calls).toEqual([]);
+    expect(r).toMatchObject({ parse: 0 });
+    expect(r.url).toContain('/play?');
+  });
+
+  it('xiaosa 分享会话已匹配但转存失败 → 不再用分享者 ID 查询本人文件', async () => {
+    hoisted.baiduShared.resolve.mockReset().mockResolvedValue({ ok: false, url: '', header: {}, reason: '剩余空间不足，无法转存' });
+    hoisted.baiduFsid.calls.length = 0;
+    const pan = `http://127.0.0.1:-1/proxy?do=pan&site=baidu&shareId=&fileId=${sharedFile.fsid}`;
+    const { host, key } = makeHost(pan, { baidu: 'BDUSS=t' });
+    (host as unknown as { vm: { proxyPortFor: unknown } }).vm.proxyPortFor = () => 20043;
+    (host as unknown as { baiduContextFromJvm: unknown }).baiduContextFromJvm = async () => sharedFile;
+    (host as unknown as { probeSelfResolveUrl: unknown }).probeSelfResolveUrl = async () => false;
+    const r = await host.play(key, '百度无限#1', 'ep');
+    expect(r).toMatchObject({ parse: 1, url: '' });
+    expect(r.message).toContain('剩余空间不足');
+    expect(r.needDriveCookieBind).toBeUndefined();
+    expect(hoisted.baiduFsid.calls).toEqual([]);
+  });
+
   it('百度（encoded fileId）→ 解出分享并返回 /play 中继地址', async () => {
     hoisted.baidu.calls.length = 0;
     const { host, key } = makeHost(ENC_BAIDU_PAN, { baidu: 'BDUSS=t; STOKEN=s' });
     const r = await host.play(key, '百度无限#1', 'ep-1');
-    expect(hoisted.baidu.calls).toEqual([{ short: '1jJYCvRQ47rKhE8J4wwciyw', pwd: 'moCu' }]);
+    expect(hoisted.baidu.calls).toEqual([{ short: '1jJYCvRQ47rKhE8J4wwciyw', pwd: 'moCu', innerName: '' }]);
     expect(r.parse).toBe(0);
     expect(r.url).toContain('http://127.0.0.1:9978/play?');
     expect(decodeURIComponent(r.url)).toContain('https://d11.baidu-cdn.test/file/x.mp4?token=1');
@@ -224,7 +312,99 @@ describe('SpiderHost：do=pan → 原生解链', () => {
     const pan = 'http://127.0.0.1:-1/proxy?do=pan&site=baidu&shareId=&fileId=https://pan.baidu.com/s/1jJYCvRQ47rKhE8J4wwciyw?pwd=moCu&fileToken=';
     const { host, key } = makeHost(pan, { baidu: 'BDUSS=t' });
     const r = await host.play(key, '百度无限#2', 'ep-5');
-    expect(hoisted.baidu.calls).toEqual([{ short: '1jJYCvRQ47rKhE8J4wwciyw', pwd: 'moCu' }]);
+    expect(hoisted.baidu.calls).toEqual([{ short: '1jJYCvRQ47rKhE8J4wwciyw', pwd: 'moCu', innerName: '' }]);
+    expect(r.parse).toBe(0);
+  });
+
+  it('★ 2026-10-09：jar 把「百度网盘播放描述 JSON」当播放地址返回（嘟嘟无限）→ 走百度通道并按 path 选集', async () => {
+    hoisted.baidu.calls.length = 0;
+    const desc =
+      '{"pg":"","parent":"","share_id":"33432245846","uk":"1099891027153","surl":"1DssJrJXy-2W4yPXvwew5QA",' +
+      '"fs_id":"328674630465284","shareUser":"","path":"%2Fsharelink0-480637669818448%2F%E5%8D%83%E9%87%91%2FE02.mp4"}';
+    const { host, key } = makeHost(desc, { baidu: 'BDUSS=t; STOKEN=s' });
+    const r = await host.play(key, '嘟嘟无限2', 'ep-bd1');
+    expect(hoisted.baidu.calls).toEqual([{ short: '1DssJrJXy-2W4yPXvwew5QA', pwd: '', innerName: 'E02.mp4' }]);
+    expect(r.parse).toBe(0);
+    expect(r.url).toContain('http://127.0.0.1:9978/play?');
+    expect(decodeURIComponent(r.url)).toContain('https://d11.baidu-cdn.test/file/x.mp4?token=1');
+  });
+
+  it('★ 2026-10-09：site=quark 的裸参数（shareId=pwd_id / fileId=fid）→ 走夸克通道（此前必然「未识别」）', async () => {
+    hoisted.quark.calls.length = 0;
+    const pan =
+      'http://127.0.0.1:-1/proxy?do=pan&type=2&site=quark&shareId=e8ac5a87aa2e&fileId=2e3ad195e9834c9a8f71f4abef80d30d&fileToken=';
+    const { host, key } = makeHost(pan, { quark: 'quark_ck=1' });
+    const r = await host.play(key, '夸克无限#2', 'ep-q5');
+    expect(hoisted.quark.calls).toEqual([{ sId: 'e8ac5a87aa2e', passcode: '' }]);
+    expect(r.parse).toBe(0);
+    expect(r.url).toContain('http://127.0.0.1:9978/play?');
+  });
+
+  it('★ 2026-10-09：site=baidu 只给纯数字 fileId（= fs_id，旧 -1 形态）→ filemetas 直取 dlink', async () => {
+    hoisted.baiduFsid.calls.length = 0;
+    const pan = 'http://127.0.0.1:-1/proxy?do=pan&type=2&site=baidu&shareId=-&fileId=282416417661934&fileToken=';
+    const { host, key } = makeHost(pan, { baidu: 'BDUSS=t; STOKEN=s' });
+    const r = await host.play(key, '百度无限#1', 'ep-bd2');
+    expect(hoisted.baiduFsid.calls).toEqual([{ fsid: '282416417661934' }]);
+    expect(r.parse).toBe(0);
+    expect(r.url).toContain('http://127.0.0.1:9978/play?');
+    expect(decodeURIComponent(r.url)).toContain('https://d12.baidu-cdn.test/f/own.mp4?token=9');
+  });
+
+  it('★ 2026-10-09：9978 do=pan 地址 + 端口已知 + 预检通过 → 改写 /proxy/<port> 交 jar 自解链', async () => {
+    const pan =
+      'http://127.0.0.1:9978/proxy?do=pan&type=2&site=baidu&shareId=-&fileId=861118710311033&fileToken=';
+    const { host, key } = makeHost(pan, { baidu: 'BDUSS=t' });
+    (host as unknown as { vm: { proxyPortFor: unknown } }).vm.proxyPortFor = () => 20042;
+    (host as unknown as { probeSelfResolveUrl: (u: string) => Promise<boolean> }).probeSelfResolveUrl = async () => true;
+    const r = await host.play(key, '百度无限#1', 'ep-j1');
+    expect(r.parse).toBe(0);
+    expect(r.url).toBe('http://127.0.0.1:9978/proxy/20042?do=pan&type=2&site=baidu&shareId=-&fileId=861118710311033&fileToken=');
+  });
+
+  it('★ 2026-10-09：端口已知但 jar 预检失败（如「播放链接为空」/412）→ 回落原生通道（quark 裸参数 → quarkTransfer）', async () => {
+    hoisted.quark.calls.length = 0;
+    const pan = 'http://127.0.0.1:9978/proxy?do=pan&type=2&site=quark&shareId=2e11c90d4ae8&fileId=672fb1e3c12249dd83f88262794405b1&fileToken=1562c273d1e618ee2f3df20a';
+    const { host, key } = makeHost(pan, { quark: 'q=1' });
+    (host as unknown as { vm: { proxyPortFor: unknown } }).vm.proxyPortFor = () => 19973;
+    (host as unknown as { probeSelfResolveUrl: (u: string) => Promise<boolean> }).probeSelfResolveUrl = async () => false;
+    const r = await host.play(key, '夸克无限#2', 'ep-j4');
+    expect(hoisted.quark.calls).toEqual([{ sId: '2e11c90d4ae8', passcode: '' }]);
+    expect(r.parse).toBe(0);
+    expect(r.url).toContain('http://127.0.0.1:9978/play?');
+    expect(decodeURIComponent(r.url)).toContain('https://quark-cdn.test/f/x.mp4?token=3');
+  });
+
+  it('★ 2026-10-09：百度描述 JSON + 端口已知 + 预检通过 → 合成 do=pan 交 jar 自解链（嘟嘟无限）', async () => {
+    const desc =
+      '{"pg":"","parent":"","share_id":"8022538919","uk":"1101351086228","surl":"1a6ELVSVQAohuuU8qf8B-sw",' +
+      '"fs_id":"861118710311033","shareUser":"","path":"%2Fsharelink0-211447811381911%2Ftest%2FE01.mp4"}';
+    const { host, key } = makeHost(desc, { baidu: 'BDUSS=t; STOKEN=s' });
+    (host as unknown as { vm: { proxyPortFor: unknown } }).vm.proxyPortFor = () => 19973;
+    (host as unknown as { probeSelfResolveUrl: (u: string) => Promise<boolean> }).probeSelfResolveUrl = async () => true;
+    const r = await host.play(key, '嘟嘟无限2', 'ep-dd1');
+    expect(r.parse).toBe(0);
+    expect(r.url).toBe(
+      'http://127.0.0.1:9978/proxy/19973?do=pan&type=2&site=baidu&shareId=8022538919&fileId=861118710311033&fileToken=',
+    );
+  });
+
+  it('★ 2026-10-09：旧 -1 形态 do=pan + 端口已知 + 预检通过 → 同样改写 /proxy/<port>', async () => {
+    const pan = 'http://127.0.0.1:-1/proxy?do=pan&type=2&site=quark&shareId=18d50f449c22&fileId=6174bbf9c9d849329e46bbb9554464b2&fileToken=';
+    const { host, key } = makeHost(pan, { quark: 'q=1' });
+    (host as unknown as { vm: { proxyPortFor: unknown } }).vm.proxyPortFor = () => 19974;
+    (host as unknown as { probeSelfResolveUrl: (u: string) => Promise<boolean> }).probeSelfResolveUrl = async () => true;
+    const r = await host.play(key, '夸克无限#2', 'ep-j3');
+    expect(r.parse).toBe(0);
+    expect(r.url).toBe('http://127.0.0.1:9978/proxy/19974?do=pan&type=2&site=quark&shareId=18d50f449c22&fileId=6174bbf9c9d849329e46bbb9554464b2&fileToken=');
+  });
+
+  it('★ 2026-10-09：9978 do=pan 地址但端口未知 → 回退原生解链（fs_id → filemetas）', async () => {
+    hoisted.baiduFsid.calls.length = 0;
+    const pan = 'http://127.0.0.1:9978/proxy?do=pan&type=2&site=baidu&shareId=-&fileId=861118710311033&fileToken=';
+    const { host, key } = makeHost(pan, { baidu: 'BDUSS=t' });
+    const r = await host.play(key, '百度无限#2', 'ep-j2');
+    expect(hoisted.baiduFsid.calls).toEqual([{ fsid: '861118710311033' }]);
     expect(r.parse).toBe(0);
   });
 });

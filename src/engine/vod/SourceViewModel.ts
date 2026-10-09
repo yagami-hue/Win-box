@@ -112,6 +112,17 @@ export class SourceViewModel {
     this.throwUnsupported(bean, 'search');
   }
 
+  /**
+   * ★ 2026-10-09：该源蜘蛛 JVM 宿主代理端口（仅 type=3 jar 蜘蛛、且调用过一次后有值）。
+   * 宿主（SpiderHost）把 jar 产出的 `127.0.0.1:9978/proxy?…` 播放地址改写成
+   * `/proxy/<port>` 转发回该 JVM 自解链（jar 的 `Pan.proxy` 才知道 shareid/uk）。
+   */
+  proxyPortFor(bean: SourceBean): number | null {
+    if (bean.type !== 3) return null;
+    const sp = this.factory.getCSP(bean, this.host);
+    return sp.proxyPort();
+  }
+
   /** 播放：CMS 直出剧集 url；type3 走 spider.playerContent。
    *  flag 在 site.flags 或全局 flags 中 → parse=1（需解析）；否则 parse=0 直连。
    *  site.playUrl 模板（含 {playUrl} 占位）会替换 id。 */

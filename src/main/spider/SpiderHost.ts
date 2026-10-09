@@ -1,5 +1,6 @@
 // src/main/spider/SpiderHost.ts — 引擎宿主：装配 EngineHost + 持有 SourceViewModel + 配置导入 + 直播加载 + 用户配置持久化
 import { HttpClient } from '../net/HttpClient';
+import { request as undiciRequest } from 'undici';
 import { JsonStore } from '../store/JsonStore';
 import { UserConfigManager, subscriptionStamp, type ConfigChangeKind } from '../store/UserConfigManager';
 import { DriveStore } from '../store/DriveStore';
@@ -12,7 +13,7 @@ import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid, ex
 import { ucResolveShare, ucFileDelete, isUcSharePlay, extractUcShare } from '../net/ucTransfer';
 // ★ 2026-09-30：百度分享取流（**只能转存** —— 免转存的 share/list 子目录接口已被百度关停；
 //   dlink 必须用网盘客户端 UA 拉，浏览器 UA 恒定 403 31326）
-import { baiduResolveShare, baiduFileDelete, isBaiduSharePlay, extractBaiduShare } from '../net/baiduTransfer';
+import { baiduResolveShare, baiduResolveSharedFile, baiduFileDelete, isBaiduSharePlay, extractBaiduShare, extractBaiduSharedFile, extractBaiduInnerName, baiduDirectLinkByFsid, type BaiduSharedFile } from '../net/baiduTransfer';
 import { fileLogger } from '../util/logger';
 import { parseSiteConfig, parseSiteConfigWithBase, looksLikeSubscribeJson, type ParseResult } from '../../engine/config/ApiConfigParser';
 import { parseMultiRepo, isFetchedRepoUrl, repoDisplayName, pickRepoLine, splitRepoLine, type MultiRepo } from '../../engine/config/multiRepo';
@@ -188,6 +189,17 @@ function raceTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
       (e) => { clearTimeout(timer); reject(e); },
     );
   });
+}
+
+/**
+ * ★ 2026-10-09：jar 直接把「百度网盘**播放描述 JSON**」当播放地址返回（饭太硬系「嘟嘟无限」等）——
+ *   形如 `{"pg":…,"share_id":"…","uk":"…","surl":"1Dss…","fs_id":"…","path":"…"}`。
+ *   安卓由 App 的网盘模块消费；桌面端此前原样交给播放器 ⇒ 「播放器弹出后无法播放」。
+ *   这里识别它 → 走 `baiduFromPanUrl`（extractBaiduShare 已支持 JSON 的 `surl` 形态）原生解链。
+ */
+export function isBaiduPanDescriptor(url: string): boolean {
+  const s = String(url || '').trim();
+  return s.startsWith('{') && (/"surl"\s*:\s*"/.test(s) || extractBaiduSharedFile(s) !== null);
 }
 
 /**
@@ -988,21 +1000,85 @@ export class SpiderHost {
    * ★ 2026-10-08：失败原因不再静默（`miss` 收集，调用处汇总落日志 + 上屏）——
    *   此前 extract 未命中/未绑定 Cookie 都静默 return null，用户日志里完全无迹可查。
    */
-  private async baiduFromPanUrl(url: string, flag: string, miss?: string[]): Promise<PlayResult | null> {
+  protected async baiduContextFromJvm(port: number, fsid: string): Promise<BaiduSharedFile | null> {
+    if (!Number.isInteger(port) || port < 1024 || port > 65535 || !/^\d+$/.test(fsid)) return null;
+    try {
+      // 直连实际所属 JVM，不经公共代理；会话值只在内存中使用，不写诊断日志。
+      const res = await undiciRequest(`http://127.0.0.1:${port}/proxy?do=winbox-baidu-context&fileId=${fsid}`, {
+        headersTimeout: 5000, bodyTimeout: 5000,
+      });
+      const text = await res.body.text();
+      const file = res.statusCode === 200 ? extractBaiduSharedFile(text) : null;
+      return file?.fsid === fsid ? file : null;
+    } catch { return null; }
+  }
+
+  private async baiduFromPanUrl(url: string, flag: string, miss?: string[], jvmPort?: number | null): Promise<PlayResult | null> {
     const share = extractBaiduShare(url);
-    if (!share) {
-      // ★ 2026-10-09：「未识别」不再逐通道 push（三通道会产出「百度：未识别；UC：未识别」的
-      //   误导性双报——该线路可能根本是夸克/别家盘）——由调用处在「全部通道均未识别」时
-      //   统一给一条带 `site` 的可读原因。
-      return null;
-    }
     const cookie = (this.driveList() as Record<string, string>)['baidu'] || '';
+    const pan = parsePanProxyQuery(url);
+    const fid = String(pan.fileId || '').trim();
+    const sharedFile = extractBaiduSharedFile(url) ||
+      (jvmPort && String(pan.site || '').toLowerCase().startsWith('baidu') && /^\d+$/.test(fid)
+        ? await this.baiduContextFromJvm(jvmPort, fid) : null);
+    if (sharedFile) {
+      if (!cookie) { miss?.push('百度：已识别分享文件但未绑定百度网盘 Cookie'); return null; }
+      try {
+        const t = await baiduResolveSharedFile(sharedFile, cookie, fileLogger);
+        if (!t.ok || !t.url) { miss?.push(`百度：解链失败(${t.reason || '未知原因'})`); return null; }
+        if (t.path) {
+          this.pendingQuarkDeletes.push({ provider: 'baidu', cookie, pdirFid: '', fid: '', path: t.path, at: Date.now() });
+          if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift();
+          this.persistPendingQuark();
+        }
+        return { parse: 0, url: wrapPlayUrlWithHeaders(t.url, t.header), playUrl: '', flag, header: t.header, jx: 0 };
+      } catch (e) { miss?.push(`百度：异常(${(e as Error).message.slice(0, 80)})`); return null; }
+    }
+    if (!share) {
+      // ★ 2026-10-09：jar 反编译实证 —— `merge.b.j`（百度盘）把播放 id 传成**纯数字**（百度 `fs_id`，
+      //   即 `?do=pan&site=baidu&shareId=&fileId=<fs_id>&fileToken=`）。桌面端此前「未识别分享链接」。
+      //   未找到分享映射时才尝试本人盘 filemetas（不能把纯数字等同于已转存）。
+      const site = String(pan.site || '').toLowerCase();
+      if (!site.startsWith('baidu') || !/^\d{6,}$/.test(fid)) {
+        // 「未识别」不逐通道 push（三通道会产出误导性双报）——由调用处统一给一条带 site 的原因。
+        return null;
+      }
+      if (!cookie) {
+        miss?.push('百度：已识别文件 ID（fs_id）但未绑定百度网盘 Cookie');
+        return null;
+      }
+      try {
+        const d = await baiduDirectLinkByFsid(fid, cookie, fileLogger);
+        if (!d.ok || !d.url) {
+          fileLogger.w(`baiduTransfer(fs_id) 未成功(${d.reason || '未知原因'})`);
+          miss?.push(`百度：解链失败(${d.reason || '未知原因'})`);
+          return null;
+        }
+        fileLogger.i('baiduTransfer(fs_id) 直链 ok');
+        return {
+          parse: 0,
+          url: wrapPlayUrlWithHeaders(d.url, d.header || {}),
+          playUrl: '',
+          flag,
+          header: d.header || {},
+          jx: 0,
+        };
+      } catch (e) {
+        fileLogger.w(`baiduTransfer(fs_id) 异常: ${(e as Error).message}`);
+        miss?.push(`百度：异常(${(e as Error).message.slice(0, 80)})`);
+        return null;
+      }
+    }
     if (!cookie) {
       miss?.push('百度：已识别分享但未绑定百度网盘 Cookie');
       return null;
     }
     try {
-      const t = await baiduResolveShare(share.short, share.pwd, cookie, { logger: fileLogger });
+      const t = await baiduResolveShare(share.short, share.pwd, cookie, {
+        // ★ 2026-10-09：播放描述 JSON 里带 `path`（末段=文件名）→ 整季文件夹时按集名选对那一集
+        innerName: extractBaiduInnerName(url) || undefined,
+        logger: fileLogger,
+      });
       if (!t.ok || !t.url) {
         fileLogger.w(`baiduTransfer(do=pan) 未成功(${t.reason || '未知原因'})`);
         miss?.push(`百度：解链失败(${t.reason || '未知原因'})`);
@@ -1083,7 +1159,22 @@ export class SpiderHost {
    *   「百度：未识别；UC：未识别」（正是用户看到的文案）。
    */
   private async quarkFromPanUrl(url: string, flag: string, miss?: string[]): Promise<PlayResult | null> {
-    const share = extractQuarkShare(url);
+    let share = extractQuarkShare(url);
+    let innerFid = extractEpisodeFid(url);
+    const innerName = extractEpisodeName(url);
+    // ★ 2026-10-09：jar 的 `do=pan&site=quark` **不给分享 URL**，只给三个裸参数
+    //   （实测：`shareId=e8ac5a87aa2e`（12 位 = pwd_id）、`fileId=2e3ad195….d30d`（32 位 = fid））。
+    //   此前只认 `pan.quark.cn/s/<id>` → **必然「未识别」**（用户报「site=quark」播不了）。
+    //   这里补「裸参数」通道：shareId 形如 pwd_id 就用它当 sId，fileId 形如 fid 就当目标文件。
+    if (!share) {
+      const pan = parsePanProxyQuery(url);
+      const sid = String(pan.shareId || '').trim();
+      const fid = String(pan.fileId || '').trim();
+      if (/^[0-9a-f]{10,}$/i.test(sid)) {
+        share = { sId: sid, passcode: '' };
+        if (!innerFid && /^[0-9a-f]{20,}$/i.test(fid)) innerFid = fid;
+      }
+    }
     if (!share) {
       // 「未识别」不逐通道 push（同 baiduFromPanUrl 注释）。
       return null;
@@ -1096,8 +1187,8 @@ export class SpiderHost {
     try {
       const t = await quarkTransfer(share.sId, cookie, {
         passcode: share.passcode,
-        innerFid: extractEpisodeFid(url),
-        innerName: extractEpisodeName(url),
+        innerFid,
+        innerName,
         logger: fileLogger,
       });
       if (!t.ok || !t.url) {
@@ -1909,6 +2000,8 @@ export class SpiderHost {
         parse: r.parse,
         needBind: r.needDriveCookieBind,
         msg: r.message ? String(r.message).slice(0, 120) : undefined,
+        // ★ 2026-10-09：地址前缀（判别「蜘蛛给了什么形态」——JSON 描述 / do=pan / 直链；前 80 字符）
+        url: r.url ? String(r.url).slice(0, 80) : undefined,
       });
       return r;
     } catch (e) {
@@ -1923,6 +2016,37 @@ export class SpiderHost {
         reason: String((e as Error)?.message ?? e).slice(0, 200),
       });
       throw e;
+    }
+  }
+
+  /**
+   * ★ 2026-10-09（第七轮）：jar 自解链地址**预检** —— 用 `Range: bytes=0-0` 打一次 `/proxy/<port>`，
+   * 应答 2xx 且 Content-Type 是媒体才算通过。真机实证 jar 业务失败会回 200 `text/plain`「播放链接为空」
+   * 或 500「response code: 412」—— 直接把这种地址交给播放器只会黑屏且无线索；
+   * 预检失败 ⇒ 调用方回落**原生通道**（绑定 Cookie 最新、夸克转存链路已实证可用）。
+   * protected：单测里以实例属性覆写（不起真实 JVM）。
+   */
+  protected async probeSelfResolveUrl(url: string): Promise<boolean> {
+    try {
+      const res = await undiciRequest(url, {
+        method: 'GET',
+        headers: { range: 'bytes=0-0', accept: '*/*' },
+        headersTimeout: 20000,
+        bodyTimeout: 20000,
+      });
+      const ct = String(res.headers['content-type'] || '');
+      const status = res.statusCode;
+      // 上游可能忽略 Range；预检只看响应头，绝不能把整个影片下载完才返回。
+      res.body.on('error', () => undefined);
+      res.body.destroy();
+      if (status >= 200 && status <= 299 && /video|audio|octet-stream|mpegurl|mp2t|dash/i.test(ct)) {
+        return true;
+      }
+      this.logger.w(`play: 自解链预检失败 status=${status} ct=${ct}: ${url.slice(0, 90)}`);
+      return false;
+    } catch (e) {
+      this.logger.w(`play: 自解链预检异常: ${(e as Error).message}`);
+      return false;
     }
   }
 
@@ -2028,10 +2152,26 @@ export class SpiderHost {
     }
     // ★ 2026-09-30（用户要求「实现百度网盘桌面端解链」）：百度分享型播放（episode 本身就是
     //   `pan.baidu.com/s/…`，如「盘搜/百酷」这类聚合源）且已绑定百度 → 原生 baiduResolveShare 取直链。
-    //   ★ 百度**没有免转存直链**（share/list 子目录接口已关停，实测 errno 140/2 恒定），只能「转存 → 取链」，
+    //   原生通道采用「转存 → 取链」，
     //     落盘到应用专用目录「Win-Box缓存」，播完即删（走 pendingQuarkDeletes 队列）。
     let bdFail = '';
-    if (isBaiduSharePlay(id)) {
+    // FTY 详情描述已带所选文件与 seKey：无需等待可能超时的 playerContent 再取回同一描述。
+    if (extractBaiduSharedFile(id)) {
+      const miss: string[] = [];
+      const got = await this.baiduFromPanUrl(id, flag, miss);
+      if (got) return got;
+      // 完整描述已足以转存；失败原因如空间不足不能被 jar playerContent 超时覆盖。
+      return {
+        parse: 1, url: '', playUrl: '', flag, jx: 0,
+        ...(!this.driveList()['baidu'] ? { needDriveCookieBind: 'baidu' } : {}),
+        message: `百度网盘取流失败（${miss.join('；') || '分享文件解链失败'}）`,
+      };
+    }
+    // ★ 2026-10-09：**百度「播放描述 JSON」形态跳过原生预钩子**（嘟嘟无限等）——
+    //   该形态的提取码/BDCLND 在 jar 详情阶段的内存状态里，原生 baiduResolveShare 没带提取码必失败
+    //   （真机实证「分享需要提取码（该线路没带提取码）」白等数秒）→ 直接让蜘蛛接手，
+    //   由 playInner 的「描述 JSON → 合成 do=pan → jar 自解链」处理。
+    if (isBaiduSharePlay(id) && !isBaiduPanDescriptor(id)) {
       const bdCookie = (this.driveList() as Record<string, string>)['baidu'] || '';
       const share = extractBaiduShare(id);
       if (!bdCookie) {
@@ -2072,7 +2212,8 @@ export class SpiderHost {
       //   形如 `http://127.0.0.1:-1/proxy?do=pan&type=2&site=baidu&…`（安卓由 App 的 Pan 子系统承担），
       //   交给 /play 中继只会 `new URL('http://127.0.0.1:-1/…')` 抛 Invalid URL → 用户看到黑屏、
       //   且真正原因（转存失败）被吞掉。这类地址一律视为「蜘蛛没给可用地址」，走下面的原因上屏。
-      if (r.url && (/[?&]do=pan\b/i.test(r.url) || /127\.0\.0\.1:-1/i.test(r.url))) {
+      const panJson = !!r.url && isBaiduPanDescriptor(r.url);
+      if (r.url && (/[?&]do=pan\b/i.test(r.url) || /127\.0\.0\.1:-1/i.test(r.url) || panJson)) {
         // ★ 落**参数值里的关键线索**：这条日志是排查「网盘线路播不了」的唯一入口。
         //   ★ 2026-10-08 加强：此前只记参数名（keys=…），而「fileId 是不是分享链接、site 是哪个网盘、
         //   值有没有被 percent-encode」正是判因关键。现在并记 `site` / `shareId` / **解码后**的 fileId 预览
@@ -2080,10 +2221,66 @@ export class SpiderHost {
         //   值里可能带 token，故 fileToken 一律不落。
         const pan = parsePanProxyQuery(r.url);
         const panKeys = Object.keys(pan).join(',');
-        this.logger.w(
-          `play: 蜘蛛返回桌面端无路由的网盘代理地址（do=pan）→ 视为无地址: ${key} | keys=${panKeys}` +
-            ` | site=${pan.site || '-'} | shareId=${(pan.shareId || '-').slice(0, 40)} | fileId=${(pan.fileId || '-').slice(0, 140)}`,
-        );
+        if (panJson) {
+          // ★ 2026-10-09：饭太硬系（嘟嘟无限等）`playerContent` 直接返回百度网盘**播放描述 JSON**
+          this.logger.w(
+            `play: 蜘蛛返回「百度网盘播放描述 JSON」→ 走原生解链: ${key} | surl=${(extractBaiduShare(r.url)?.short || '-').slice(0, 40)}`,
+          );
+        } else {
+          this.logger.w(
+            `play: 蜘蛛返回桌面端无路由的网盘代理地址（do=pan）→ 视为无地址: ${key} | keys=${panKeys}` +
+              ` | site=${pan.site || '-'} | shareId=${(pan.shareId || '-').slice(0, 40)} | fileId=${(pan.fileId || '-').slice(0, 140)}`,
+          );
+        }
+        // ★★ 2026-10-09（jar 自解链优先，勿删）★★
+        //   9978 已应答 `/proxy?do=ck`→`ok`（LocalProxyServer），SpiderRunner 启动即拉起 JVM 内宿主代理
+        //   （-Dtvbox.proxy.port）⇒ jar 产出的 `do=pan` 播放地址可改写 `/proxy/<jvmPort>` 回**它自己**解链
+        //   （`Pan.proxy`：分享内 fs_id 需要 jar 详情阶段存下的 shareid/uk/BDCLND，桌面原生通道拿不到；
+        //    Range 等请求头由转发层透传、stub 并入 params）。端口未知 → 落到下方原生通道兜底。
+        let jvmPort: number | null = null;
+        try {
+          jvmPort = this.vm.proxyPortFor ? this.vm.proxyPortFor(b) : null;
+        } catch {
+          jvmPort = null;
+        }
+        if (jvmPort) {
+          const mProxy = /^http:\/\/127\.0\.0\.1:(?:9978|-1)\/proxy\?/i.exec(r.url);
+          if (mProxy) {
+            const rewritten = r.url.replace(mProxy[0], `http://127.0.0.1:9978/proxy/${jvmPort}?`);
+            this.logger.i(
+              `play: 网盘/代理地址改写 → 蜘蛛 JVM 自解链(/proxy/${jvmPort}) do=${pan.do || '-'} site=${pan.site || '-'}: ${key}`,
+            );
+            // ★★ 2026-10-09（第七轮）：**预检后才采用**。jar 自解链管道已通（CNFE 已修），
+            //   但业务可能失败（真机实证：baidu「播放链接为空」/ quark「response code: 412」）
+            //   —— 直接返回会让播放器黑屏且无线索。预检一次（Range 0-0，代价一个极小请求）：
+            //   出流 ⇒ 采用；不出流 ⇒ 落到下方**原生通道**（Cookie 最新、夸克转存已实证可用）。
+            if (await this.probeSelfResolveUrl(rewritten)) {
+              return { ...r, parse: 0, url: rewritten, playUrl: '', jx: 0 };
+            }
+            this.logger.w(`play: jar 自解链预检不通过 → 原生通道兜底: ${key}`);
+          } else if (panJson) {
+            // ★ 嘟嘟无限等「百度描述 JSON」：取 `share_id` + `fs_id` **合成 do=pan** 交 jar 自解链
+            //   （安卓同契约；提取码/BDCLND 由 jar 内部状态处理 —— 原生通道没带提取码必失败）。
+            const shareId = /"share_id"\s*:\s*"([0-9a-zA-Z_-]+)"/.exec(r.url)?.[1] || '';
+            const fsId = /"fs_id"\s*:\s*"([0-9]+)"/.exec(r.url)?.[1] || '';
+            if (fsId) {
+              const q = `do=pan&type=2&site=baidu&shareId=${encodeURIComponent(shareId)}&fileId=${fsId}&fileToken=`;
+              const synth = `http://127.0.0.1:9978/proxy/${jvmPort}?${q}`;
+              this.logger.i(
+                `play: 百度描述 JSON → 合成 do=pan 交 jar 自解链(/proxy/${jvmPort}) share_id=${shareId.slice(0, 24)} fs_id=${fsId.slice(0, 24)}: ${key}`,
+              );
+              // ★ 同上：预检后才采用，失败落原生通道（描述里的 surl 走 baiduResolveShare）
+              if (await this.probeSelfResolveUrl(synth)) {
+                return { ...r, parse: 0, url: synth, playUrl: '', jx: 0 };
+              }
+              this.logger.w(`play: 描述 JSON 合成 do=pan 预检不通过 → 原生通道兜底: ${key}`);
+            }
+          } else {
+            this.logger.w(`play: 拿到 JVM 端口但该地址无法自解链（非代理/描述形态）→ 原生通道: ${key}`);
+          }
+        } else if (/[?&]do=pan\b/i.test(r.url) || /127\.0\.0\.1:-1/i.test(r.url) || panJson) {
+          this.logger.w(`play: 拿不到该源 JVM 端口（蜘蛛未被调用过/非 jar 源）→ 原生解链兜底: ${key}`);
+        }
         // ★ 2026-09-30：这个地址里若带**分享链接**（实测形态 `do=pan&site=baidu&shareId=&fileId=<分享URL>`），
         //   改走原生解链（比上面的 episode id 判据更晚，覆盖「id 不是分享链接、jar 才拼出分享」的源）。
         // ★ 2026-10-08：扩为**百度 + UC 双通道**（此前只有百度 —— jar 给 UC 分享的线路必然黑屏），
@@ -2104,7 +2301,7 @@ export class SpiderHost {
         for (const ch of order) {
           const got =
             ch === 'baidu'
-              ? await this.baiduFromPanUrl(r.url, flag, miss)
+              ? await this.baiduFromPanUrl(r.url, flag, miss, jvmPort)
               : ch === 'uc'
                 ? await this.ucFromPanUrl(r.url, flag, miss)
                 : await this.quarkFromPanUrl(r.url, flag, miss);

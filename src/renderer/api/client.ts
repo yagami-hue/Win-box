@@ -213,9 +213,12 @@ declare global {
         close: () => Promise<IpcResult<void>>;
         setMini: (isMini: boolean) => Promise<IpcResult<{ mini: boolean }>>;
         isMini: () => Promise<IpcResult<{ mini: boolean }>>;
+        setFullscreen: (fullscreen: boolean) => Promise<IpcResult<{ fullscreen: boolean }>>;
+        isFullscreen: () => Promise<IpcResult<{ fullscreen: boolean }>>;
         onInit: (cb: (init: unknown) => void) => () => void;
         onSwitchEp: (cb: (epIndex: number) => void) => () => void;
         onMini: (cb: (mini: boolean) => void) => () => void;
+        onFullscreen: (cb: (fullscreen: boolean) => void) => () => void;
       };
       boss: {
         get: () => Promise<IpcResult<BossKeySettings>>;
@@ -331,7 +334,10 @@ export const client = {
   playerOnSwitchEp: (cb: (epIndex: number) => void) => window.api.player.onSwitchEp(cb),
   playerSetMini: (isMini: boolean) => unwrap(window.api.player.setMini(isMini)),
   playerIsMini: () => unwrap(window.api.player.isMini()),
+  playerSetFullscreen: (fullscreen: boolean) => unwrap(window.api.player.setFullscreen(fullscreen)),
+  playerIsFullscreen: () => unwrap(window.api.player.isFullscreen()),
   playerOnMini: (cb: (mini: boolean) => void) => window.api.player.onMini(cb),
+  playerOnFullscreen: (cb: (fullscreen: boolean) => void) => window.api.player.onFullscreen(cb),
   bossGet: () => unwrap(window.api.boss.get()),
   bossSet: (patch: Partial<BossKeySettings>) => unwrap(window.api.boss.set(patch)),
   bossOnEnter: (cb: () => void) => window.api.boss.onEnter(cb),

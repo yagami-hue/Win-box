@@ -81,9 +81,6 @@ export interface JarBridgeOptions {
   totalMemBytes?: number;
 }
 
-/** 类缺失兜底重试时最多追加的缓存 jar 数（防一次拼进几十只 jar 把类加载顺序搅乱） */
-const MAX_FALLBACK_JARS = 8;
-
 /**
  * ★ 2026-09-25：dex2jar 转换失败的**抑制窗口**。
  *   大 jar 的一次失败要付几十秒~几分钟 CPU（实测 11.3MB dex 转换 4 分钟、OOM 也要 2 分钟），
@@ -258,6 +255,8 @@ export class JarSpiderBridge {
   private artifactOkCache = new Map<string, string>();
   /** ★ 转换产物是否含 .so（= 需要原生桥）；按产物路径缓存，避免每次 spawn 重读 zip 目录 */
   private nativeFlag = new Map<string, boolean>();
+  private classIndexes = new Map<string, { stamp: string; entries: Set<string>; hash: string }>();
+  private fallbackJars = new Map<string, { path: string; hash: string }>();
   /** 全局 spider jar（配置顶层 spider 字段），site.jar 优先 */
   private globalJar = '';
   /**
@@ -278,6 +277,17 @@ export class JarSpiderBridge {
   private activeChildren = new Set<import('node:child_process').ChildProcess>();
   /** ★ 本地代理端口 → 池 key（/proxy/<port> 被访问时据此钉住对应 JVM，见 spiderProxyPort） */
   private readonly proxyPortKeys = new Map<number, string>();
+
+  /** ★ 2026-10-09：源 key → 宿主代理端口（call(tag) 时登记；`proxyPortForTag` 供 jar 自解链改写） */
+  private readonly proxyPortByTag = new Map<string, number>();
+  /** 详情阶段保存分享会话的 JVM；首页/搜索完成不能改写它。 */
+  private readonly detailProxyPortByTag = new Map<string, number>();
+
+  /** ★ 2026-10-09：按源 key 查宿主代理端口（未调用过 → null） */
+  proxyPortForTag(tag: string): number | null {
+    const p = this.proxyPortByTag.get(tag);
+    return Number.isInteger(p) ? (p as number) : null;
+  }
   /** ★ 子进程常驻复用池（--serve/-serve；进程复用加速首页/搜索；单测与显式关闭时禁用） */
   private readonly pool: SpiderProcPool | null;
   private readonly poolReclaimTimer?: ReturnType<typeof setInterval>;
@@ -387,6 +397,9 @@ export class JarSpiderBridge {
    */
   resetPool(): void {
     this.pool?.dispose();
+    this.proxyPortByTag.clear();
+    this.detailProxyPortByTag.clear();
+    this.proxyPortKeys.clear();
   }
 
   /** .py 蜘蛛本地脚本缓存目录（<spiderCache>/py），与转换产物(converted)同级兄弟。 */
@@ -1244,11 +1257,8 @@ export class JarSpiderBridge {
   /**
    * 调用蜘蛛方法（jarPaths 为转换后的本地 jar 路径；className 形如 com.github.catvod.spider.Doll）。
    *
-   * ★ 2026-09-23「源加载问题」通解之一：**类缺失 → 缓存 jar 并集兜底重试**。
-   *   真机分布里 `ClassNotFoundException: com.github.catvod.spider.Xxx`（配置里的 jar 与 api 不匹配、
-   *   或该配置引用的 jar 与手里这只 jar 不是同一构建）并不罕见。此前只能报错认栽；
-   *   现在自动用「缓存目录里其它已转换的 spider jar」拼一份并集 classpath 再试一次 ——
-   *   对用户是「这个源也能打开了」，对代码是零配置的通用兜底（声明 jar 仍排在最前，不改变正常源的类加载顺序）。
+   * 入口类缺失时只使用唯一包含该类的缓存构建；不能混载所有订阅 jar。
+   * 不同构建的同名混淆依赖不兼容，多个不同候选时诚实报配置不匹配。
    */
   async call(
     jarPaths: string[],
@@ -1256,9 +1266,20 @@ export class JarSpiderBridge {
     method: string,
     args: string[],
     timeoutMs?: number,
+    tag?: string,
   ): Promise<string> {
     this.lastSpiderReason = '';
-    const out = await this.callImpl(jarPaths, className, method, args, timeoutMs);
+    const fallbackKey = jarPaths.join(';') + '\n' + className;
+    const entry = className.replace(/\./g, '/') + '.class';
+    const remembered = this.fallbackJars.get(fallbackKey);
+    const rememberedIndex = remembered && this.jarClassIndex(remembered.path);
+    if (remembered && rememberedIndex?.hash === remembered.hash &&
+        !jarPaths.some((p) => this.jarClassIndex(p)?.entries.has(entry))) {
+      return this.callImpl([remembered.path], className, method, args, timeoutMs, tag);
+    }
+    this.fallbackJars.delete(fallbackKey);
+    const out = await this.callImpl(jarPaths, className, method, args, timeoutMs, tag);
+    if (out.trim()) return out; // 成功结果不能受其它并发调用的共享诊断字段影响。
     // ★★ 2026-09-29（设备实证「切换部分源 NPE」的兜底，勿删）★★
     //   现象：加固壳的守卫类（csp_DouDouGuard / csp_T4Guard …）报
     //   `NullPointerException: Cannot invoke "com.github.catvod.crawler.Spider.init(android.content.Context, String)"`
@@ -1278,17 +1299,23 @@ export class JarSpiderBridge {
           `jvm-bridge ${className}: 守卫内层蜘蛛为空（原生解密未产出加载器）→ 改用 shell-shim 真实实现重试：${shim}`,
         );
         this.lastSpiderReason = '';
-        return this.callImpl(jarPaths, className, method, args, timeoutMs);
+        return this.callImpl(jarPaths, className, method, args, timeoutMs, tag);
       }
     }
     if (!isSpiderClassMissing(this.lastSpiderReason)) return out;
-    const extra = this.otherConvertedJars(jarPaths);
-    if (extra.length === 0) return out;
-    this.host?.logger.i(
-      `jvm-bridge ${className}: 声明的 jar 内无此类，追加 ${extra.length} 个缓存 jar 兜底重试（配置与 jar 不匹配的通用兜底）`,
-    );
+    // 入口类本来存在：缺失的是内部依赖，混进其它版本并不能修复它。
+    if (jarPaths.some((p) => this.jarClassIndex(p)?.entries.has(entry))) return out;
+    const candidates = this.otherConvertedJars(jarPaths, entry);
+    if (candidates.length !== 1) {
+      if (candidates.length > 1) this.lastSpiderReason = `蜘蛛类未找到；缓存中有 ${candidates.length} 个不同构建包含 ${className}，无法安全选择，请修正源 jar 配置`;
+      return out;
+    }
+    this.host?.logger.i(`jvm-bridge ${className}: 入口类只在一个缓存构建中存在 → 独立加载 ${basename(candidates[0])}（不混载其它订阅）`);
     this.lastSpiderReason = '';
-    return this.callImpl(jarPaths, className, method, args, timeoutMs, extra);
+    const result = await this.callImpl(candidates, className, method, args, timeoutMs, tag);
+    const index = this.jarClassIndex(candidates[0]);
+    if (result.trim() && index) this.fallbackJars.set(fallbackKey, { path: candidates[0], hash: index.hash });
+    return result;
   }
 
   private async callImpl(
@@ -1297,7 +1324,7 @@ export class JarSpiderBridge {
     method: string,
     args: string[],
     timeoutMs?: number,
-    extraJars: string[] = [],
+    tag?: string,
   ): Promise<string> {
     // ★ shell-shim（方案 A 影子类，见 stubs-src/shell-shim/DexNative.java）——
     //   遇到加固/壳 jar（内含 native 版 DexNative）时，把 shell-shim.jar 排在
@@ -1329,12 +1356,17 @@ export class JarSpiderBridge {
     //   正确分工：**-cp 只放运行时**（stubs/libs/桥/unidbg）；**蜘蛛 jar 只走加载器参数**（子加载器，
     //   顺序 = 改写产物目录 → shell-shim jar → 蜘蛛 jar）。
     const runtimeCp = [this.classpathJars(), ...nativeJars].join(';');
-    const loadParts = [...jarPaths, ...extraJars];
+    const loadParts = [...jarPaths];
     if (shimClasses && existsSync(shimJar)) loadParts.unshift(shimJar);
     else if (shimClasses) {
       this.host?.logger.w(`jvm-bridge 已启用 shell-shim（${shimClasses}），但未找到 shell-shim.jar: ${shimJar}，影子类不会生效`);
     }
     const loadCp = loadParts.join(';');
+    // ★★ 2026-10-09（孤儿端口场景修复，勿回退）★★：tag → 端口映射**只信 serve 信封自报的 `pp`**
+    //   （见下方 r.proxyPort），不再在调用前预登记确定性散列端口 —— 确定性端口（19970~19999）
+    //   只是「期望值」：被上一会话残留 JVM（孤儿）或同 key 并存 JVM 占用时，本 JVM 会退化临时
+    //   端口，预登记的猜测值会把播放地址改写到**别的 JVM**（旧 stubs / 无状态），白等预检超时
+    //   （最长 20s）才落原生通道。一次性回退路径无信封 → 拿不到端口 → playInner 诚实落原生兜底。
     const nativeArgs = this.nativeProps(nativeJars);
     const argv = [
       ...this.jvmPrefix(runtimeCp, false, loadCp),
@@ -1359,12 +1391,28 @@ export class JarSpiderBridge {
       //   「守卫已通」也会被超时判死。只对这类 jar 抬底，普通源行为不变。
       const tmo = nativeJars.length ? Math.max(timeoutMs ?? this.callTimeoutMs, NATIVE_CALL_MIN_TIMEOUT_MS) : timeoutMs ?? this.callTimeoutMs;
       try {
-        const r = await this.poolSubmit(this.javaExe(), key, serveArgv, className, method, args, this.proxyProvider?.().env ?? {}, tmo);
+        const preferredPort = tag && method === 'playerContent' ? this.detailProxyPortByTag.get(tag) : undefined;
+        const r = await this.poolSubmit(this.javaExe(), key, serveArgv, className, method, args, this.proxyProvider?.().env ?? {}, tmo, preferredPort);
         // ★ 2026-09-28：信封 ok=false（蜘蛛自己抛）→ 传输层成功、不回退一次性，但必须
         //   ①把错误落进 lastSpiderReason（翻译后上屏，代替笼统的「蜘蛛返回空结果」）
         //   ②让 call() 的「类缺失 → 缓存 jar 并集兜底重试」重新生效
         //   （旧行为把错误串当正常 data 直接返回，两条路都断了；见 PoolResult.error）。
         if (r.ok) {
+          // ★ 2026-10-09：以**该 serve 进程自报**的宿主代理端口为准（多 JVM 时 -Dtvbox.proxy.port
+          //   只有第一只能绑到）—— 改写必须打到「真正服务过调用的这一只」，Pan.proxy 状态在它内存。
+          //   ★ 孤儿端口场景补：实际端口（含退化临时端口）也登记进 port→key 表 ——
+          //     /proxy/<临时端口> 被访问时的「钉住防回收」此前查不到 key 而失效（播放中
+          //     可能被池额度压力 LRU 回收 → 断流）。
+          if (tag && r.proxyPort) {
+            if (method === 'detailContent' && !r.error) {
+              this.detailProxyPortByTag.set(tag, r.proxyPort);
+              this.pool?.pin(key, 2 * 60_000); // 给用户选集留出时间，避免详情会话被 LRU 回收。
+            }
+            if (method === 'playerContent' || method === 'detailContent' || !this.proxyPortByTag.has(tag)) {
+              this.proxyPortByTag.set(tag, r.proxyPort);
+            }
+            this.proxyPortKeys.set(r.proxyPort, key);
+          }
           if (r.error) {
             const raw = String(r.error);
             this.lastSpiderReason = translateSpiderLog(raw);
@@ -1436,12 +1484,13 @@ export class JarSpiderBridge {
     args: string[],
     env?: Record<string, string>,
     timeoutMs?: number,
+    preferredPort?: number,
   ): Promise<PoolResult> {
     if (!this.pool) return { ok: false, data: '' };
     const id = `${exe.includes('python') ? 'py' : 'jvm'}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     return new Promise<PoolResult>((resolve) => {
       void this.pool!
-        .submit(key, { exe, serveArgv, env, key }, { id, className, method, args }, timeoutMs)
+        .submit(key, { exe, serveArgv, env, key }, { id, className, method, args }, timeoutMs, preferredPort)
         .then(resolve)
         .catch(() => resolve({ ok: false, data: '' }));
     });
@@ -2041,10 +2090,23 @@ export class JarSpiderBridge {
     });
   }
 
-  /** 缓存目录里「其它已转换的 spider jar」（类缺失兜底用），按修改时间新→旧取前 N 只 */
-  private otherConvertedJars(declared: string[]): string[] {
+  private jarClassIndex(path: string): { stamp: string; entries: Set<string>; hash: string } | null {
+    try {
+      const st = statSync(path), stamp = `${st.size}:${st.mtimeMs}`;
+      const cached = this.classIndexes.get(path);
+      if (cached?.stamp === stamp) return cached;
+      const buf = readFileSync(path);
+      const index = { stamp, entries: new Set(listZipEntries(buf)), hash: contentHashOf(buf) };
+      if (this.classIndexes.size >= 64) this.classIndexes.delete(this.classIndexes.keys().next().value!);
+      this.classIndexes.set(path, index);
+      return index;
+    } catch { this.classIndexes.delete(path); return null; }
+  }
+
+  /** 只取实际含入口类的构建，相同内容多 URL 去重，不按时间猜版本。 */
+  private otherConvertedJars(declared: string[], entry: string): string[] {
     const skip = new Set(declared.map((p) => p.toLowerCase()));
-    const out: Array<{ p: string; m: number }> = [];
+    const out = new Map<string, string>();
     try {
       const fs = require('node:fs') as typeof import('node:fs');
       for (const f of fs.readdirSync(this.cacheDir)) {
@@ -2053,10 +2115,11 @@ export class JarSpiderBridge {
         if (!f.endsWith('.jar') || f.endsWith('.raw.jar') || f.endsWith('.part.jar')) continue;
         const p = join(this.cacheDir, f);
         if (skip.has(p.toLowerCase())) continue;
-        try { out.push({ p, m: statSync(p).mtimeMs }); } catch { /* 文件消失忽略 */ }
+        const index = this.jarClassIndex(p);
+        if (index?.entries.has(entry) && !out.has(index.hash)) out.set(index.hash, p);
       }
     } catch { /* 缓存目录不存在 → 无兜底候选 */ }
-    return out.sort((a, b) => b.m - a.m).slice(0, MAX_FALLBACK_JARS).map((x) => x.p);
+    return [...out.values()];
   }
 
   /** 预热：下载+转换（导入配置后后台跑，避免首次点开卡住） */
@@ -2408,6 +2471,12 @@ export function extractBridgeNotes(stderr: string): string[] {
     //   -Dtvbox.shellShim.debug=true 时才打印，设备上「守卫内层蜘蛛为空」时拿不到任何线索，一并上屏。
     else if (t.startsWith('[ShellShim]')) out.push(t);
     else if (t.startsWith('[SpiderRunner] 警告')) out.push(t);
+    // ★ 2026-10-09（.8 探针「无输出」真因，勿删）：宿主代理与 baidu-state 探针的说话行不在
+    //   白名单里，serve 进程 stderr 中被静默丢弃 —— 本地直跑 stubs.jar 能看到探针输出、
+    //   真机上却「无 [baidu-state]」，第十轮日志因此误判为孤儿 JVM。池/一次性两条路径都经
+    //   本函数，加白名单即全覆盖（noteBridgeLog 有整行去重，高频「请求处理失败」不会刷屏）。
+    else if (t.startsWith('[host-proxy]')) out.push(t);
+    else if (t.startsWith('[baidu-state]')) out.push(t);
   }
   return out;
 }

@@ -36,7 +36,7 @@ import type { UpdateProgress } from '../../shared/update';
 import type { UpdateService } from '../update/UpdateService';
 import { md5Hex } from '../../engine/util/md5';
 // 独立播放器窗口
-import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow, playerResendInit, onPlayerWindowClosed, isPlayerWindow } from '../player/PlayerWindow';
+import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow, playerSetMini, playerIsMini, playerWindow, playerResendInit, onPlayerWindowClosed, isPlayerWindow, playerSetFullscreen, playerIsFullscreen } from '../player/PlayerWindow';
 // ★ 2026-10-08 MPV 高兼容播放内核（独立播放器窗口内嵌 --wid）
 import { MpvController } from '../player/MpvController';
 // ★ 2026-10-08 详情页独立窗口（外观开关控制；见 renderer/lib/detailWin.ts）
@@ -518,6 +518,8 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     return { mini: playerIsMini() };
   }, log);
   registerHandler(IPC.PLAYER_IS_MINI, () => ({ mini: playerIsMini() }), log);
+  registerHandler(IPC.PLAYER_SET_FULLSCREEN, (_e: any, fullscreen: boolean) => ({ fullscreen: playerSetFullscreen(!!fullscreen) }), log);
+  registerHandler(IPC.PLAYER_IS_FULLSCREEN, () => ({ fullscreen: playerIsFullscreen() }), log);
   registerHandler('player:close', () => {
     closePlayerWindow();
     return { ok: true };

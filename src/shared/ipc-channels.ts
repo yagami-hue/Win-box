@@ -152,6 +152,8 @@ export const IPC = {
   PLAYER_IS_OPEN: 'player:isOpen',
   PLAYER_SET_MINI: 'player:setMini',
   PLAYER_IS_MINI: 'player:isMini',
+  PLAYER_SET_FULLSCREEN: 'player:setFullscreen',
+  PLAYER_IS_FULLSCREEN: 'player:isFullscreen',
   // 老板键（全局快捷键隐藏/恢复）
   BOSS_GET: 'boss:get',
   BOSS_SET: 'boss:set',

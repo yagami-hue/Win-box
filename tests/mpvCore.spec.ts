@@ -109,22 +109,35 @@ describe('mpvCore · 状态归一', () => {
     expect(s.duration).toBeNull();
   });
 
-  it('file-loaded：loaded=true；时长未知 ⇒ 直播', () => {
+  it('file-loaded：loaded=true；时长未知仍保持非直播，直播由启动提示决定', () => {
     const vod = initialKernelState();
     reduceMpvMessage(vod, { event: 'property-change', name: 'duration', data: 100 });
     reduceMpvMessage(vod, { event: 'file-loaded' });
     expect(vod.loaded).toBe(true);
     expect(vod.live).toBe(false);
-    const live = initialKernelState();
+    const live = initialKernelState(true);
     reduceMpvMessage(live, { event: 'file-loaded' });
     expect(live.live).toBe(true);
   });
 
-  it('eof：end-file(reason=eof) 或 eof-reached 置位；无关消息与重复消息不产生变化', () => {
+  it('eof：只有真实播放结束才置位；首包失败进入错误态', () => {
     const s = initialKernelState();
     expect(reduceMpvMessage(s, { event: 'end-file', reason: 'stop' })).toBe(false);
     expect(reduceMpvMessage(s, { event: 'end-file', reason: 'eof' })).toBe(true);
-    expect(s.eof).toBe(true);
+    expect(s.eof).toBe(false);
+    expect(s.error).toBe('读取或解码失败');
+    const knownDurationFailure = initialKernelState();
+    reduceMpvMessage(knownDurationFailure, { event: 'file-loaded' });
+    reduceMpvMessage(knownDurationFailure, { event: 'property-change', name: 'duration', data: 100 });
+    expect(reduceMpvMessage(knownDurationFailure, { event: 'end-file', reason: 'eof' })).toBe(true);
+    expect(knownDurationFailure.eof).toBe(false);
+    expect(knownDurationFailure.error).toBe('读取或解码失败');
+    const played = initialKernelState();
+    reduceMpvMessage(played, { event: 'file-loaded' });
+    reduceMpvMessage(played, { event: 'property-change', name: 'time-pos', data: 12.5 });
+    expect(reduceMpvMessage(played, { event: 'end-file', reason: 'eof' })).toBe(true);
+    expect(played.eof).toBe(true);
+    expect(played.playbackStarted).toBe(true);
     expect(reduceMpvMessage(s, { event: 'end-file', reason: 'eof' })).toBe(false);
     expect(reduceMpvMessage(s, { event: 'property-change', name: 'time-pos', data: null })).toBe(false);
     expect(reduceMpvMessage(s, { event: 'unknown-event' })).toBe(false);

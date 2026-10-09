@@ -20,7 +20,16 @@ function ItemCard({ it, onOpen, onHover, playBadge, dbPlay, dbYear }: { it: Disc
     <div
       className="card-media"
       style={{ cursor: 'pointer' }}
+      role="button"
+      tabIndex={0}
+      aria-label={`${it.title}${it.year ? ` (${it.year})` : ''}，点击全源搜索`}
       onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
       onMouseEnter={onHover}
       title={`${it.title}${it.year ? ` (${it.year})` : ''} · 点击全源搜索`}
     >
@@ -216,9 +225,12 @@ export default function DiscoverPage() {
             {ap && firstRow.length > 1 && (
               <div className="ap-hero-dots">
                 {firstRow.slice(0, 8).map((it, i) => (
-                  <span
+                  <button
+                    type="button"
                     key={`${it.title}-${i}`}
                     className={'ap-dot' + (hero?.title === it.title ? ' active' : '')}
+                    aria-label={`切换到 ${it.title}`}
+                    aria-current={hero?.title === it.title ? 'true' : undefined}
                     title={it.title}
                     onClick={() => setHeroItem(it)}
                   />

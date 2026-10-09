@@ -29,7 +29,45 @@ import java.util.LinkedHashMap;
  */
 public class SpiderRunner {
 
+  /** ★ 宿主代理实际绑定端口（ensureHostProxy 后生效；信封 `pp` 字段上报给宿主） */
+  private static int hostProxyPort = -1;
+
+  /**
+   * ★ 2026-10-09（jar 自解链前置，勿删）：**启动即拉起 JVM 内宿主代理**。
+   *   背景：jar 里的 `com.github.catvod.spider.Proxy.a()` 自己探 9978~9999 的 `/proxy?do=ck`
+   *   （桌面端已应答 ok）来决定播放地址端口——它**不会**经 `Class.forName("com.github.catvod.Proxy")`
+   *   触发本 JVM 宿主代理（`com.github.catvod.Proxy.ensure()`）启动 ⇒ 宿主代理端口（-Dtvbox.proxy.port）
+   *   无人监听，播放器打 `/proxy/<port>` 必 ECONNREFUSED（1.20.0 第三出真机实证）。
+   *   反射调一次 getPort() 即完成 ensure()（绑 -Dtvbox.proxy.port，失败退化临时端口），与旧行为兼容。
+   *   ★ 端口经信封 `pp` 上报：多 JVM 并存时，宿主把播放地址改写到**真正服务过调用的这一只**，
+   *     `Pan.proxy` 的 shareid/BDCLND 状态就在它内存里（第四→五轮实证 19973 被无状态 JVM 占有的错位）。
+   */
+  private static void ensureHostProxy() {
+    try {
+      Object p = Class.forName("com.github.catvod.Proxy").getMethod("getPort").invoke(null);
+      if (p instanceof Number) hostProxyPort = ((Number) p).intValue();
+    } catch (Throwable t) {
+      System.err.println("[host-proxy] 预启动失败: " + t);
+    }
+  }
+
+  /**
+   * ★ 2026-10-09（第六轮真机实证修复，勿删）：把**蜘蛛 jar 的类加载器**绑定给宿主代理。
+   *   预启动发生在 setupEnv 之前（栈上只有应用加载器），captureCallerLoader 捕获不到
+   *   jar 加载器且只捕获一次 ⇒ dispatch 反射 `com.github.catvod.spider.Proxy` 时
+   *   `ClassNotFoundException` → `/proxy/<port>` 全部 500。
+   *   必须在 setupEnv 之后调用本方法（serve 与一次性两条路都调）。
+   */
+  private static void bindHostProxyLoader(ClassLoader cl) {
+    try {
+      Class.forName("com.github.catvod.Proxy").getMethod("bindLoader", ClassLoader.class).invoke(null, cl);
+    } catch (Throwable t) {
+      System.err.println("[host-proxy] 绑定类加载器失败: " + t);
+    }
+  }
+
   public static void main(String[] args) {
+    ensureHostProxy();
     // ★ stdout 专供「结果/信封」：蜘蛛自己的 System.out.println 会与结果/信封共用同一管道，
     //   打印碎片（不带换行的半行）+ 信封 → 整行 JSON 解析失败 → 常驻池侧挂起到超时
     //   （用户侧表现「半天搜不出来」）。这里把 System.out 重定向到 stderr，
@@ -46,6 +84,7 @@ public class SpiderRunner {
       if (args.length < 3) throw new IllegalArgumentException("usage: SpiderRunner <jars;...> <className> <method> [args...]");
       String[] jars = args[0].split(";");
       Env env = setupEnv(jars);
+      bindHostProxyLoader(env.app.getClassLoader());
       String result = dispatch(env, args[1], args[2],
           args.length > 3 ? Arrays.copyOfRange(args, 3, args.length) : new String[0], null);
       realOut.println(result == null ? "" : result);
@@ -74,6 +113,7 @@ public class SpiderRunner {
    */
   private static void serve(String[] jars, PrintStream realOut) throws Exception {
     final Env env = setupEnv(jars);
+    bindHostProxyLoader(env.app.getClassLoader());
     final com.google.gson.Gson gson = new com.google.gson.Gson();
     BufferedReader in = new BufferedReader(new InputStreamReader(System.in, "UTF-8"));
     String line;
@@ -123,6 +163,7 @@ public class SpiderRunner {
       final String[] fArgs = args;
       WORKERS.submit(new Runnable() {
         @Override public void run() {
+          Thread.currentThread().setContextClassLoader(env.app.getClassLoader());
           boolean ok = false;
           String data = "";
           Object sp = null;
@@ -162,6 +203,7 @@ public class SpiderRunner {
     out.put("id", id);
     out.put("ok", ok);
     out.put("data", data == null ? "" : data);
+    if (hostProxyPort > 0) out.put("pp", hostProxyPort); // ★ 2026-10-09：宿主代理实际端口（jar 自解链改写用）
     String s = gson.toJson(out);
     synchronized (realOut) {
       realOut.println(s);
@@ -330,6 +372,8 @@ public class SpiderRunner {
     }
     for (String j : jars) urls.add(new File(j).toURI().toURL());
     URLClassLoader cl = new URLClassLoader(urls.toArray(new URL[0]), SpiderRunner.class.getClassLoader());
+    // 反射/ServiceLoader/蜘蛛后台线程都需要看到私有 jar，而非仅 stubs/libs。
+    Thread.currentThread().setContextClassLoader(cl);
     if (nativeJar != null && patchedDir != null) {
       // 正式 loader 建好后再 arm 一次：桥的惰性初始化/类工厂要用**最终**加载器解析壳类
       armNativeBridge(nativeJar, cl);
@@ -345,6 +389,7 @@ public class SpiderRunner {
 
     // Application 单例（ActivityThread.currentApplication() 反查宿主）
     android.app.Application app = new android.app.Application();
+    app.setClassLoader(cl);
     try { android.app.ActivityThread.setCurrentApplication(app); } catch (Throwable ig) { }
 
     // Init 钩子（须在加载蜘蛛类之前）

@@ -275,6 +275,19 @@
 :root[data-theme='netflix'] .vp-next { background: rgba(20, 20, 20, .9); border-radius: 6px; }
 :root[data-theme='netflix'] .vp-next button { background: var(--nf-red); }
 
+/* Keyboard focus keeps the cinema controls discoverable without changing the hover language. */
+:root[data-theme='netflix'] .nf-link:focus-visible,
+:root[data-theme='netflix'] .srcpick-name:focus-visible,
+:root[data-theme='netflix'] .sp-btn:focus-visible {
+  outline: 2px solid var(--nf-red); outline-offset: 3px;
+}
+
+@media (max-width: 720px) {
+  :root[data-theme='netflix'] .nf-nav { padding: 8px 12px 10px; gap: 8px; }
+  :root[data-theme='netflix'] .nf-link { padding: 5px 6px; font-size: 12px; }
+  :root[data-theme='netflix'] .nf-hero-body { max-width: 86%; margin: 18px 16px 20px; padding: 14px 16px 16px; }
+}
+
 /* 播放器窗口（独立 BrowserWindow）：整窗黑底 */
 :root[data-theme='netflix'] .app.pwin, :root[data-theme='netflix'] .app.pwin .main { background: #000; }
 :root[data-theme='netflix'] .app.pwin .titlebar { background: #000; }

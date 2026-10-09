@@ -310,6 +310,7 @@
 }
 :root[data-theme='apple'] .ap-dot:hover { background: rgba(255, 255, 255, .7); }
 :root[data-theme='apple'] .ap-dot.active { width: 20px; background: #fff; }
+:root[data-theme='apple'] .ap-dot:focus-visible { outline: 2px solid #fff; outline-offset: 4px; }
 
 /* 内容栏（Apple TV 的 shelf）：标题加粗 + 横向缩略图；**不显示滚动条** */
 :root[data-theme='apple'] .ap-row { margin-bottom: 30px; }
@@ -483,4 +484,11 @@
   :root[data-theme='apple'] .ap-sidebar .srcpick-text { display: none; }
   :root[data-theme='apple'] .ap-hero-title { font-size: 32px; max-width: 88%; }
   :root[data-theme='apple'] .ap-main .content { padding: 16px 18px 24px; }
+}
+
+@media (max-width: 620px) {
+  :root[data-theme='apple'] .ap-toolbar { gap: 6px; padding: 0 10px; }
+  :root[data-theme='apple'] .ap-hero { min-height: 300px; }
+  :root[data-theme='apple'] .ap-hero-body { padding: 20px 18px 34px; }
+  :root[data-theme='apple'] .ap-hero-title { font-size: 26px; }
 }

@@ -159,6 +159,12 @@ export class LocalProxyServer {
    *   本机目标一律直连（绝不走用户代理/DoH）。
    */
   private async spiderJvmProxy(u: URL, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // 分享会话只能由主进程直连所属 JVM 读取，不能从带 CORS 的媒体中继公开。
+    if (u.searchParams.get('do') === 'winbox-baidu-context') {
+      res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+      res.end('not found');
+      return;
+    }
     const port = Number(u.pathname.slice('/proxy/'.length));
     if (!Number.isInteger(port) || port < 1024 || port > 65535) {
       res.writeHead(400, { 'Content-Type': 'text/plain' });
@@ -172,11 +178,18 @@ export class LocalProxyServer {
     }
     const target = `http://127.0.0.1:${port}/proxy${u.search}`;
     try {
+      // ★ 2026-10-09：转发 Range（拉流 seek 必需）——此前一个头都不带，jar 自解链（do=pan）会整段 200。
+      const fwdHeaders: Record<string, string> = {};
+      for (const h of ['range', 'accept']) {
+        const v = req.headers[h];
+        if (typeof v === 'string') fwdHeaders[h] = v;
+      }
       const up = await undiciRequest(target, {
         method: req.method === 'HEAD' ? 'HEAD' : 'GET',
         dispatcher: agent,
         headersTimeout: 30000,
         bodyTimeout: 0, // 媒体流可能很长：不做 body 超时
+        headers: fwdHeaders,
       });
       const outHeaders: Record<string, string> = {};
       for (const k of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
@@ -184,6 +197,39 @@ export class LocalProxyServer {
         if (typeof v === 'string') outHeaders[k.replace(/(^|-)([a-z])/g, (_m, a, b) => a + b.toUpperCase())] = v;
       }
       outHeaders['Access-Control-Allow-Origin'] = '*';
+      // ★ 2026-10-09：自解链排障 —— 非 2xx/206 或非媒体 Content-Type 时记一行（含正文前 160 字节预览）。
+      //   第五轮实证「转发通了但 mpv Failed to open」时完全无线索；正文预览能直接看到 Pan.proxy 的报错串。
+      const ct = String(up.headers['content-type'] || '');
+      const statusOk = up.statusCode >= 200 && up.statusCode <= 299;
+      const mediaish = /video|audio|octet-stream|mpegurl|mp2t/i.test(ct);
+      if (!statusOk || (!mediaish && up.statusCode !== 304)) {
+        let preview = '';
+        if (!req.method || req.method.toUpperCase() !== 'HEAD') {
+          try {
+            const it = up.body[Symbol.asyncIterator]();
+            const first = await it.next();
+            if (!first.done && first.value) {
+              const buf = Buffer.from(first.value as Buffer);
+              preview = buf.subarray(0, 160).toString('utf8').replace(/\s+/g, ' ');
+              // 已消费的首块仍是有效媒体数据 → 塞回去继续转发
+              const rest = (async function* gen(): AsyncGenerator<Buffer> {
+                yield buf;
+                for await (const c of up.body) yield c as Buffer;
+              })();
+              res.writeHead(up.statusCode, outHeaders);
+              for await (const c of rest) res.write(c);
+              res.end();
+              this.logger.w(
+                `proxy: 自解链响应异常 status=${up.statusCode} ct=${ct} body=${preview} → ${u.search.slice(0, 120)}`,
+              );
+              return;
+            }
+          } catch {
+            /* 读不到首块按原样走 */
+          }
+        }
+        this.logger.w(`proxy: 自解链响应异常 status=${up.statusCode} ct=${ct} → ${u.search.slice(0, 120)}`);
+      }
       res.writeHead(up.statusCode, outHeaders);
       if (req.method === 'HEAD') {
         res.end();
@@ -202,13 +248,21 @@ export class LocalProxyServer {
     try {
       const u = new URL(req.url || '', `http://127.0.0.1:${LOCAL_PROXY_PORT}`);
       if (u.pathname.startsWith('/proxy/')) {
-        return this.spiderJvmProxy(u, req, res);
+        return await this.spiderJvmProxy(u, req, res);
       }
       if (u.pathname === '/proxy' && u.searchParams.get('do') === 'live') {
-        return this.liveProxy(u, res);
+        return await this.liveProxy(u, res);
+      }
+      // ★ 2026-10-09：jar 的 `spider.Proxy.a()` 会探 9978~9999 的 `/proxy?do=ck`（应答体 == "ok" 才采用）。
+      //   应答 ok 后 jar 把 `http://127.0.0.1:9978/proxy?do=pan&…` 当播放地址 —— playInner 再改写成
+      //   `/proxy/<jvmPort>` 进该源蜘蛛 JVM 自解链（桌面端原生通道解不了的「分享内 fs_id」只有 jar 能解）。
+      if (u.pathname === '/proxy' && u.searchParams.get('do') === 'ck') {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+        res.end('ok');
+        return;
       }
       if (u.pathname === '/play') {
-        return this.playProxy(u, req, res);
+        return await this.playProxy(u, req, res);
       }
       if (u.pathname === '/img') {
         return this.imgProxy(u, res);
@@ -221,12 +275,14 @@ export class LocalProxyServer {
         return this.pkgProxy(u, res);
       }
       if (u.pathname.startsWith('/bt/')) {
-        return this.btProxy(u, req, res);
+        return await this.btProxy(u, req, res);
       }
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('not found');
     } catch (e) {
       this.logger.e('proxy handle error', e);
+      if (res.destroyed || res.writableEnded) return;
+      if (res.headersSent) { res.destroy(); return; }
       res.writeHead(502, { 'Content-Type': 'text/plain' });
       res.end('proxy error');
     }
@@ -657,6 +713,13 @@ private imgProxy(u: URL, res: ServerResponse): void {
     //       会被节点忽略导致坏流（release65），且额外的 Range 预检会消费 auth_key → 播不出（release75 教训）。
     //     · 其余源（其它网盘/普通源）：保留聚合，不误伤。
     const isQuarkAccelNode = /[.-]dl-c-zb/i.test(target);
+    // 百度 dlink 带有短时签名与节点状态：把浏览器的 `bytes=0-` 拆成多个并发
+    // 子 Range 会让部分 pcs 节点把后续请求判为重复/失效，表现为首个 206
+    // 之后 other side closed 或 403。真实小 Range 探针不会触发此分支，
+    // 因此这里必须按 provider 禁用聚合，保留单连接和原始签名。
+    let targetHost = '';
+    try { targetHost = new URL(target).hostname; } catch { /* 保持空值，交给普通链路 */ }
+    const isBaiduDirect = /(?:^|\.)pcs\.baidu\.com$/i.test(targetHost);
     const rng = range === undefined ? '' : Array.isArray(range) ? range[0] : String(range);
     // ★★ 2026-10-08（用户报「橘汁4K · jd4k 点开就提示已播放完毕」根因修复）★★
     //   **jpg 伪装分片剥离**：仅对「整段起始」请求（无 Range 或 `bytes=0-`）嗅探响应头 ≤128KB；
@@ -704,7 +767,8 @@ private imgProxy(u: URL, res: ServerResponse): void {
       !!rng &&
       resp.status === 206 &&
       this.partialRangeOf(resp.headers) !== null &&
-      !isQuarkAccelNode; // 加速节点恒单连接（历史教训，勿再开启聚合）
+      !isQuarkAccelNode &&
+      !isBaiduDirect; // 加速节点与百度签名直链恒单连接
     if (canAggregate) {
       const handled = await this.tryAggregateStream(target, headers, rng, resp, res, AGGREGATE_CONCURRENCY);
       if (handled) {
@@ -996,14 +1060,22 @@ private imgProxy(u: URL, res: ServerResponse): void {
     for (let i = 0; i <= 10; i++) {
       // ★ 取流也走代理链（被 DNS 污染 / SNI 阻断的源站在代理下才可播）
       const dispatchers = outboundDispatchers(cur);
-      const r = await undiciRequest(cur, {
-        method: 'GET',
-        headers: { 'User-Agent': 'Mozilla/5.0 TVBoxWin/0.1', ...headers },
-        headersTimeout: 30000,
-        // 媒体流放行（不设 bodyTimeout/用大值），避免慢下载中途被 undici 截断成"半条流"
-        bodyTimeout: 0,
-        dispatcher: dispatchers[0],
-      });
+      let r: Awaited<ReturnType<typeof undiciRequest>> | undefined;
+      let lastError: unknown;
+      for (const dispatcher of dispatchers) {
+        try {
+          r = await undiciRequest(cur, {
+            method: 'GET',
+            headers: { 'User-Agent': 'Mozilla/5.0 TVBoxWin/0.1', ...headers },
+            headersTimeout: 30000,
+            // 媒体流放行，避免慢下载中途被 undici 截断成“半条流”。
+            bodyTimeout: 0,
+            dispatcher,
+          });
+          break;
+        } catch (error) { lastError = error; }
+      }
+      if (!r) throw lastError || new Error('upstream unavailable');
       const loc = r.headers['location'];
       if (r.statusCode >= 300 && r.statusCode < 400 && loc && i < 10) {
         cur = new URL(Array.isArray(loc) ? loc[0] : loc, cur).toString();

@@ -66,6 +66,13 @@ public class Context {
     public Context() {
     }
 
+    /** 当前蜘蛛/壳真实实现的加载器；不能固定返回运行时桩的应用加载器。 */
+    private volatile ClassLoader classLoader;
+
+    public void setClassLoader(ClassLoader loader) {
+        this.classLoader = loader;
+    }
+
     public Context getApplicationContext() {
         return this;
     }
@@ -143,7 +150,9 @@ public class Context {
     }
 
     public ClassLoader getClassLoader() {
-        return Context.class.getClassLoader();
+        ClassLoader loader = classLoader;
+        if (loader == null) loader = Thread.currentThread().getContextClassLoader();
+        return loader != null ? loader : Context.class.getClassLoader();
     }
 
     public String getString(int resId) {

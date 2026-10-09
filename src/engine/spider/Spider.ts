@@ -124,4 +124,13 @@ export abstract class Spider {
   action(action: string): string | null {
     return null;
   }
+
+  /**
+   * ★ 2026-10-09：该源在蜘蛛 JVM 内「宿主代理」的端口（`/proxy/<port>` 转发用）。
+   * 仅 jar 蜘蛛在**至少成功调用过一次**后才有值（桥在拼 argv 时按加载器参数确定性分配并登记）；
+   * 其余形态恒 null —— 调用方据此决定「jar 自解链改写」是否可用。
+   */
+  proxyPort(): number | null {
+    return null;
+  }
 }

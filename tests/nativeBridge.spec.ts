@@ -266,6 +266,20 @@ describe('extractBridgeNotes — 原生桥消息抽取', () => {
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain('无真实实现可加载');
   });
+
+  // ★ 2026-10-09（孤儿端口排查）：.8 的 [baidu-state] 探针与 [host-proxy] 说话行必须能上屏 ——
+  //   此前不在白名单，serve 进程 stderr 里被静默丢弃（真机「无探针输出」的真因，
+  //   本地直跑 stubs.jar 看得到、经桥看不到，第十轮日志因此误判为孤儿 JVM）。
+  it('抽出 baidu-state 探针与 host-proxy 行（探针可见性）', () => {
+    const notes = extractBridgeNotes(
+      '[baidu-state] shareFsIdMap=n=16 {1a6ELVSV…→3个fsid} bdclndMap=keys=[] ukMap=keys=[] cookie=len:1239',
+    );
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain('shareFsIdMap');
+    const hp = extractBridgeNotes('[host-proxy] 预启动失败: java.net.BindException: Address already in use');
+    expect(hp).toHaveLength(1);
+    expect(hp[0]).toContain('预启动失败');
+  });
 });
 
 // ── ★ 2026-09-29：守卫空 NPE 判据（原因上屏会截断到 120 字符，判据只取方法签名） ──

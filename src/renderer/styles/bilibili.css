@@ -49,9 +49,9 @@
 :root[data-theme='bilibili'] .sidebar { display: none; }
 :root[data-theme='bilibili'] .main { background: var(--b-page); }
 /* 标题栏并进导航条（一体化）：只保留窗口控制，浅色小圆角按钮 */
-.nf-nav .tb-btn { color: #61666d; border-radius: 4px; }
-.nf-nav .tb-btn:hover { background: #f1f2f3; color: #18191c; }
-.nf-nav .tb-btn.tb-close:hover { background: #fb7299; color: #fff; }
+:root[data-theme='bilibili'] .nf-nav .tb-btn { color: #61666d; border-radius: 4px; }
+:root[data-theme='bilibili'] .nf-nav .tb-btn:hover { background: #f1f2f3; color: #18191c; }
+:root[data-theme='bilibili'] .nf-nav .tb-btn.tb-close:hover { background: #fb7299; color: #fff; }
 /* 独立播放器窗口仍用完整标题栏 */
 :root[data-theme='bilibili'] .app.pwin .titlebar { background: #000; border-bottom: none; }
 

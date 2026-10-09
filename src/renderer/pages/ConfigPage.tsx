@@ -1488,14 +1488,27 @@ export default function ConfigPage() {
         <div className="row" style={{ marginBottom: 8 }}>
           <span className="muted" style={{ fontWeight: 600 }}>外观主题</span>
         </div>
-        <div className="row" style={{ gap: 6 }}>
-          {(Object.entries(THEME_LABELS) as [Theme, string][]).map(([t, label]) => (
-            <span
+        <div className="theme-preview-grid" role="radiogroup" aria-label="外观主题">
+           {(Object.entries(THEME_LABELS) as [Theme, string][]).map(([t, label]) => (
+            <button
               key={t}
-              className={`tag ${theme === t ? 'active' : ''}`}
+              type="button"
+              role="radio"
+              aria-checked={theme === t}
+              className={`theme-preview-card theme-preview-${t}${theme === t ? ' active' : ''}`}
               onClick={() => {
                 setTheme(t);
                 applyTheme(t);
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== 'ArrowRight' && e.key !== 'ArrowDown' && e.key !== 'ArrowLeft' && e.key !== 'ArrowUp') return;
+                e.preventDefault();
+                const cards = Array.from(e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]') || []);
+                const index = cards.indexOf(e.currentTarget);
+                const delta = e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 1;
+                const next = cards[(index + delta + cards.length) % cards.length];
+                next?.focus();
+                next?.click();
               }}
               title={
                 t === 'netflix' ? '网飝（默认皮肤）'
@@ -1504,10 +1517,18 @@ export default function ConfigPage() {
                       : '大豆（Material 3 Expressive × 豆瓣风格）'
               }
             >
-              {label} {theme === t ? '✓' : ''}
-            </span>
-          ))}
-        </div>
+              <span className="theme-preview-art" aria-hidden="true">
+                <span className="theme-preview-bar" />
+                <span className="theme-preview-body"><i /><i /><i /></span>
+              </span>
+              <span className="theme-preview-copy">
+                <strong>{label}</strong>
+                <small>{t === 'netflix' ? '影院式内容行' : t === 'bilibili' ? '蓝白社区导航' : t === 'apple' ? 'Liquid Glass' : '暖白海报墙'}</small>
+              </span>
+              <span className="theme-preview-check" aria-hidden="true">{theme === t ? '✓' : ''}</span>
+            </button>
+           ))}
+         </div>
       </div>
 
       {/* ★ 2026-10-08（用户要求「整体重做界面视觉与动效交互」）：界面动效三态。
@@ -1517,16 +1538,19 @@ export default function ConfigPage() {
         <div className="row" style={{ marginBottom: 8 }}>
           <span className="muted" style={{ fontWeight: 600 }}>界面动效</span>
         </div>
-        <div className="row" style={{ gap: 6 }}>
-          {([['auto', '跟随系统'], ['on', '始终开启'], ['off', '关闭动效']] as [MotionPref, string][]).map(([v, label]) => (
-            <span
+        <div className="row" style={{ gap: 6 }} role="radiogroup" aria-label="界面动效">
+           {([['auto', '跟随系统'], ['on', '始终开启'], ['off', '关闭动效']] as [MotionPref, string][]).map(([v, label]) => (
+            <button
               key={v}
+              type="button"
+              role="radio"
+              aria-checked={motion === v}
               className={`tag ${motion === v ? 'active' : ''}`}
               onClick={() => { setMotionState(v); setMotionPref(v); }}
             >
               {label} {motion === v ? '✓' : ''}
-            </span>
-          ))}
+            </button>
+           ))}
         </div>
         <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
           {motion === 'auto' && typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches

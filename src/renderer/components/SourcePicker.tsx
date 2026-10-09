@@ -262,8 +262,16 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
         className={`srcpick-name${disabled ? ' disabled' : ''}`}
         role="button"
         tabIndex={0}
+        aria-expanded={open}
+        aria-haspopup="listbox"
         title={`当前源：${label}\n点击切换源`}
         onClick={toggleOpen}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggleOpen();
+          }
+        }}
         onContextMenu={(e) => e.preventDefault()}
       >
         {isSidebar ? <span className="srcpick-label">当前源</span> : null}
@@ -297,9 +305,18 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
                 {views!.profiles.map((p) => (
                   <div
                     key={p.id}
+                    role="option"
+                    aria-selected={p.id === pane.id}
+                    tabIndex={0}
                     className={`srcpick-item srcpick-sub${p.id === pane.id ? ' active' : ''}${p.id === views!.activeId ? ' cur' : ''}`}
                     title={`${p.name}（${p.sites.length} 个源）${p.id === views!.activeId ? ' · 当前订阅' : ''}`}
                     onClick={() => setPaneId(p.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setPaneId(p.id);
+                      }
+                    }}
                   >
                     {p.name}
                   </div>
@@ -315,9 +332,16 @@ export default function SourcePicker({ sites, current, onPick, variant = 'pill',
                   key={s.key}
                   role="option"
                   aria-selected={paneIsActive && s.key === cur}
+                  tabIndex={0}
                   className={`srcpick-item${paneIsActive && s.key === cur ? ' active' : ''}`}
                   title={`${s.name || s.key}（${s.key}）`}
                   onClick={() => void pickSource(s.key)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      void pickSource(s.key);
+                    }
+                  }}
                 >
                   <span className="srcpick-sname">{s.name || s.key}</span>
                 </div>

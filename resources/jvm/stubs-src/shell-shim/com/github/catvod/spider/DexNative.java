@@ -74,9 +74,16 @@ public class DexNative {
      * 壳的 `Init.init(ctx)` 会调它，返回的 loader 被存进 `Init.loader()`，
      * 之后 `getSpider` 再拿它去 `loadClass`。
      */
-    public static Object getLoader(Object context) {
+    public static synchronized Object getLoader(Object context) {
         if (loader == null) {
             loader = buildLoader();
+        }
+        if (context instanceof android.content.Context) {
+            ((android.content.Context) context).setClassLoader(loader);
+        }
+        Thread.currentThread().setContextClassLoader(loader);
+        if (!originInitialized) {
+            originInitialized = true;
             // ★ 真实实现（如 fty）有自己的 Context 单例 InitOrigin，必须用宿主上下文初始化，
             //   否则真实蜘蛛里 InitOrigin.context().getFilesDir()/getSharedPreferences() 会 NPE。
             initOrigin(context);
@@ -85,6 +92,8 @@ public class DexNative {
         }
         return loader;
     }
+
+    private static boolean originInitialized;
 
     /** 初始化真实实现的 InitOrigin（若有），把宿主 Application 塞进去。 */
     private static void initOrigin(Object context) {

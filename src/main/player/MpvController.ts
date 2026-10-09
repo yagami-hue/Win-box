@@ -97,7 +97,7 @@ export class MpvController {
     this.session += 1;
     const session = this.session;
     this.target = win;
-    this.state = initialKernelState();
+    this.state = initialKernelState(!!opts.live);
     this.subOn = false;
     this.lineBuf = '';
 

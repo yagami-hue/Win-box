@@ -259,6 +259,75 @@ h3 { font-size: var(--fs-xl); } h4 { font-size: var(--fs-lg); color: var(--text)
 .muted { color: var(--text-dim); }
 .err { color: var(--danger); }
 .status { color: var(--text-dim); font-size: 12px; }
+
+/* Keyboard interaction: keep the focus indicator visible without adding a permanent outline. */
+:where(button, input, select, textarea, [role='button'], [role='option'], .card-media):focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+.card-media[role='button'] { outline-offset: 4px; }
+
+/* Theme selection cards: compact visual previews keep the setting scannable at narrow widths. */
+.theme-preview-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.theme-preview-card {
+  position: relative; display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 8px;
+  text-align: left; color: var(--text); background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: none; cursor: pointer;
+}
+.theme-preview-card:hover { border-color: var(--accent); box-shadow: 0 4px 14px var(--accent-soft); }
+.theme-preview-card.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.theme-preview-art { display: block; overflow: hidden; height: 58px; border-radius: 6px; background: #252832; }
+.theme-preview-bar { display: block; height: 13px; background: #14161b; border-bottom: 1px solid rgba(255,255,255,.14); }
+.theme-preview-body { display: flex; gap: 5px; height: 45px; padding: 9px 7px; }
+.theme-preview-body i { display: block; flex: 1; min-width: 0; border-radius: 3px; background: #4a5366; }
+.theme-preview-body i:nth-child(2) { background: #68758e; }
+.theme-preview-body i:nth-child(3) { background: #303846; }
+.theme-preview-bilibili .theme-preview-art { background: #f1f2f3; }
+.theme-preview-bilibili .theme-preview-bar { background: #fff; border-bottom-color: #e3e5e7; }
+.theme-preview-bilibili .theme-preview-body i { background: #bfefff; }
+.theme-preview-bilibili .theme-preview-body i:nth-child(2) { background: #fff; border: 1px solid #e3e5e7; }
+.theme-preview-bilibili .theme-preview-body i:nth-child(3) { background: #fb7299; }
+.theme-preview-apple .theme-preview-art { background: #f5f5f7; }
+.theme-preview-apple .theme-preview-bar { background: rgba(255,255,255,.9); border-bottom-color: #d6d6da; }
+.theme-preview-apple .theme-preview-body i { background: #dbeaff; border-radius: 6px; }
+.theme-preview-apple .theme-preview-body i:nth-child(2) { background: #fff; }
+.theme-preview-apple .theme-preview-body i:nth-child(3) { background: #c9c9cf; }
+.theme-preview-douban .theme-preview-art { background: #f2f4ef; }
+.theme-preview-douban .theme-preview-bar { background: #fff; border-bottom-color: #dce5d8; }
+.theme-preview-douban .theme-preview-body i { background: #cce8c8; border-radius: 5px; }
+.theme-preview-douban .theme-preview-body i:nth-child(2) { background: #f5d2be; }
+.theme-preview-douban .theme-preview-body i:nth-child(3) { background: #a8d3a2; }
+.theme-preview-copy { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.theme-preview-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.theme-preview-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 10px; }
+.theme-preview-check { position: absolute; top: 8px; right: 8px; width: 17px; height: 17px; border-radius: 50%; color: #fff; background: var(--accent); font-size: 11px; line-height: 17px; text-align: center; }
+.theme-preview-card:not(.active) .theme-preview-check { display: none; }
+
+/* The Apple hero dots are buttons for keyboard access, not browser-default buttons. */
+:root[data-theme='apple'] .ap-dot { display: block; margin: 0; padding: 0; border: 0; box-shadow: none; }
+
+/* Light themes must keep elevated popovers opaque enough for text and media beneath them. */
+:root[data-theme='bilibili'] .sp-panel,
+:root[data-theme='bilibili'] .srcpick-pop,
+:root[data-theme='apple'] .sp-panel,
+:root[data-theme='apple'] .srcpick-pop,
+:root[data-theme='douban'] .sp-panel,
+:root[data-theme='douban'] .srcpick-pop { background: var(--bg-elev2); }
+
+@media (max-width: 760px) {
+  .theme-preview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sp-panel { width: min(520px, calc(100vw - 24px)); right: -6px; }
+  .srcpick-pop-wide { min-width: min(440px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
+  .srcpick-pop-right { right: -6px; }
+  .sp-cols { gap: 8px; }
+  .sp-rank { padding-left: 8px; }
+}
+
+@media (max-width: 460px) {
+  .sp-cols { flex-direction: column; }
+  .sp-rank { width: 100%; border-top: 1px solid var(--border-soft); border-left: 0; padding: 8px 0 0; }
+  .srcpick-pop-wide { min-width: min(360px, calc(100vw - 16px)); }
+}
 .tag { display: inline-block; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 999px;
   padding: 3px 11px; font-size: var(--fs-sm); margin: 2px; cursor: pointer;
   transition: background var(--dur-quick) var(--ease-standard), color var(--dur-quick) var(--ease-standard), border-color var(--dur-quick) var(--ease-standard); }

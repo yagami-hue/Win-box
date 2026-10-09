@@ -40,6 +40,12 @@ export interface PoolResult {
    *   （实测：`木兮影视` 报出上一请求遗留的陈旧原因 “java.lang.Object”）。
    */
   error?: string;
+  /**
+   * ★ 2026-10-09：该 serve 进程**实际绑定**的宿主代理端口（信封 `pp` 字段，SpiderRunner 预启动后上报）。
+   *   多 JVM 并存时 -Dtvbox.proxy.port 只有第一只能绑到，其余退化临时端口 —— 播放地址改写必须打到
+   *   「真正服务过这次调用的这一只」（`Pan.proxy` 的 shareid/BDCLND 状态在它内存里）。
+   */
+  proxyPort?: number;
 }
 
 export interface PendingEntry {
@@ -62,10 +68,12 @@ interface Proc {
   queue: QueuedEntry[];
   lastUsed: number;
   dead: boolean;
+  /** 子进程自报的实际代理端口，用于把 playerContent 留在详情所属 JVM。 */
+  proxyPort?: number;
   /**
    * ★ 2026-09-26：钉住到该时刻（毫秒）。本地代理（壳的 `<host>/proxy?do=proxy&key=…`）正在服务
    *   播放时，该 JVM 是**内容源**，被回收就会让播放中段断流 → 回收器跳过钉住的进程。
-   *   只在「额度压力回收（reapOneLru）」时生效；空闲回收本就只收冗余进程。
+   *   LRU 和空闲回收均跳过仍被钉住的进程（冗余 JVM 也可能拥有当前分享会话）。
    */
   pinnedUntil?: number;
 }
@@ -166,12 +174,18 @@ export class SpiderProcPool {
    *   因此这里先找「在途未满」的进程直接派发，只有全都满了才考虑扩容/排队。
    * @param timeoutMs 单请求执行超时（= 源 timeout）；排队等待另有 QUEUE_WAIT_MS 上限。
    */
-  submit(key: string, spec: SpawnSpec, req: ServeRequest, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<PoolResult> {
+  submit(key: string, spec: SpawnSpec, req: ServeRequest, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, preferredPort?: number): Promise<PoolResult> {
     return new Promise<PoolResult>((resolve) => {
       let group = this.groups.get(key);
       if (!group) {
         group = [];
         this.groups.set(key, group);
+      }
+      const owner = preferredPort ? group.find((p) => !p.dead && p.proxyPort === preferredPort) : undefined;
+      if (owner) {
+        if (owner.pending.size < MAX_INFLIGHT_PER_PROC) this.dispatch(owner, req, resolve, timeoutMs);
+        else this.enqueue(owner, req, resolve, timeoutMs);
+        return;
       }
       // 1) 组内有进程且其**在途数未满** → 直接派发（并发，行协议按 id 解复用）
       let target = group.find((p) => !p.dead && p.pending.size < MAX_INFLIGHT_PER_PROC);
@@ -332,7 +346,7 @@ export class SpiderProcPool {
         const t = line.trim();
         if (!t) continue;
         try {
-          const env = JSON.parse(t) as { id?: string; ok?: boolean; data?: string };
+          const env = JSON.parse(t) as { id?: string; ok?: boolean; data?: string; pp?: number };
           const p = proc.pending.get(env.id ?? '');
           if (p) {
             clearTimeout(p.timer);
@@ -342,10 +356,12 @@ export class SpiderProcPool {
             // ★ 2026-09-28：信封 ok=false = 蜘蛛自己抛了（类缺失/内部异常…）—— 传输层成功，
             //   但 data 是**错误串**而不是蜘蛛输出：单独放进 error，data 归空，
             //   调用方据此记原因 / 触发类缺失兜底重试（见 PoolResult.error 注释）。
+            const pp = Number.isInteger(env.pp) && (env.pp as number) > 0 ? (env.pp as number) : undefined;
+            if (pp) proc.proxyPort = pp;
             if (env.ok === false) {
-              p.resolve({ ok: true, data: '', error: String(env.data ?? '') });
+              p.resolve({ ok: true, data: '', error: String(env.data ?? ''), proxyPort: pp });
             } else {
-              p.resolve({ ok: true, data: typeof env.data === 'string' ? env.data : '' });
+              p.resolve({ ok: true, data: typeof env.data === 'string' ? env.data : '', proxyPort: pp });
             }
             this.drainQueue(proc);
           }
@@ -393,7 +409,8 @@ export class SpiderProcPool {
     const now = Date.now();
     for (const [key, procs] of this.groups) {
       const idleList = procs.filter(
-        (p) => !p.dead && p.pending.size === 0 && p.queue.length === 0 && procs.length > 1 && now - p.lastUsed > IDLE_RECLAIM_MS,
+         (p) => !p.dead && p.pending.size === 0 && p.queue.length === 0 && procs.length > 1 &&
+           now - p.lastUsed > IDLE_RECLAIM_MS && (!p.pinnedUntil || p.pinnedUntil <= now),
       );
       // 保留组内最近使用的那一个（并行期的其它进程回收）
       const sorted = [...procs].filter((p) => !p.dead).sort((a, b) => b.lastUsed - a.lastUsed);
@@ -415,7 +432,7 @@ export class SpiderProcPool {
     const procs = this.groups.get(key);
     if (!procs) return;
     const until = Date.now() + Math.max(1000, ttlMs);
-    for (const p of procs) if (!p.dead) p.pinnedUntil = until;
+    for (const p of procs) if (!p.dead) p.pinnedUntil = Math.max(p.pinnedUntil || 0, until);
   }
 
   /** 应用退出：杀掉全部（进程清理由 dispose 调用） */

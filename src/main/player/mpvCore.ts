@@ -12,7 +12,7 @@ import { mpvFontSize, mpvSubPos } from '../../shared/player';
 import { playerCandidates } from '../torrent/externalPlayer';
 
 /** 初始状态（每次会话重置） */
-export function initialKernelState(): MpvKernelState {
+export function initialKernelState(live = false): MpvKernelState {
   return {
     time: null,
     duration: null,
@@ -20,7 +20,9 @@ export function initialKernelState(): MpvKernelState {
     buffering: false,
     eof: false,
     loaded: false,
-    live: false,
+    live,
+    playbackStarted: false,
+    error: null,
     videoW: 0,
     videoH: 0,
     cacheKbps: 0,
@@ -58,7 +60,7 @@ export function mpvObserveLines(): string[] {
  * cache-speed/demuxer-cache-time）、file-loaded、end-file。
  */
 export function reduceMpvMessage(state: MpvKernelState, msg: unknown): boolean {
-  const m = msg as { event?: string; name?: string; data?: unknown; reason?: string } | null;
+  const m = msg as { event?: string; name?: string; data?: unknown; reason?: string; error?: unknown } | null;
   if (!m || typeof m !== 'object') return false;
   const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   if (m.event === 'property-change') {
@@ -67,6 +69,7 @@ export function reduceMpvMessage(state: MpvKernelState, msg: unknown): boolean {
         const v = num(m.data);
         if (v === null || v === state.time) return false;
         state.time = v;
+        if (v > 0.25) state.playbackStarted = true;
         return true;
       }
       case 'duration': {
@@ -91,8 +94,18 @@ export function reduceMpvMessage(state: MpvKernelState, msg: unknown): boolean {
       }
       case 'eof-reached': {
         const v = !!m.data;
-        if (v === state.eof) return false;
-        state.eof = v;
+        if (!v) {
+          if (!state.eof) return false;
+          state.eof = false;
+          return true;
+        }
+        if (!state.loaded || !state.playbackStarted) {
+          if (state.error === '读取或解码失败') return false;
+          state.error = '读取或解码失败';
+          return true;
+        }
+        if (state.eof) return false;
+        state.eof = true;
         return true;
       }
       case 'width':
@@ -123,14 +136,28 @@ export function reduceMpvMessage(state: MpvKernelState, msg: unknown): boolean {
     }
   }
   if (m.event === 'file-loaded') {
+    if (state.loaded) return false;
     state.loaded = true;
     // ★ 直播判定：加载完成后 mpv 仍不知道时长 ⇒ 直播（HLS 点播/普通文件此时已有 duration）
-    state.live = state.duration === null;
+    // duration=null means unknown duration; live is supplied by the caller.
     return true;
   }
   if (m.event === 'end-file') {
     // reason: eof / stop / quit / error / redirect …
-    if (m.reason === 'eof') {
+    if (m.reason === 'error') {
+      const detail = typeof m.error === 'string'
+        ? String(m.error)
+        : '读取或解码失败';
+      if (state.error === detail) return false;
+      state.error = detail;
+      return true;
+    }
+    if (m.reason === 'eof' && (!state.loaded || !state.playbackStarted)) {
+      if (state.error === '读取或解码失败') return false;
+      state.error = '读取或解码失败';
+      return true;
+    }
+    if (m.reason === 'eof' && state.loaded && (state.playbackStarted || (state.time != null && state.time > 1))) {
       if (state.eof) return false;
       state.eof = true;
       return true;

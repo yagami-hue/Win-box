@@ -364,6 +364,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     eof: false,
     loaded: false,
     live: false,
+    playbackStarted: false,
+    error: null,
     videoW: 0,
     videoH: 0,
     cacheKbps: 0,
@@ -1517,6 +1519,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       eof: false,
       loaded: false,
       live: false,
+      playbackStarted: false,
+      error: null,
       videoW: 0,
       videoH: 0,
       cacheKbps: 0,
@@ -1574,13 +1578,17 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       setBuffering(st.buffering);
       if (st.cacheTime != null) setBuffered(st.cacheTime);
       if (st.cacheKbps > 0) setNetSpeed(st.cacheKbps);
-      setIsLive(liveKindRef.current || !!(st.loaded && st.duration == null));
+      setIsLive(liveKindRef.current || st.live);
+      if (st.error) {
+        setMpvErr(`视频流无法解析（${st.error}）—可换线路或切回内置内核重试`);
+        setLoading(false);
+      }
       if (st.eof && !eofFired) {
         eofFired = true;
         // ★ 2026-10-08（用户报「jd4k 点开就提示已播放完毕」）：mpv 的 demux_lavf 把「分片读包失败
         //   ×10」也当 EOF（重试计数耗尽即返回文件结束）——从未真正播起来就报「已播完」是误导；
         //   此时上屏失败原因（真播完必然时间/时长有推进）。
-        if ((st.time ?? 0) <= 1 && !(st.duration && st.duration > 1)) {
+        if (!st.playbackStarted) {
           setMpvErr('视频流无法解析（分片读取失败）—— 可换线路或切回内置内核重试');
           setLoading(false);
         } else if (canNextRef.current && onNextRef.current) startCountdown();
@@ -1593,7 +1601,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     };
 
     void client
-      .mpvStart({ url, startTime: startAt, volume: volRef.current, rate, fit })
+      .mpvStart({ url, live: liveHint, startTime: startAt, volume: volRef.current, rate, fit })
       .then(() => undefined)
       .catch((e) => {
         if (!alive) return;
@@ -1816,9 +1824,20 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     }
   }, [mini]);
 
+  useEffect(() => {
+    if (!props.allowMpv || kernel !== 'mpv') return;
+    const off = client.playerOnFullscreen((value) => setFull(value));
+    void client.playerIsFullscreen().then(setFull).catch(() => undefined);
+    return off;
+  }, [props.allowMpv, kernel]);
+
   const toggleFull = () => {
     const wrap = wrapRef.current;
     if (!wrap) return;
+    if (kernel === 'mpv') {
+      void client.playerSetFullscreen(!full).then(setFull).catch(() => undefined);
+      return;
+    }
     if (document.fullscreenElement) void document.exitFullscreen().then(() => setFull(false));
     else void wrap.requestFullscreen().then(() => setFull(true));
   };

@@ -112,6 +112,47 @@ describe('SpiderProcPool — 复用 / 并行 / 排队 / 失败语义', () => {
     expect(spawned.length).toBe(2); // 扩容上限内不再多开
   });
 
+  it('playerContent 指定详情 JVM：即使另一 JVM 空闲也在所属 JVM 排队', async () => {
+    const { pool, spawned } = makeEnv(false);
+    const busy = Array.from({ length: MAX_INFLIGHT_PER_PROC }, (_, i) => pool.submit('k1', SPEC, REQ(`busy-${i}`)));
+    const detail = pool.submit('k1', SPEC, REQ('detail', 'detailContent'));
+    expect(spawned).toHaveLength(2);
+    spawned[1].child.stdout.emit('data', JSON.stringify({ id: 'detail', ok: true, data: 'episodes', pp: 20042 }) + '\n');
+    expect(await detail).toMatchObject({ proxyPort: 20042 });
+    const ownerBusy = Array.from({ length: MAX_INFLIGHT_PER_PROC }, (_, i) => pool.submit('k1', SPEC, REQ(`owner-${i}`), 20000, 20042));
+    for (let i = 0; i < busy.length; i++) reply(spawned[0].child, `busy-${i}`, 'done');
+    await Promise.all(busy);
+    const player = pool.submit('k1', SPEC, REQ('player', 'playerContent'), 20000, 20042);
+    expect(spawned[0].child.stdin.write.mock.calls.some(([s]) => s.includes('"id":"player"'))).toBe(false);
+    expect(spawned[1].child.stdin.write.mock.calls.some(([s]) => s.includes('"id":"player"'))).toBe(false);
+    reply(spawned[1].child, 'owner-0', 'done');
+    expect(spawned[1].child.stdin.write.mock.calls.some(([s]) => s.includes('"id":"player"'))).toBe(true);
+    reply(spawned[1].child, 'player', 'video');
+    for (let i = 1; i < ownerBusy.length; i++) reply(spawned[1].child, `owner-${i}`, 'done');
+    await Promise.all(ownerBusy);
+    expect(await player).toMatchObject({ ok: true, data: 'video' });
+    pool.dispose();
+  });
+
+  it('钉住详情/播放会话时空闲回收也跳过，短 TTL 不缩短已有播放 TTL', async () => {
+    vi.useFakeTimers();
+    const { pool, spawned } = makeEnv(false);
+    pool.warm('k1', SPEC, 2);
+    for (const { child } of spawned) {
+      const id = JSON.parse(child.stdin.write.mock.calls[0][0]).id;
+      reply(child, id, 'warm');
+    }
+    pool.pin('k1', 180_000);
+    pool.pin('k1', 120_000);
+    const timer = pool.startReclaimTimer();
+    await vi.advanceTimersByTimeAsync(140_000);
+    expect(pool.aliveCount).toBe(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(pool.aliveCount).toBe(1);
+    clearInterval(timer);
+    pool.dispose();
+  });
+
   it('空结果是合法结果（ok:true + data:""）→ 调用方不会回退一次性', async () => {
     const { pool, spawned } = makeEnv(false);
     const p = pool.submit('k1', SPEC, REQ('empty'));

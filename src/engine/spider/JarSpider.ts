@@ -140,7 +140,15 @@ export class JarSpider extends Spider {
       this.host.logger.w(`jar-spider ${this.siteKey}: ${this.loadError}`);
       throw new SourceProblemError('SPIDER_ERROR', this.loadError, { sourceKey: this.siteKey });
     }
-    return this.bridge.call(paths, this.clsName, method, [this.enrichedExt(), ...args], timeoutMs ?? this.timeoutMs);
+    return this.bridge.call(paths, this.clsName, method, [this.enrichedExt(), ...args], timeoutMs ?? this.timeoutMs, this.siteKey);
+  }
+
+  /**
+   * ★ 2026-10-09：本源蜘蛛 JVM 宿主代理端口（桥按加载器参数确定性分配，调用过一次后登记）。
+   * 供宿主把 jar 产出的 `127.0.0.1:9978/proxy?…` 播放地址改写成 `/proxy/<port>` 进 JVM 自解链。
+   */
+  proxyPort(): number | null {
+    return this.bridge.proxyPortForTag(this.siteKey);
   }
 
   /**
