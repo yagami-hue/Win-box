@@ -7,7 +7,7 @@ import type { LocalPkgAccess } from '../store/LocalPkgStore';
 import { parsePkgUrl } from '../../engine/config/localPkg';
 import { getAdapter } from '../net/qr';
 import { runDriveWebLogin } from '../net/webLogin';
-import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid, extractEpisodeName } from '../net/quarkTransfer';
+import { quarkTransfer, isQuarkSharePlay, quarkFileDelete, extractEpisodeFid, extractEpisodeName, extractQuarkShare } from '../net/quarkTransfer';
 // ★ 2026-09-30：UC 分享取流（**免转存直链优先**，回退才转存；jar 侧那套 do=pan 路由桌面端没有）
 import { ucResolveShare, ucFileDelete, isUcSharePlay, extractUcShare } from '../net/ucTransfer';
 // ★ 2026-09-30：百度分享取流（**只能转存** —— 免转存的 share/list 子目录接口已被百度关停；
@@ -991,7 +991,9 @@ export class SpiderHost {
   private async baiduFromPanUrl(url: string, flag: string, miss?: string[]): Promise<PlayResult | null> {
     const share = extractBaiduShare(url);
     if (!share) {
-      miss?.push('百度：未识别分享链接');
+      // ★ 2026-10-09：「未识别」不再逐通道 push（三通道会产出「百度：未识别；UC：未识别」的
+      //   误导性双报——该线路可能根本是夸克/别家盘）——由调用处在「全部通道均未识别」时
+      //   统一给一条带 `site` 的可读原因。
       return null;
     }
     const cookie = (this.driveList() as Record<string, string>)['baidu'] || '';
@@ -1036,7 +1038,7 @@ export class SpiderHost {
   private async ucFromPanUrl(url: string, flag: string, miss?: string[]): Promise<PlayResult | null> {
     const share = extractUcShare(url);
     if (!share) {
-      miss?.push('UC：未识别分享链接');
+      // ★ 2026-10-09：「未识别」不再逐通道 push（同 baiduFromPanUrl，见其注释）。
       return null;
     }
     const cookie = (this.driveList() as Record<string, string>)['uc'] || '';
@@ -1068,6 +1070,59 @@ export class SpiderHost {
     } catch (e) {
       fileLogger.w(`ucTransfer(do=pan) 异常: ${(e as Error).message}`);
       miss?.push(`UC：异常(${(e as Error).message.slice(0, 80)})`);
+      return null;
+    }
+  }
+
+  /**
+   * ★ 2026-10-09（用户报部分线路「该线路需要网盘解链但未成功（百度：未识别分享链接；
+   * UC：未识别分享链接）」）：jar 的 `do=pan` 代理地址里带**夸克分享链接**
+   * （`site=quark&fileId=<pan.quark.cn/s/…>`）→ 走原生 quarkTransfer（转存 → 直链，
+   * 落盘到「来自：分享」目录，播完即删——与 vm.play 前的夸克前置钩子同链路）。
+   *   此前 do=pan 分发只有百度 / UC 两条通道：site=quark 的线路**必然双未识别**并上屏
+   *   「百度：未识别；UC：未识别」（正是用户看到的文案）。
+   */
+  private async quarkFromPanUrl(url: string, flag: string, miss?: string[]): Promise<PlayResult | null> {
+    const share = extractQuarkShare(url);
+    if (!share) {
+      // 「未识别」不逐通道 push（同 baiduFromPanUrl 注释）。
+      return null;
+    }
+    const cookie = (this.driveList() as Record<string, string>)['quark'] || '';
+    if (!cookie) {
+      miss?.push('夸克：已识别分享但未绑定夸克网盘 Cookie');
+      return null;
+    }
+    try {
+      const t = await quarkTransfer(share.sId, cookie, {
+        passcode: share.passcode,
+        innerFid: extractEpisodeFid(url),
+        innerName: extractEpisodeName(url),
+        logger: fileLogger,
+      });
+      if (!t.ok || !t.url) {
+        fileLogger.w(`quarkTransfer(do=pan) 未成功(${t.reason || '未知原因'})`);
+        miss?.push(`夸克：解链失败(${t.reason || '未知原因'})`);
+        return null;
+      }
+      if (t.fid) {
+        this.pendingQuarkDeletes.push({ cookie, pdirFid: t.pdirFid || '', dirFid: t.pdirFid || '', fid: t.fid, at: Date.now() });
+        if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift();
+        this.persistPendingQuark();
+      }
+      fileLogger.i(`quarkTransfer(do=pan) 直链 ok: ${t.url.slice(0, 90)}...`);
+      // 与前置钩子一致：直链必须经 /play 中继注入 Cookie/Referer/UA（缺会被 CDN 拒绝）
+      return {
+        parse: 0,
+        url: wrapPlayUrlWithHeaders(t.url, t.header || {}),
+        playUrl: '',
+        flag,
+        header: t.header || {},
+        jx: 0,
+      };
+    } catch (e) {
+      fileLogger.w(`quarkTransfer(do=pan) 异常: ${(e as Error).message}`);
+      miss?.push(`夸克：异常(${(e as Error).message.slice(0, 80)})`);
       return null;
     }
   }
@@ -1890,7 +1945,9 @@ export class SpiderHost {
             // ★ 修复「点第6集落盘第29集」：fid 提取兼容 fid/vfid/file_id/URL 参数（旧正则只认 "fid"）
             const innerFid = extractEpisodeFid(id);
             // ★ 2026-09-29：集名一并传入 —— fid 在分享内匹配不到时按「集名/集号唯一匹配」兜底
+            // ★ 2026-10-09：提取码（若有）透传 —— 带码分享的 share/token 请求必带正确 passcode
             const t = await quarkTransfer(pwdId, quarkCookie, {
+              passcode: extractQuarkShare(id)?.passcode || '',
               innerFid,
               innerName: extractEpisodeName(id),
               logger: fileLogger,
@@ -2031,27 +2088,42 @@ export class SpiderHost {
         //   改走原生解链（比上面的 episode id 判据更晚，覆盖「id 不是分享链接、jar 才拼出分享」的源）。
         // ★ 2026-10-08：扩为**百度 + UC 双通道**（此前只有百度 —— jar 给 UC 分享的线路必然黑屏），
         //   两条通道的失败原因汇总落日志；全失败则**原因上屏**（不再静默 parse:0 黑屏，与 quarkFail 同口径）。
+        // ★ 2026-10-09（用户报「（百度：未识别分享链接；UC：未识别分享链接）」）：三段改造 ——
+        //   ① 新增**夸克通道**（此前 site=quark 的 do=pan 必然双未识别）；
+        //   ② 按 query 的 `site` 参数**优先试对应通道**（其余通道兜底，兼容 site 缺失/不规范）；
+        //   ③ 「未识别」不再逐通道双报 —— 全部通道都未识别时，统一给一条带 `site` 的原因（便于反馈定位）。
+        const site = String(pan.site || '').toLowerCase();
         const miss: string[] = [];
-        const viaBaidu = await this.baiduFromPanUrl(r.url, flag, miss);
-        if (viaBaidu) return viaBaidu;
-        const viaUc = await this.ucFromPanUrl(r.url, flag, miss);
-        if (viaUc) return viaUc;
-        if (miss.length) {
-          const bindMiss = miss.find((m) => m.includes('未绑定')) || '';
-          const prov = bindMiss.startsWith('百度') ? 'baidu' : bindMiss.startsWith('UC') ? 'uc' : '';
-          this.logger.w(`play: do=pan 原生解链均未成功（${miss.join('；')}）: ${key}`);
-          return {
-            ...r,
-            url: '',
-            parse: 1,
-            playUrl: '',
-            ...(prov ? { needDriveCookieBind: prov } : {}),
-            message: prov
-              ? `该线路需要在「网盘绑定」绑定${driveProviderLabel(prov)}后才能取流播放（${miss.join('；')}）`
-              : `该线路需要网盘解链但未成功（${miss.join('；')}）—— 多为分享失效或源侧改版，建议换线路或换源`,
-          };
+        const order: Array<'baidu' | 'uc' | 'quark'> = site.startsWith('quark')
+          ? ['quark', 'baidu', 'uc']
+          : site.startsWith('baidu')
+            ? ['baidu', 'uc', 'quark']
+            : site.startsWith('uc')
+              ? ['uc', 'baidu', 'quark']
+              : ['baidu', 'uc', 'quark'];
+        for (const ch of order) {
+          const got =
+            ch === 'baidu'
+              ? await this.baiduFromPanUrl(r.url, flag, miss)
+              : ch === 'uc'
+                ? await this.ucFromPanUrl(r.url, flag, miss)
+                : await this.quarkFromPanUrl(r.url, flag, miss);
+          if (got) return got;
         }
-        r = { ...r, url: '' };
+        if (!miss.length) miss.push(`未识别分享链接（site=${site || '未知'}）`);
+        const bindMiss = miss.find((m) => m.includes('未绑定')) || '';
+        const prov = bindMiss.startsWith('百度') ? 'baidu' : bindMiss.startsWith('UC') ? 'uc' : bindMiss.startsWith('夸克') ? 'quark' : '';
+        this.logger.w(`play: do=pan 原生解链均未成功（${miss.join('；')}）: ${key}`);
+        return {
+          ...r,
+          url: '',
+          parse: 1,
+          playUrl: '',
+          ...(prov ? { needDriveCookieBind: prov } : {}),
+          message: prov
+            ? `该线路需要在「网盘绑定」绑定${driveProviderLabel(prov)}后才能取流播放（${miss.join('；')}）`
+            : `该线路需要网盘解链但未成功（${miss.join('；')}）—— 多为分享失效或源侧改版，建议换线路或换源`,
+        };
       }
       // ★ 2026-09-29：协议识别（用户选定「先做 A：协议解析 + 链路识别」）
       //   · thunder:// → 解出内层 http(s) 直链，替换后用既有链路播（此前原样交给 <video> ⇒ 黑屏）；
@@ -2091,7 +2163,12 @@ export class SpiderHost {
             return this.playInner(key, flag, id, true);
           }
           if (bound) {
-            this.logger.w(`play: 重试后蜘蛛仍称需登录「${prov}」→ 如实上屏（不再弹绑定窗）: ${key}`);
+            // ★ 2026-10-09（用户报「还未登录夸克账号」类文案定位需要）：日志落**原文全文**（上屏仍截 100 字）
+            //   —— 不同 jar 家族的「未登录」文案措辞不同（如 fty「接口列表配置中心」/ wex「还没有配置夸克
+            //   Cookie」/ 未知族「【配置中心】」），全文是判定 jar 家族与读取通道的第一手证据。
+            this.logger.w(
+              `play: 重试后蜘蛛仍称需登录「${prov}」→ 如实上屏（不再弹绑定窗）: ${key} | 原文=${String(r.message).slice(0, 300)}`,
+            );
             return {
               ...r,
               parse: 1,

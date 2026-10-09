@@ -62,19 +62,23 @@ function shareTextCandidates(text: string): string[] {
   return out;
 }
 
-/** 该 episode id 是否是 UC 分享（drive.uc.cn/s/<pwdId>，兼容 percent-encoded 形态）；大小写不敏感 */
+/** UC 分享标识：`drive.uc.cn/s/<id>`（常规）与 `fast.uc.cn/s/<id>`（分享短域名，★ 2026-10-09 扩） */
+const UC_SHARE_ID_RE = /(?:drive|fast)\.uc\.cn\/s\/([0-9a-zA-Z_-]+)/i;
+
+/** 该 episode id 是否是 UC 分享（兼容 percent-encoded 形态）；大小写不敏感 */
 export function isUcSharePlay(id: string): boolean {
-  return shareTextCandidates(id).some((s) => /drive\.uc\.cn\/s\/[0-9a-zA-Z_-]+/i.test(s));
+  return shareTextCandidates(id).some((s) => UC_SHARE_ID_RE.test(s));
 }
 
 /**
  * 从分享链接里解析 pwd_id 与 4 位提取码。
- * 支持 `https://drive.uc.cn/s/<id>`、`...?public=1`、`...?pwd=abcd`（提取码可选）。
+ * 支持 `https://drive.uc.cn/s/<id>`、`https://fast.uc.cn/s/<id>`（短域名）、
+ * `...?public=1`、`...?pwd=abcd`（提取码可选）。
  * ★ 兼容 query 值里的 percent-encoded 分享链接（见 shareTextCandidates）。
  */
 export function extractUcShare(id: string): { pwdId: string; passcode: string } | null {
   for (const s of shareTextCandidates(id)) {
-    const m = /drive\.uc\.cn\/s\/([0-9a-zA-Z_-]+)/i.exec(s);
+    const m = UC_SHARE_ID_RE.exec(s);
     if (!m) continue;
     const p = /[?&](?:pwd|password|passcode)=([0-9a-zA-Z]{4})/i.exec(s);
     return { pwdId: m[1], passcode: p ? p[1] : '' };

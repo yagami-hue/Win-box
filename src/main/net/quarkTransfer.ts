@@ -82,7 +82,7 @@ let transferChain: Promise<unknown> = Promise.resolve();
 export function quarkTransfer(
   pwdId: string,
   cookie: string,
-  opts: { innerFid?: string; innerName?: string; stoken?: string; logger?: Logger } = {},
+  opts: { innerFid?: string; innerName?: string; stoken?: string; passcode?: string; logger?: Logger } = {},
 ): Promise<QuarkTransferResult> {
   // ★ 2026-09-28：整条转存的**结果与耗时**落一份结构化诊断（失败时带 reason），
   //   用于统计「落盘成功率约 50%」到底卡在哪一段（见 util/playDiag.ts）。
@@ -113,7 +113,7 @@ export function quarkTransfer(
 async function quarkTransferInner(
   pwdId: string,
   cookie: string,
-  opts: { innerFid?: string; innerName?: string; stoken?: string; logger?: Logger } = {},
+  opts: { innerFid?: string; innerName?: string; stoken?: string; passcode?: string; logger?: Logger } = {},
 ): Promise<QuarkTransferResult> {
   const log = opts.logger ?? { i: () => {}, w: () => {}, e: () => {} } as Logger;
   const base = BASE + Q;
@@ -121,7 +121,9 @@ async function quarkTransferInner(
   // 1) 分享 token（免 cookie）
   let stoken = opts.stoken;
   if (!stoken) {
-    const t = await jpost(`${BASE}/share/sharepage/token${Q}`, null, { pwd_id: pwdId, passcode: '' });
+    // ★ 2026-10-09（第三方修复文档参考 + 实证）：passcode 不再恒空串——**透传提取码**
+    //   （带码夸克分享此请求必带正确 passcode，否则 stoken 取不到 → 转存整体失败）。
+    const t = await jpost(`${BASE}/share/sharepage/token${Q}`, null, { pwd_id: pwdId, passcode: opts.passcode || '' });
     if (t.status !== 200 || t.json?.code !== 0) return { url: '', header: {}, ok: false, reason: `分享token失败 ${t.status}/${t.text.slice(0,120)}` };
     stoken = t.json.data.stoken;
   }
@@ -633,6 +635,36 @@ function dirCacheKey(cookie: string): string {
 export function isQuarkSharePlay(id: string): boolean {
   if (!id) return false;
   return /pan\.quark\.cn\/s\//i.test(id) || /"sId":\s*"/i.test(id);
+}
+
+/**
+ * ★ 2026-10-09（第三方修复文档参考 + 本仓实证）：从文本（jar 的 `do=pan` 代理地址等）提取
+ * **夸克分享 sId 与提取码**（`pan.quark.cn/s/<id>`）。与 baiduTransfer / ucTransfer 同款：
+ * 原文 + ≤2 轮 percent-decode（jar 会把分享 URL percent-encode 塞进 fileId）。
+ * 提取码两种形态：`?pwd=/password=/passcode=`（4 位）或文本「提取码：xxxx / 密码：xxxx」。
+ * 背景：do=pan 的原生解链此前只有百度 / UC 两条通道，`site=quark` 的线路必然「双未识别」；
+ * 且 `quarkTransferInner` 的 share/token 请求此前 passcode 恒空串 → **带码分享必失败**。
+ */
+export function extractQuarkShare(text: string): { sId: string; passcode: string } | null {
+  let cur = String(text || '');
+  for (let i = 0; i < 3 && cur; i++) {
+    const m = /pan\.quark\.cn\/s\/([0-9a-zA-Z]+)/i.exec(cur);
+    if (m) {
+      const p =
+        /[?&#](?:pwd|password|passcode)=([0-9a-zA-Z]{4})/i.exec(cur) ||
+        /(?:提取码|密码|passcode|pwd)\s*[:：]\s*([0-9a-zA-Z]{4})/i.exec(cur);
+      return { sId: m[1], passcode: p ? p[1] : '' };
+    }
+    let next = '';
+    try {
+      next = decodeURIComponent(cur);
+    } catch {
+      break; // 非法百分号序列：不再往下解
+    }
+    if (next === cur) break;
+    cur = next;
+  }
+  return null;
 }
 
 /**

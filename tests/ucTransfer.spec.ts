@@ -33,6 +33,11 @@ describe('extractUcShare', () => {
     expect(extractUcShare('https://drive.uc.cn/s/abc123?passcode=Zz09')?.passcode).toBe('Zz09');
     expect(extractUcShare('https://drive.uc.cn/s/abc123?password=1234')?.passcode).toBe('1234');
   });
+  it('★ 2026-10-09：fast.uc.cn 短域名形态', () => {
+    expect(extractUcShare('https://fast.uc.cn/s/abc9x9?pwd=q1w2')).toEqual({ pwdId: 'abc9x9', passcode: 'q1w2' });
+    expect(isUcSharePlay('https://fast.uc.cn/s/abc9x9')).toBe(true);
+  });
+
   it('非分享链接返回 null', () => {
     expect(extractUcShare('https://pan.baidu.com/s/1abcdef')).toBeNull();
     expect(extractUcShare('')).toBeNull();

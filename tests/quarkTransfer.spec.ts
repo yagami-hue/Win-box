@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveShareFile, extractEpisodeFid, extractEpisodeName, episodeKeyOf, matchTransferredFile, isQuarkSharePlay, isDirNode, isRealFileNode, quarkPlayUrl, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
+import { resolveShareFile, extractEpisodeFid, extractEpisodeName, episodeKeyOf, matchTransferredFile, isQuarkSharePlay, extractQuarkShare, isDirNode, isRealFileNode, quarkPlayUrl, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
 import type { ShareListFetcher } from '../src/main/net/quarkTransfer';
 
 // ★ 会话子目录（tr_xxx）：每次播放落盘唯一目录，规避"上次文件未删完 → 第二次转存同名冲突"
@@ -76,6 +76,26 @@ describe('isQuarkSharePlay', () => {
   it('空/普通地址 → false', () => {
     expect(isQuarkSharePlay('')).toBe(false);
     expect(isQuarkSharePlay('https://v.vimsec.app/a/b.mp4')).toBe(false);
+  });
+});
+
+describe('extractQuarkShare（★ 2026-10-09：do=pan 的夸克通道解析）', () => {
+  it('从 do=pan 地址取 sId（含 percent-encoded 形态）', () => {
+    const enc = 'http://127.0.0.1:-1/proxy?do=pan&site=quark&shareId=&fileId=https%3A%2F%2Fpan.quark.cn%2Fs%2Fa1b2c3d4&fileToken=';
+    expect(extractQuarkShare(enc)).toEqual({ sId: 'a1b2c3d4', passcode: '' });
+    expect(extractQuarkShare('https://pan.quark.cn/s/104863e84ddd?fid=x')).toEqual({ sId: '104863e84ddd', passcode: '' });
+  });
+  it('★ 提取码：?pwd=/passcode= 参数与「提取码：xxxx」文本两种形态（第三方文档参考 + 实证点）', () => {
+    expect(extractQuarkShare('https://pan.quark.cn/s/abc12345?pwd=q1w2')?.passcode).toBe('q1w2');
+    const enc = 'http://127.0.0.1:-1/proxy?do=pan&site=quark&fileId=' + encodeURIComponent('https://pan.quark.cn/s/abc12345?pwd=Zz09');
+    expect(extractQuarkShare(enc)?.passcode).toBe('Zz09');
+    expect(extractQuarkShare('https://pan.quark.cn/s/abc12345 提取码：a1b2')?.passcode).toBe('a1b2');
+    expect(extractQuarkShare('https://pan.quark.cn/s/abc12345 密码: XY99')?.passcode).toBe('XY99');
+  });
+  it('非夸克分享 / 空串 → null（不抛）', () => {
+    expect(extractQuarkShare('https://pan.baidu.com/s/1abc')).toBeNull();
+    expect(extractQuarkShare('')).toBeNull();
+    expect(() => extractQuarkShare('http://x/p?fileId=%zz%')).not.toThrow();
   });
 });
 

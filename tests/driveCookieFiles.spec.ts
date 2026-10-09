@@ -39,13 +39,35 @@ describe('driveCookieFiles — Pizazz 系 cookie 文件同步', () => {
     expect(pizazzCookiePath('unknown', root)).toBe(''); // 无映射
   });
 
-  it('写入内容为 JSON {"cookie":...}（jar 侧 r(key)=JSONObject.optString(key) 实证格式）', () => {
+  it('写入内容为 JSON：quark/uc 三键（cookie/member_type/nickname——xiaosa 登录判定要求），百度单键', () => {
     const ck = '__puus=PUUS1; __pus=PUS1; ck_id=abc';
     const path = writePizazzCookieFile('quark', ck, root);
     expect(path).toBe(pizazzCookiePath('quark', root));
     expect(existsSync(path)).toBe(true);
-    expect(JSON.parse(readFileSync(path, 'utf-8'))).toEqual({ cookie: ck });
+    const obj = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, string>;
+    expect(obj.cookie).toBe(ck);
+    // ★ 2026-10-09：xiaosa 族（玩偶）登录判定 = merge.i.d 三字段均非空（Gson: cookie/member_type/nickname）
+    expect(obj.nickname).toBeTruthy();
+    expect(obj.member_type).toBeTruthy();
     expect(readPizazzCookie('quark', root)).toBe(ck);
+    // 百度（merge.b.j 只读 cookie 键，实测）→ 保持单键
+    const bp = writePizazzCookieFile('baidu', 'BDUS=1', root);
+    expect(JSON.parse(readFileSync(bp, 'utf-8'))).toEqual({ cookie: 'BDUS=1' });
+  });
+
+  it('★ 2026-10-09：quark 重写保留旧文件里的真实 nickname/member_type（jar 回写过的真值不覆盖）', () => {
+    writePizazzCookieFile('quark', 'old', root); // 先落目录
+    writeFileSync(
+      pizazzCookiePath('quark', root),
+      JSON.stringify({ cookie: 'old', nickname: '阿宅', member_type: '2' }),
+      'utf-8',
+    );
+    writePizazzCookieFile('quark', 'new-ck', root);
+    expect(JSON.parse(readFileSync(pizazzCookiePath('quark', root), 'utf-8'))).toEqual({
+      cookie: 'new-ck',
+      nickname: '阿宅',
+      member_type: '2',
+    });
   });
 
   it('去掉首尾空白；空值与无映射 provider 不落盘', () => {

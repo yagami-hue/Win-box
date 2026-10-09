@@ -36,6 +36,19 @@ describe('extractBaiduShare', () => {
     const pan = 'http://127.0.0.1:-1/proxy?do=pan&site=baidu&shareId=&fileId=https://pan.baidu.com/s/1jJYCvRQ47rKhE8J4wwciyw?pwd=moCu&fileToken=';
     expect(extractBaiduShare(pan)).toEqual({ short: '1jJYCvRQ47rKhE8J4wwciyw', pwd: 'moCu' });
   });
+  it('★ 2026-10-09：yun 旧域名与 share/init?surl= 形态（surl 恒补首位 1）', () => {
+    expect(extractBaiduShare('https://yun.baidu.com/s/1FQlot5_c063Bdw05ChknbQ')).toEqual({
+      short: '1FQlot5_c063Bdw05ChknbQ',
+      pwd: '',
+    });
+    // surl 定义 = 短 id 去掉首位 1 → 解析时恒补回（与 verifySurl 闭环一致）
+    expect(extractBaiduShare('https://pan.baidu.com/share/init?surl=FQlot5_c063Bdw05ChknbQ')?.short).toBe(
+      '1FQlot5_c063Bdw05ChknbQ',
+    );
+    expect(isBaiduSharePlay('https://pan.baidu.com/share/init?surl=abc_1')).toBe(true);
+    expect(isBaiduSharePlay('https://yun.baidu.com/s/1abc')).toBe(true);
+  });
+
   it('非百度分享返回 null', () => {
     expect(extractBaiduShare('https://drive.uc.cn/s/abc123?pwd=a1b2')).toBeNull();
     expect(extractBaiduShare('')).toBeNull();

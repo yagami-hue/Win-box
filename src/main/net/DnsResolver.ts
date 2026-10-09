@@ -110,7 +110,12 @@ export function createDnsLookup(): DnsLookup {
 export function createDohAgent(): Agent {
   return new Agent({
     connect: {
-      timeout: 30000,
+      // ★ 2026-10-09（用户报「解析超时」/日志实证）：原 30000 —— 当 DoH 失败回落系统 DNS 拿到
+      //   **污染 IP**（如 api.themoviedb.org → 108.160.167.159，DROP 型墙）时，TCP 连接要**白等 30s**
+      //   才抛 ETIMEDOUT（headersTimeout 不覆盖连接阶段）→ 发现页/封面「长时间解析不出」。
+      //   收紧到 10s：正常海外连通（DoH 已解析真实 IP）实测 <2s，10s 足够；被墙 IP 10s 快速失败
+      //   交给调用方的降级链（豆瓣/360 兜底、代理重试）。
+      timeout: 10000,
       // @ts-expect-error undici 类型未完全覆盖 connect.lookup，运行时生效
       lookup: createDnsLookup(),
     },

@@ -85,9 +85,26 @@ function shareTextCandidates(text: string): string[] {
   return out;
 }
 
-/** 该文本里是否含百度分享链接（`pan.baidu.com/s/<id>`，兼容 percent-encoded 形态）；大小写不敏感 */
+/**
+ * 百度分享标识（★ 2026-10-09 扩形态，用户报「未识别分享链接」后的加固）：
+ *  · `pan.baidu.com/s/<id>` —— 常规分享页（短 id，固定含首位 1）；
+ *  · `yun.baidu.com/s/<id>` —— **旧域名**（老源/书签仍在用）；
+ *  · `/share/init?surl=<id>` —— 分享「初始化页」形态；`surl` 的定义 = 短 id **去掉首位 1**
+ *    （见 verifySurl 的反向规则）→ 这里**恒补回 `1`**，与 verifySurl 闭环一致。
+ */
+const BAIDU_SHARE_ID_RE = /(?:pan|yun)\.baidu\.com\/s\/([0-9a-zA-Z_-]+)/i;
+const BAIDU_SURL_RE = /\/share\/init\?[^"'\s]*?surl=([0-9a-zA-Z_-]+)/i;
+/** 从单个候选文本里取分享短 id（无则 ''） */
+function baiduShareIdOf(s: string): string {
+  const m = BAIDU_SHARE_ID_RE.exec(s);
+  if (m) return m[1];
+  const i = BAIDU_SURL_RE.exec(s);
+  return i ? '1' + i[1] : '';
+}
+
+/** 该文本里是否含百度分享链接（兼容 percent-encoded 形态）；大小写不敏感 */
 export function isBaiduSharePlay(text: string): boolean {
-  return shareTextCandidates(text).some((s) => /pan\.baidu\.com\/s\/[0-9a-zA-Z_-]+/i.test(s));
+  return shareTextCandidates(text).some((s) => !!baiduShareIdOf(s));
 }
 
 /**
@@ -97,10 +114,10 @@ export function isBaiduSharePlay(text: string): boolean {
  */
 export function extractBaiduShare(text: string): { short: string; pwd: string } | null {
   for (const s of shareTextCandidates(text)) {
-    const m = /pan\.baidu\.com\/s\/([0-9a-zA-Z_-]+)/i.exec(s);
-    if (!m) continue;
+    const short = baiduShareIdOf(s);
+    if (!short) continue;
     const p = /[?&](?:pwd|password|passcode)=([0-9a-zA-Z]{4})/i.exec(s);
-    return { short: m[1], pwd: p ? p[1] : '' };
+    return { short, pwd: p ? p[1] : '' };
   }
   return null;
 }

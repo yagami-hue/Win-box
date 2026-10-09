@@ -43,15 +43,38 @@ export function pizazzCookiePath(provider: string, tmp = tmpdir()): string {
 }
 
 /**
- * 写单个 provider 的 cookie 文件（内容 `{"cookie":"..."}`）。
- * provider 无映射或凭据为空 → 不写，返回 ''；成功返回写入路径。
+ * 写单个 provider 的 cookie 文件。
+ * ★★ 2026-10-09（用户日志 + 反编译实证，根因修复）：
+ *   xiaosa 族（玩偶 csp_Wogg / 木偶 csp_PanWebShare 等）对 **quark / uc** 的登录判定 =
+ *   Gson 反序列化 `merge.i.d` 后 **三字段均非空**（`d()` = a()>0 && b()>0 && c()>0；
+ *   映射：`cookie` / `member_type` / `nickname`，见 `merge.b.w.o().d()` 与 `merge.b.B.l().d()`）。
+ *   桌面端此前只写 `{"cookie":…}` → member_type/nickname 为空 → **已绑定仍报
+ *   「还未登录夸克账号,请前往【配置中心】登录」**（quark）与对应 UC 文案。
+ *   · 三字段的值**不参与业务**（jar 内仅 d() 校验非空）→ 后两者缺省填占位；
+ *   · **旧文件里已有真实值（jar 自己回写过）则保留**——不覆盖真数据。
+ *   · 百度（`merge.b.j`）只读 `cookie` 键（实证）→ **不补三键**。
  */
 export function writePizazzCookieFile(provider: string, value: string, tmp = tmpdir()): string {
   const path = pizazzCookiePath(provider, tmp);
   const v = String(value || '').trim();
   if (!path || !v) return '';
+  const p = String(provider || '').trim().toLowerCase();
+  const body: Record<string, string> = { cookie: v };
+  if (p === 'quark' || p === 'uc') {
+    let keepNick = '';
+    let keepType = '';
+    try {
+      const old = JSON.parse(readFileSync(path, 'utf-8')) as { nickname?: unknown; member_type?: unknown } | null;
+      if (old && typeof old.nickname === 'string') keepNick = old.nickname.trim();
+      if (old && typeof old.member_type === 'string') keepType = old.member_type.trim();
+    } catch {
+      /* 无旧文件 / 损坏 → 用占位 */
+    }
+    body.nickname = keepNick || 'Win-Box';
+    body.member_type = keepType || '1';
+  }
   mkdirSync(pizazzCookieDir(tmp), { recursive: true });
-  writeFileSync(path, JSON.stringify({ cookie: v }), 'utf-8');
+  writeFileSync(path, JSON.stringify(body), 'utf-8');
   return path;
 }
 

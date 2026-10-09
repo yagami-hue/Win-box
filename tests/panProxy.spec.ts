@@ -39,6 +39,16 @@ const hoisted = vi.hoisted(() => ({
     calls: [] as Array<{ pwdId: string; passcode: string }>,
     result: { ok: true, url: 'https://uc-cdn.test/f/x.mkv?token=2', header: { 'User-Agent': 'UA', Cookie: 'c=1', Referer: 'https://drive.uc.cn/' } },
   },
+  quark: {
+    calls: [] as Array<{ sId: string; passcode: string }>,
+    result: {
+      ok: true,
+      url: 'https://quark-cdn.test/f/x.mp4?token=3',
+      header: { 'User-Agent': 'UA-q', Cookie: 'c=3', Referer: 'https://pan.quark.cn/' },
+      fid: 'fid-x',
+      pdirFid: 'dir-1',
+    },
+  },
 }));
 
 vi.mock('../src/main/net/baiduTransfer', async (orig) => ({
@@ -54,6 +64,14 @@ vi.mock('../src/main/net/ucTransfer', async (orig) => ({
   ucResolveShare: async (pwdId: string, passcode: string) => {
     hoisted.uc.calls.push({ pwdId, passcode });
     return { ...hoisted.uc.result };
+  },
+}));
+
+vi.mock('../src/main/net/quarkTransfer', async (orig) => ({
+  ...(await orig<typeof import('../src/main/net/quarkTransfer')>()),
+  quarkTransfer: async (pwdId: string, _cookie: string, opts?: { passcode?: string }) => {
+    hoisted.quark.calls.push({ sId: pwdId, passcode: opts?.passcode || '' });
+    return { ...hoisted.quark.result };
   },
 }));
 
@@ -130,15 +148,62 @@ describe('SpiderHost：do=pan → 原生解链', () => {
     expect(decodeURIComponent(r.url)).toContain('https://uc-cdn.test/f/x.mkv?token=2');
   });
 
-  it('两条通道都没识别出分享 → parse:1 + 原因上屏（不再静默黑屏）', async () => {
+  it('三条通道都没识别出分享 → parse:1 + 单条原因上屏（带 site，不再双报「百度/UC」）', async () => {
     const pan = 'http://127.0.0.1:-1/proxy?do=pan&type=2&site=115&shareId=abc&fileId=123&fileToken=';
     const { host, key } = makeHost(pan);
     const r = await host.play(key, '115线路', 'ep-3');
     expect(r.parse).toBe(1);
     expect(r.url).toBe('');
     expect(r.message).toContain('未识别分享链接');
+    expect(r.message).toContain('site=115');
+    expect(r.message).not.toContain('百度：');
+    expect(r.message).not.toContain('UC：');
     expect(r.message).toContain('换线路或换源');
     expect(r.needDriveCookieBind).toBeUndefined();
+  });
+
+  it('★ 2026-10-09：site=quark 的 do=pan → 走夸克通道（此前必然「双未识别」）', async () => {
+    hoisted.quark.calls.length = 0;
+    const pan =
+      'http://127.0.0.1:-1/proxy?do=pan&type=2&site=quark&shareId=&fileId=https%3A%2F%2Fpan.quark.cn%2Fs%2Fa1b2c3d4&fileToken=';
+    const { host, key } = makeHost(pan, { quark: 'quark_ck=1' });
+    const r = await host.play(key, '夸克原画', 'ep-q1');
+    expect(hoisted.quark.calls).toEqual([{ sId: 'a1b2c3d4', passcode: '' }]);
+    expect(r.parse).toBe(0);
+    expect(r.url).toContain('http://127.0.0.1:9978/play?');
+    expect(decodeURIComponent(r.url)).toContain('https://quark-cdn.test/f/x.mp4?token=3');
+  });
+
+  it('★ 2026-10-09：site=quark 识别但未绑定 → needDriveCookieBind=quark（绑定引导）', async () => {
+    const pan = 'http://127.0.0.1:-1/proxy?do=pan&site=quark&shareId=&fileId=pan.quark.cn/s/zz9988';
+    const { host, key } = makeHost(pan);
+    const store = (host as unknown as { drives: { remove: (k: string) => void } }).drives;
+    store.remove('baidu');
+    store.remove('uc');
+    store.remove('quark');
+    const r = await host.play(key, '夸克线路', 'ep-q2');
+    expect(r.parse).toBe(1);
+    expect(r.needDriveCookieBind).toBe('quark');
+    expect(r.message).toContain('网盘绑定');
+  });
+
+  it('★ 2026-10-09：fast.uc.cn（UC 短域名）的 encoded fileId 也能识别并解链', async () => {
+    hoisted.uc.calls.length = 0;
+    const pan = 'http://127.0.0.1:-1/proxy?do=pan&site=uc&fileId=' + encodeURIComponent('https://fast.uc.cn/s/abc9x9?pwd=q1w2');
+    const { host, key } = makeHost(pan, { uc: 'uc_ck=2' });
+    const r = await host.play(key, 'UC线路', 'ep-q3');
+    expect(hoisted.uc.calls).toEqual([{ pwdId: 'abc9x9', passcode: 'q1w2' }]);
+    expect(r.parse).toBe(0);
+  });
+
+  it('★ 2026-10-09：带提取码的夸克分享 → passcode 透传到 quarkTransfer（第三方文档参考 + 实证点）', async () => {
+    hoisted.quark.calls.length = 0;
+    const pan =
+      'http://127.0.0.1:-1/proxy?do=pan&site=quark&fileId=' + encodeURIComponent('https://pan.quark.cn/s/zz9988?pwd=q1w2');
+    const { host, key } = makeHost(pan, { quark: 'q=1' });
+    const r = await host.play(key, '夸克线路', 'ep-q4');
+    expect(hoisted.quark.calls).toEqual([{ sId: 'zz9988', passcode: 'q1w2' }]);
+    expect(r.parse).toBe(0);
   });
 
   it('识别出分享但未绑定 → 上屏绑定引导（needDriveCookieBind=baidu）', async () => {
