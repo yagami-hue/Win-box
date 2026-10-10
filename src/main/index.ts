@@ -257,7 +257,19 @@ app.on('window-all-closed', () => {
 
 // ★ 退出前彻底清理：terminate 所有 JVM 蜘蛛子进程 + 停本地代理 + 断 token 解码，
 //   确保关闭应用后无任何后台残留进程/服务（含 Electron 隐含子进程会在 app.quit 后自行结束）。
-app.on('will-quit', () => {
+let quitCleanupStarted = false;
+app.on('will-quit', (event) => {
+  // will-quit 不会等待普通 async 回调；先阻止退出，给待清理的网盘目录一次有限时长的
+  // 删除机会，避免窗口关闭后马上退出导致“播完即删”只写入队列却未发出请求。
+  if (!quitCleanupStarted) {
+    quitCleanupStarted = true;
+    event.preventDefault();
+    void Promise.race([
+      host.quarkDeletePending(),
+      new Promise<void>((resolve) => setTimeout(resolve, 8_000)),
+    ]).finally(() => app.quit());
+    return;
+  }
   try {
     // ★ 退出前再尝试一次夸克落盘文件清理（失败会持久化到下次启动重试）
     void host.quarkDeletePending();

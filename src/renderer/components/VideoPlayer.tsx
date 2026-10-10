@@ -1321,7 +1321,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       v.play().then(() => setPaused(false)).catch(() => {});
     };
 
-    if (low.endsWith('.m3u8') || /m3u8|\/hls\//.test(low)) {
+    if (mediaKind === 'hls') {
       // ★ 2026-09-29（用户报「部分资源播放会报 HLS 错误」）：判型放宽到「URL 含 m3u8 / 路径含 /hls/」
       //   （不少 CDN 的清单没有 .m3u8 后缀，此前落到原生 <video> → Chromium 不会解 HLS → 必失败）
       if (v.canPlayType('application/vnd.apple.mpegurl')) {
@@ -1827,7 +1827,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   useEffect(() => {
     if (!props.allowMpv || kernel !== 'mpv') return;
     const off = client.playerOnFullscreen((value) => setFull(value));
-    void client.playerIsFullscreen().then(setFull).catch(() => undefined);
+    void client.playerIsFullscreen().then((state) => setFull(!!state.fullscreen)).catch(() => undefined);
     return off;
   }, [props.allowMpv, kernel]);
 
@@ -1835,7 +1835,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     const wrap = wrapRef.current;
     if (!wrap) return;
     if (kernel === 'mpv') {
-      void client.playerSetFullscreen(!full).then(setFull).catch(() => undefined);
+      void client.playerSetFullscreen(!full).then((state) => setFull(!!state.fullscreen)).catch(() => undefined);
       return;
     }
     if (document.fullscreenElement) void document.exitFullscreen().then(() => setFull(false));

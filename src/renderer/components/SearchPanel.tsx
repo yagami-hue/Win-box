@@ -6,7 +6,6 @@
 // ★ 2026-09-29（用户要求）：搜索框做大；热搜做成**右侧排名榜**；左侧下方为**搜索历史**
 //   （逐条可删 ✕、下方「清空搜索记录」、上限 10 条，第 11 条顶掉第 1 条）。
 import { useEffect, useRef, useState } from 'react';
-import type { KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { client } from '../api/client';
 import type { MetaSuggestion } from '../../shared/meta';
@@ -77,7 +76,7 @@ export default function SearchPanel({ bar = false }: { bar?: boolean }) {
     const onDoc = (e: MouseEvent): void => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent): void => {
+    const onKey = (e: globalThis.KeyboardEvent): void => {
       if (e.key === 'Escape') setOpen(false);
     };
     document.addEventListener('mousedown', onDoc);
@@ -141,7 +140,7 @@ export default function SearchPanel({ bar = false }: { bar?: boolean }) {
     setHist([]);
   };
 
-  const activate = (e: KeyboardEvent, action: () => void): void => {
+  const activate = (e: { key: string; preventDefault: () => void }, action: () => void): void => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       action();

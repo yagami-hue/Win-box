@@ -24,16 +24,22 @@ describe('百度分享文件转存链路（不触网）', () => {
 
   const file = { shareId: '49252031905', uk: '1100830236519', fsid: '812960976845060', sekey: 'key%2Bwith%2Fslash%3D' };
   const ownFsid = '987654321012345';
-  const path = '/Win-Box缓存/01.mp4';
   function network(opts: { moved?: Record<string, unknown>; transfer?: unknown; dlink?: unknown } = {}) {
-    const fetch = vi.fn(async (input: string | URL | Request) => {
+    let transferDir = '';
+    let landedPath = '';
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const u = new URL(String(input));
       let json: unknown;
       switch (u.pathname) {
         case '/api/gettemplatevariable': json = { errno: 0, result: { bdstoken: 'token' } }; break;
         case '/api/create': json = { errno: -8 }; break;
-        case '/share/transfer': json = opts.transfer || { errno: 0, extra: { list: [opts.moved || { to: path, to_fs_id: ownFsid }] } }; break;
-        case '/api/list': json = { errno: 0, list: [{ path, fs_id: ownFsid, server_filename: '01.mp4', isdir: 0 }] }; break;
+        case '/share/transfer': {
+          transferDir = new URLSearchParams(String(init?.body || '')).get('path') || '';
+          landedPath = String((opts.moved as { to?: unknown } | undefined)?.to || `${transferDir}/01.mp4`);
+          json = opts.transfer || { errno: 0, extra: { list: [opts.moved || { to: landedPath, to_fs_id: ownFsid }] } };
+          break;
+        }
+        case '/api/list': json = { errno: 0, list: [{ path: landedPath || `${transferDir}/01.mp4`, fs_id: ownFsid, server_filename: '01.mp4', isdir: 0 }] }; break;
         case '/api/filemetas': json = opts.dlink || { errno: 0, info: [{ dlink: 'https://cdn.test/01.mp4' }] }; break;
         default: throw new Error(`unexpected API ${u.pathname}`);
       }
@@ -46,7 +52,8 @@ describe('百度分享文件转存链路（不触网）', () => {
   it.each(['key%2Bwith%2Fslash%3D', 'key+with/slash='])('只转存所选 fs_id，sekey 编码一次（%s）', async (sekey) => {
     const fetch = network();
     const r = await baiduResolveSharedFile({ ...file, sekey }, 'BDUSS=user; BDCLND=old');
-    expect(r).toMatchObject({ ok: true, url: 'https://cdn.test/01.mp4', path, header: { 'User-Agent': BAIDU_DL_UA } });
+    expect(r).toMatchObject({ ok: true, url: 'https://cdn.test/01.mp4', header: { 'User-Agent': BAIDU_DL_UA } });
+    expect(r.path).toMatch(/^\/Win-Box缓存\/tr_[0-9a-f-]+$/);
     const urls = fetch.mock.calls.map(([u]) => new URL(String(u)));
     const transfer = urls.findIndex((u) => u.pathname === '/share/transfer');
     expect(urls[transfer].searchParams.get('shareid')).toBe(file.shareId);
@@ -60,7 +67,7 @@ describe('百度分享文件转存链路（不触网）', () => {
   });
 
   it('转存未返回 to_fs_id 时按落盘路径找本人文件，不退回分享者 ID', async () => {
-    const fetch = network({ moved: { to: path } });
+    const fetch = network({ moved: { to: '' } });
     const r = await baiduResolveSharedFile(file, 'BDUSS=user');
     expect(r.ok).toBe(true);
     const metas = fetch.mock.calls.map(([u]) => new URL(String(u))).find((u) => u.pathname === '/api/filemetas');
@@ -93,7 +100,7 @@ describe('百度分享文件转存链路（不触网）', () => {
     const fetch = network({ moved: { to: '/用户文件/01.mp4', to_fs_id: ownFsid } });
     const r = await baiduResolveSharedFile(file, 'BDUSS=user');
     expect(r.ok).toBe(false);
-    expect(r.path).toBeUndefined();
+    expect(r.path).toMatch(/^\/Win-Box缓存\/tr_[0-9a-f-]+$/);
     expect(fetch.mock.calls.some(([u]) => String(u).includes('/api/filemetas'))).toBe(false);
   });
 
@@ -123,11 +130,12 @@ describe('百度分享文件转存链路（不触网）', () => {
       if (u.pathname === '/s/1testshare') return new Response(
         `{"shareid":${file.shareId},"share_uk":"${file.uk}","file_list":[{"fs_id":${file.fsid},"isdir":0,"path":"/01.mp4","server_filename":"01.mp4"}]}`,
       );
-      return downstream(input);
+      return downstream(input, init);
     });
     vi.stubGlobal('fetch', fetch);
     const r = await baiduResolveShare('1testshare', 'txr7', 'BDUSS=user', { innerName: '01.mp4' });
-    expect(r).toMatchObject({ ok: true, path, header: { 'User-Agent': BAIDU_DL_UA } });
+    expect(r).toMatchObject({ ok: true, header: { 'User-Agent': BAIDU_DL_UA } });
+    expect(r.path).toMatch(/^\/Win-Box缓存\/tr_[0-9a-f-]+$/);
   });
 });
 

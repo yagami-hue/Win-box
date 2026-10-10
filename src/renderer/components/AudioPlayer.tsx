@@ -3,6 +3,7 @@
 //   音乐类源（酷我/汽水/音乐库/听书…）的播放地址是 mp3/flac/m4a —— 交给 `<video>` 只会黑屏出声。
 //   这里用音乐播放器接管：封面 + 标题 + 播放/暂停 + 可拖进度 + 上一首/下一首（联动外层剧集）+ 音量 + 单曲循环。
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { setPlayTime } from '../lib/uiMemory';
 
 export interface AudioPlayerProps {
   url: string;
@@ -68,6 +69,10 @@ export default function AudioPlayer({
     void a.play().catch(() => {
       /* 自动播放被策略拦下时保留"待播放"态，用户点一下即可 */
     });
+    return () => {
+      setPlayTime(url, a.currentTime);
+      a.pause();
+    };
   }, [url]);
 
   // 续播
@@ -142,7 +147,10 @@ export default function AudioPlayer({
         onCanPlay={() => setLoading(false)}
         onTimeUpdate={() => {
           const a = ref.current;
-          if (a) setCur(a.currentTime);
+          if (a) {
+            setCur(a.currentTime);
+            setPlayTime(url, a.currentTime);
+          }
         }}
         onPlay={() => setPaused(false)}
         onPause={() => setPaused(true)}

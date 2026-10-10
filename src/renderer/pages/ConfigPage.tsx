@@ -1488,47 +1488,20 @@ export default function ConfigPage() {
         <div className="row" style={{ marginBottom: 8 }}>
           <span className="muted" style={{ fontWeight: 600 }}>外观主题</span>
         </div>
-        <div className="theme-preview-grid" role="radiogroup" aria-label="外观主题">
-           {(Object.entries(THEME_LABELS) as [Theme, string][]).map(([t, label]) => (
+        <div className="theme-switcher" role="radiogroup" aria-label="外观主题">
+          {(Object.entries(THEME_LABELS) as [Theme, string][]).map(([t, label]) => (
             <button
               key={t}
               type="button"
               role="radio"
               aria-checked={theme === t}
-              className={`theme-preview-card theme-preview-${t}${theme === t ? ' active' : ''}`}
-              onClick={() => {
-                setTheme(t);
-                applyTheme(t);
-              }}
-              onKeyDown={(e) => {
-                if (e.key !== 'ArrowRight' && e.key !== 'ArrowDown' && e.key !== 'ArrowLeft' && e.key !== 'ArrowUp') return;
-                e.preventDefault();
-                const cards = Array.from(e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]') || []);
-                const index = cards.indexOf(e.currentTarget);
-                const delta = e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 1;
-                const next = cards[(index + delta + cards.length) % cards.length];
-                next?.focus();
-                next?.click();
-              }}
-              title={
-                t === 'netflix' ? '网飝（默认皮肤）'
-                  : t === 'bilibili' ? '哔哔'
-                    : t === 'apple' ? '大果（Apple / macOS 风格）'
-                      : '大豆（Material 3 Expressive × 豆瓣风格）'
-              }
+              className={`tag ${theme === t ? 'active' : ''}`}
+              onClick={() => { setTheme(t); applyTheme(t); }}
             >
-              <span className="theme-preview-art" aria-hidden="true">
-                <span className="theme-preview-bar" />
-                <span className="theme-preview-body"><i /><i /><i /></span>
-              </span>
-              <span className="theme-preview-copy">
-                <strong>{label}</strong>
-                <small>{t === 'netflix' ? '影院式内容行' : t === 'bilibili' ? '蓝白社区导航' : t === 'apple' ? 'Liquid Glass' : '暖白海报墙'}</small>
-              </span>
-              <span className="theme-preview-check" aria-hidden="true">{theme === t ? '✓' : ''}</span>
+              {label}{theme === t ? ' ✓' : ''}
             </button>
-           ))}
-         </div>
+          ))}
+        </div>
       </div>
 
       {/* ★ 2026-10-08（用户要求「整体重做界面视觉与动效交互」）：界面动效三态。
@@ -1551,11 +1524,6 @@ export default function ConfigPage() {
               {label} {motion === v ? '✓' : ''}
             </button>
            ))}
-        </div>
-        <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-          {motion === 'auto' && typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
-            ? '检测到系统已关闭「动画效果」，当前界面不做过渡动画 —— 想更灵动请点「始终开启」。'
-            : '「跟随系统」时，若 Windows 关闭了动画效果，界面将不做过渡动画；想让界面更灵动可改「始终开启」。'}
         </div>
       </div>
 

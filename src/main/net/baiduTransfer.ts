@@ -30,6 +30,7 @@
 // 与 UC / 夸克**同构**：全局串行锁（转存是「服务端共享目录 + 落盘 fid/路径」状态机，并发会互相污染）、
 // 落盘到应用专用目录、播完即删（走 SpiderHost 的 pendingQuarkDeletes 队列）。
 import type { Logger } from '../../shared/types';
+import { randomUUID } from 'node:crypto';
 import { mergeSetCookies } from './cookieMerge';
 
 const REF = 'https://pan.baidu.com/';
@@ -309,12 +310,15 @@ async function fetchBdstoken(s: Sess): Promise<string> {
 }
 
 /** 建落盘目录（已存在会 errno -8，无需失败） */
-async function ensureCacheDir(s: Sess, bdstoken: string): Promise<void> {
-  await req(s, `https://pan.baidu.com/api/create?a=commit&bdstoken=${encodeURIComponent(bdstoken)}&${Q}`, {
+async function ensureCacheDir(s: Sess, bdstoken: string, path = '/' + BAIDU_CACHE_DIR_NAME): Promise<void> {
+  const r = await req(s, `https://pan.baidu.com/api/create?a=commit&bdstoken=${encodeURIComponent(bdstoken)}&${Q}`, {
     method: 'POST',
-    body: `path=${encodeURIComponent('/' + BAIDU_CACHE_DIR_NAME)}&isdir=1&block_list=%5B%5D`,
+    body: `path=${encodeURIComponent(path)}&isdir=1&block_list=%5B%5D`,
     referer: REF_DISK,
   });
+  if (Number(r.json?.errno) !== 0 && Number(r.json?.errno) !== -8) {
+    throw new Error(`创建百度缓存目录失败（errno=${r.json?.errno ?? r.status}）`);
+  }
 }
 
 /** 列举本人盘某目录（分页直到不满一页） */
@@ -469,11 +473,21 @@ async function transferSelectedFile(
   picked: BaiduShareItem, short: string, logger?: Logger, innerName?: string,
 ): Promise<BaiduTransferResult> {
   const log = logger ?? ({ i: () => {}, w: () => {}, e: () => {} } as unknown as Logger);
-  const fail = (reason: string): BaiduTransferResult => ({ ok: false, url: '', header: {}, reason });
+  let cleanupPath = '';
+  const fail = (reason: string): BaiduTransferResult => ({
+    ok: false,
+    url: '',
+    header: {},
+    reason,
+    ...(cleanupPath ? { path: cleanupPath } : {}),
+  });
 
-  // 6) 转存到应用专用目录
+  try {
+  // 每次独立子目录，避免换集/重试时同名冲突，也不能复用旧落盘文件。
   await ensureCacheDir(s, bdstoken);
-  const toDir = `/${BAIDU_CACHE_DIR_NAME}`;
+  const toDir = `/${BAIDU_CACHE_DIR_NAME}/tr_${randomUUID()}`;
+  await ensureCacheDir(s, bdstoken, toDir);
+  cleanupPath = toDir;
   const tr = await req(s, `https://pan.baidu.com/share/transfer?shareid=${shareid}&from=${shareUk}&bdstoken=${encodeURIComponent(bdstoken)}&sekey=${sekey}&${Q}`, {
     method: 'POST',
     body: `fsidlist=%5B${picked.fsid}%5D&path=${encodeURIComponent(toDir)}`,
@@ -497,7 +511,9 @@ async function transferSelectedFile(
   const moved = (tr.json?.extra?.list && tr.json.extra.list[0]) || {};
   const landedFsid = /^\d+$/.test(String(moved.to_fs_id || '')) ? String(moved.to_fs_id) : '';
   const landedPath = String(moved.to || (picked.name ? `${toDir}/${picked.name}` : ''));
-  if (!isCacheItemPath(landedPath)) return fail('转存后未返回应用缓存内的落盘路径');
+  if (landedPath && (!isCacheItemPath(landedPath) || !landedPath.startsWith(toDir + '/'))) {
+    return fail('转存后未返回本次应用缓存内的落盘路径');
+  }
 
   // 7) 定位真正可播的文件（转存的可能是整季文件夹 → 下钻一层）
   let file: BaiduShareItem | null = null;
@@ -508,18 +524,30 @@ async function transferSelectedFile(
     if (innerName) {
       const hit = pickByName(vids, innerName);
       if (hit === 'ambiguous') return fail(`落盘目录内有多个「${stem(innerName)}」同名文件，无法确定集数`);
-      file = hit || vids[0];
-      if (!hit) log.w(`baidu 未按集名命中「${innerName}」，取首集 ${vids[0].name}`);
+      if (!hit) return fail(`落盘目录内未找到所选文件「${innerName}」，拒绝播放其它集`);
+      file = hit;
     } else {
       file = vids[0];
       log.w(`baidu 分享是整季文件夹，未带集信息 → 取首集 ${file.name}`);
     }
   } else {
-    // 转存后 fs_id 会变；缺少 to_fs_id 时按落盘路径查本人盘，绝不退回分享者的原 ID。
-    file = landedFsid ? { ...picked, fsid: landedFsid } :
-      (await listDir(s, toDir, bdstoken)).find((x) => !x.isdir && x.path === landedPath) || null;
+    // 转存后必须按本人盘的实际路径复核，绝不直接信任 transfer 返回的旧/错误 fs_id。
+    const landed = await listDir(s, toDir, bdstoken);
+    const files = landed.filter((x) => !x.isdir && isCacheItemPath(x.path) && x.path.startsWith(toDir + '/'));
+    // 某些百度响应只返回 to_fs_id 或完全不返回 to；此时只接受本次唯一落盘文件，
+    // 或者由本次 list 返回的文件 fs_id 唯一命中，绝不使用分享页的 fs_id。
+    const exact = landedPath
+      ? landed.find((x) => !x.isdir && x.path === landedPath)
+      : (landedFsid ? files.find((x) => x.fsid === landedFsid) : files.length === 1 ? files[0] : undefined);
+    file = exact && (!landedFsid || exact.fsid === landedFsid) ? exact : null;
+    if (!file && landedFsid) {
+      log.w(`baidu 落盘 fs_id 与路径复核不一致，拒绝使用：${landedFsid}`);
+    }
   }
-  if (!file?.fsid) return fail('转存后未返回落盘 fid');
+  if (!file?.fsid) return fail('转存后未能按应用缓存路径定位当前文件');
+  if (!/^\d+$/.test(file.fsid) || !isCacheItemPath(file.path) || !file.path.startsWith(toDir + '/')) {
+    return fail('落盘文件不属于本次转存目录');
+  }
 
   // 8) 取直链
   const dl = await req(
@@ -536,8 +564,11 @@ async function transferSelectedFile(
     url,
     // ★ 必须带网盘 UA：浏览器 UA 拉这个 dlink 恒定 403 31326
     header: { 'User-Agent': BAIDU_DL_UA, Referer: REF, Cookie: s.cookie },
-    path: landedPath,
+    path: cleanupPath,
   };
+  } catch (e) {
+    return fail(`百度转存取链异常：${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /**
@@ -592,6 +623,8 @@ function pickRootItem(
     const hit = pickByName(items, innerName);
     if (hit === 'ambiguous') return `分享内有多个「${stem(innerName)}」同名文件，无法确定集数`;
     if (hit) return hit;
+    // 文件可能在唯一目录内；没有目录时不能静默改播首个文件。
+    if (!items.some((x) => x.isdir)) return `分享内未找到所选文件「${innerName}」`;
   }
   if (items.length === 1) return items[0];
   const dirs = items.filter((x) => x.isdir);

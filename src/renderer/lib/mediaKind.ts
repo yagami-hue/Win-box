@@ -35,9 +35,10 @@ export function detectMediaKind(url: string): MediaKind {
   if (NO_CARRIER_PROTO.test(s)) return 'unsupported';
   const low = s.toLowerCase();
   const ext = extOf(low);
-  if (IMAGE_EXT.has(ext)) return 'image';
-  if (AUDIO_EXT.has(ext)) return 'audio';
-  if (ext === 'm3u8' || /m3u8|\/hls\//.test(low)) return 'hls';
+  const queryHint = low.split('#')[0];
+  if (IMAGE_EXT.has(ext) || /(?:[?&](?:type|mime|format)=image\/(?:jpeg|jpg|png|gif|webp)|[?&](?:type|format)=image\b)/.test(queryHint)) return 'image';
+  if (AUDIO_EXT.has(ext) || /(?:[?&](?:type|mime)=audio\/|[?&](?:type|format)=(?:audio|mp3|flac|m4a|aac|wav|ogg)\b)/.test(queryHint)) return 'audio';
+  if (ext === 'm3u8' || /m3u8|\/hls\//.test(low) || /[?&](?:type|format)=(?:hls|m3u8)\b/.test(queryHint)) return 'hls';
   if (ext === 'flv') return 'flv';
   if (ext === 'ts' || ext === 'm2ts' || /mpegts/.test(low)) return 'mpegts';
   return 'video';

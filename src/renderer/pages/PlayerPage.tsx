@@ -160,10 +160,14 @@ export default function PlayerPage() {
       offInit();
       offSwitch();
       offMini();
-      // ★ 播放器窗口关闭/卸载 → 通知主进程清理本次夸克转存落盘文件（进度在本地历史）
-      void client.quarkCleanup().catch(() => undefined);
     };
   }, [applyInit, applySwitch]);
+
+  // 订阅 effect 会因 init/换集重跑，不能在那里删除正在使用的网盘文件。
+  useEffect(() => () => {
+    resolveGen.current.next();
+    void client.quarkCleanup().catch(() => undefined);
+  }, []);
 
   // 播放器内换集
   const goEp = useCallback(

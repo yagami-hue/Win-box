@@ -282,6 +282,7 @@ export class SpiderHost {
   /** ★ 夸克已落盘待清理队列（关闭播放/窗口/退出时删除，进度仍保留在本地历史；持久化防重启丢失） */
   private pendingQuarkDeletes: Array<{ cookie: string; pdirFid: string; fid: string; dirFid?: string; path?: string; at: number; provider?: 'quark' | 'uc' | 'baidu' }> = [];
   private pendingQuarkStore: JsonStore;
+  private pendingDeleteRun: Promise<void> | null = null;
   /** ★ 2026-09-24：解析接口链（parses → 直连地址；含隐藏窗口嗅探兜底） */
   private parseService: ParseService;
   /** 自动订阅刷新计时（<userData>/auto-refresh.json 记录上次成功时间） */
@@ -952,10 +953,19 @@ export class SpiderHost {
   }
 
   /** ★ 执行待清理的夸克落盘文件删除（关闭播放/窗口/退出/启动时触发；删成功即出队，失败保留下次重试） */
-  async quarkDeletePending(): Promise<void> {
+  quarkDeletePending(): Promise<void> {
+    if (this.pendingDeleteRun) return this.pendingDeleteRun;
+    const run = this.deletePendingBatch();
+    this.pendingDeleteRun = run.finally(() => { this.pendingDeleteRun = null; });
+    return this.pendingDeleteRun;
+  }
+
+  private async deletePendingBatch(): Promise<void> {
     if (this.pendingQuarkDeletes.length === 0) return;
+    // 固定本批快照；请求期间新增的转存记录不能被覆盖或顺带删除。
+    const batch = this.pendingQuarkDeletes.slice();
     const remain: typeof this.pendingQuarkDeletes = [];
-    for (const item of this.pendingQuarkDeletes) {
+    for (const item of batch) {
       try {
         // ★ 优先「整会话子目录删除」：子目录（tr_xxx）内只有本次转存文件，删目录 = 删文件 + 清目录；
         //   目录删除不支持/失败时回退单文件删除（旧记录无 dirFid 也走单文件）。
@@ -970,16 +980,14 @@ export class SpiderHost {
         }
         if (ok) {
           this.logger.i(`quark 已删除落盘文件 fid=${item.fid.slice(0, 8)}...` + (item.dirFid ? ` dir=${item.dirFid.slice(0, 8)}...` : '') + (item.path ? ` path=${item.path}` : ''));
-        } else if (Date.now() - item.at < 24 * 3600 * 1000) {
-          remain.push(item); // 失败保留 ≤24h 再试
         } else {
-          this.logger.w(`quark 落盘文件删除放弃（>24h）fid=${item.fid.slice(0, 8)}...`);
+          remain.push(item); // 删除未确认成功时保留，不能因时间经过而遗忘文件。
         }
       } catch {
         remain.push(item);
       }
     }
-    this.pendingQuarkDeletes = remain;
+    this.pendingQuarkDeletes = [...remain, ...this.pendingQuarkDeletes.filter((item) => !batch.includes(item))];
     this.persistPendingQuark();
   }
 
@@ -1025,12 +1033,12 @@ export class SpiderHost {
       if (!cookie) { miss?.push('百度：已识别分享文件但未绑定百度网盘 Cookie'); return null; }
       try {
         const t = await baiduResolveSharedFile(sharedFile, cookie, fileLogger);
-        if (!t.ok || !t.url) { miss?.push(`百度：解链失败(${t.reason || '未知原因'})`); return null; }
         if (t.path) {
           this.pendingQuarkDeletes.push({ provider: 'baidu', cookie, pdirFid: '', fid: '', path: t.path, at: Date.now() });
           if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift();
           this.persistPendingQuark();
         }
+        if (!t.ok || !t.url) { miss?.push(`百度：解链失败(${t.reason || '未知原因'})`); return null; }
         return { parse: 0, url: wrapPlayUrlWithHeaders(t.url, t.header), playUrl: '', flag, header: t.header, jx: 0 };
       } catch (e) { miss?.push(`百度：异常(${(e as Error).message.slice(0, 80)})`); return null; }
     }
@@ -1079,15 +1087,15 @@ export class SpiderHost {
         innerName: extractBaiduInnerName(url) || undefined,
         logger: fileLogger,
       });
-      if (!t.ok || !t.url) {
-        fileLogger.w(`baiduTransfer(do=pan) 未成功(${t.reason || '未知原因'})`);
-        miss?.push(`百度：解链失败(${t.reason || '未知原因'})`);
-        return null;
-      }
       if (t.path) {
         this.pendingQuarkDeletes.push({ provider: 'baidu', cookie, pdirFid: '', fid: '', path: t.path, at: Date.now() });
         if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift();
         this.persistPendingQuark();
+      }
+      if (!t.ok || !t.url) {
+        fileLogger.w(`baiduTransfer(do=pan) 未成功(${t.reason || '未知原因'})`);
+        miss?.push(`百度：解链失败(${t.reason || '未知原因'})`);
+        return null;
       }
       fileLogger.i(`baiduTransfer(do=pan) 直链 ok（${t.path || ''}）`);
       return {
@@ -2179,16 +2187,15 @@ export class SpiderHost {
       } else if (share) {
         try {
           const t = await baiduResolveShare(share.short, share.pwd, bdCookie, {
-            innerName: extractEpisodeName(id),
+            innerName: extractBaiduInnerName(id) || extractEpisodeName(id),
             logger: fileLogger,
           });
+          if (t.path) {
+            this.pendingQuarkDeletes.push({ provider: 'baidu', cookie: bdCookie, pdirFid: '', fid: '', path: t.path, at: Date.now() });
+            this.persistPendingQuark();
+          }
           if (t.ok && t.url) {
             fileLogger.i(`baiduTransfer 直链 ok（${t.path || ''}）`);
-            if (t.path) {
-              this.pendingQuarkDeletes.push({ provider: 'baidu', cookie: bdCookie, pdirFid: '', fid: '', path: t.path, at: Date.now() });
-              if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift();
-              this.persistPendingQuark();
-            }
             // 直链必须经 /play 中继注入 Cookie/Referer/**网盘 UA**（浏览器 UA 拉 dlink 必 403 31326）
             return {
               parse: 0,
@@ -2586,9 +2593,20 @@ export class SpiderHost {
   async loadLive(index: number): Promise<LiveLoadResult> {
     if (!this.config || !this.config.lives.length) throw new Error('无直播配置');
     const live = this.config.lives[Math.min(index, this.config.lives.length - 1)];
-    const res = await this.http.request({ url: live.url, method: 'get', timeoutMs: 30000 });
-    const text = Array.isArray(res.content) ? Buffer.from(res.content).toString('utf-8') : res.content;
-    const groups = toLiveGroups(parseToJsonArray(text));
+    let text: string | number[];
+    if (live.type === '3') {
+      const api = live.api || live.url;
+      const source = this.config.sites.find((s) => s.api === api || s.key === api);
+      if (!source) throw new Error(`直播蜘蛛不存在：${api}`);
+      const spider = this.vm.spiderFactory.getCSP(source, this.host);
+      const json = await Promise.resolve(spider.liveContent(live.api || live.url));
+      text = json || '';
+    } else {
+      const res = await this.http.request({ url: live.url, method: 'get', timeoutMs: 30000 });
+      text = res.content;
+    }
+    const raw = Array.isArray(text) ? Buffer.from(text).toString('utf-8') : text;
+    const groups = toLiveGroups(parseToJsonArray(raw));
     return { groups, liveName: live.name };
   }
   get lives() {
