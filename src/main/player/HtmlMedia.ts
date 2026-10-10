@@ -9,6 +9,13 @@ import { resourcesDir } from '../util/paths';
 
 const SEGMENT_SECONDS = 6;
 const BLOCK_BYTES = 512 * 1024;
+// Remote UC/Baidu media can require a long initial seek before ffmpeg emits
+// the first compatible segment. Keep this above the browser HLS timeout so a
+// slow-but-progressing transcode is not reported as a network failure.
+const SOURCE_RANGE_TIMEOUT_MS = 120_000;
+const FFMPEG_IO_TIMEOUT_US = 120_000_000;
+const PROBE_TIMEOUT_MS = 180_000;
+const SEGMENT_TIMEOUT_MS = 180_000;
 type Input = { source: string; size: number; expires: number; blocks: Map<number, Buffer>; pending: Map<number, Promise<Buffer>>; controller: AbortController; procs: Set<ChildProcess> };
 type Session = { source: string; duration: number; expires: number; segments: Map<number, Buffer>; pending: Map<number, Promise<Buffer>>; procs: Set<ChildProcess> };
 
@@ -83,7 +90,7 @@ export class HtmlMedia {
       task = (async () => {
         const start = n * BLOCK_BYTES;
         const end = input.size ? Math.min(input.size - 1, start + BLOCK_BYTES - 1) : start + BLOCK_BYTES - 1;
-        const response = await fetch(input.source, { headers: { Range: `bytes=${start}-${end}` }, signal: AbortSignal.any([input.controller.signal, AbortSignal.timeout(45000)]) });
+        const response = await fetch(input.source, { headers: { Range: `bytes=${start}-${end}` }, signal: AbortSignal.any([input.controller.signal, AbortSignal.timeout(SOURCE_RANGE_TIMEOUT_MS)]) });
         const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('content-range') || '');
         if (response.status !== 206 || !range || Number(range[1]) !== start) {
           await response.body?.cancel(); throw new Error('媒体源未返回有效 Range 数据');
@@ -156,17 +163,19 @@ export class HtmlMedia {
         const inputUrl = `http://127.0.0.1:${req.socket.localPort}/html/${id}/source`;
         let info: any;
         try {
-          info = await this.run(ffprobe, ['-v', 'error', '-rw_timeout', '15000000', '-analyzeduration', '1000000', '-probesize', '524288', '-show_streams', '-show_format', '-of', 'json', inputUrl], 90000, input).then(b => JSON.parse(b.toString('utf8')));
+          info = await this.run(ffprobe, ['-v', 'error', '-rw_timeout', String(FFMPEG_IO_TIMEOUT_US), '-analyzeduration', '1000000', '-probesize', '524288', '-show_streams', '-show_format', '-of', 'json', inputUrl], PROBE_TIMEOUT_MS, input).then(b => JSON.parse(b.toString('utf8')));
         } catch (e) { this.release(id); throw e; }
         const plan = htmlMediaPlan(info);
+        const video = info.streams?.find((s: any) => s.codec_type === 'video');
+        const resolution = { width: video?.width, height: video?.height };
         this.log.i(`html-media: ${JSON.stringify({ format: info.format?.format_name, streams: info.streams?.map((s: any) => ({ type: s.codec_type, codec: s.codec_name, pix: s.pix_fmt })), compatible: plan.compatible })}`);
         if (res.destroyed) { this.release(id); return; }
-        if (plan.compatible) { this.release(id); json(200, { url: source }); return; }
+        if (plan.compatible) { this.release(id); json(200, { url: source, ...resolution }); return; }
         if (plan.duration <= 0 || plan.duration > 86400) { this.release(id); throw new Error('无法读取点播媒体时长'); }
         while (this.sessions.size >= 6) this.release(this.sessions.keys().next().value!);
         this.sessions.set(id, { source: inputUrl, duration: plan.duration, expires: Date.now() + 30 * 60 * 1000, segments: new Map(), pending: new Map(), procs: new Set() });
         this.log.i('html-media: 使用 H264/AAC 兼容流（保留 HTML 播放与拖动）');
-        json(200, { url: `http://127.0.0.1:${req.socket.localPort}/html/${id}/index.m3u8`, session: id });
+        json(200, { url: `http://127.0.0.1:${req.socket.localPort}/html/${id}/index.m3u8`, session: id, ...resolution });
         return;
       }
       const m = /^\/html\/([a-f0-9-]+)\/(index\.m3u8|release|\d+\.ts)$/.exec(u.pathname);
@@ -186,12 +195,12 @@ export class HtmlMedia {
           if (s.pending.size >= 2) { json(503, { error: '正在处理媒体分片' }); return; }
           const start = n * SEGMENT_SECONDS;
           work = this.run(join(resourcesDir(), 'ffmpeg', 'ffmpeg.exe'), [
-            '-v', 'error', '-nostdin', '-rw_timeout', '15000000', '-analyzeduration', '1000000', '-probesize', '524288', '-ss', String(start), '-i', s.source,
+            '-v', 'error', '-nostdin', '-rw_timeout', String(FFMPEG_IO_TIMEOUT_US), '-analyzeduration', '1000000', '-probesize', '524288', '-ss', String(start), '-i', s.source,
             '-t', String(Math.min(SEGMENT_SECONDS, s.duration - start)), '-map', '0:v:0?', '-map', '0:a:0?',
             '-sn', '-dn', '-threads', '2',
             '-vf', "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p", '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '22', '-g', '180', '-sc_threshold', '0',
             '-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-ar', '48000', '-f', 'mpegts', 'pipe:1',
-          ], 45000, s);
+          ], SEGMENT_TIMEOUT_MS, s);
           s.pending.set(n, work);
           work.finally(() => s.pending.delete(n)).catch(() => undefined);
         }

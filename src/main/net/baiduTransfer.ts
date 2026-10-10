@@ -4,8 +4,10 @@
 //   · 这些样本未取得免转存直链：`share/list` 的子目录列举接口失败
 //     （`uk/shareid/dir` 与 `shorturl/dir` 两种形式 × sekey 三种编码，一律 errno 140 / 2），
 //     而分享页 HTML 只渲染根层 → 按根条目「转存 → 取链」（与夸克同构）。
-//   · 2026-10-09：jar 详情已给出内层 fs_id / shareid / uk / sekey 时，直接转存所选文件，
+//   · 2026-10-09：jar 详情已给出内层 fs_id / shareid / uk / sekey 时，精确定位所选文件，
 //     不再依赖根目录列举；web share/list?fid 能返回元数据，但不代表能取得 dlink。
+//   · 2026-10-10：fty 签名分支为 SHA-1(SHA-1(BDUSS)+uid+常量+毫秒时间+设备+版本)，
+//     两份真实样本只读 share/list 返回对应 dlink、媒体 206；优先免转存，失败保留转存兜底。
 //   · 两个协议坑（都踩过，勿回退）：
 //     ① `share/verify` 的 `surl` 必须**去掉首位那个 `1`**（百度分享 id 固定以 1 开头）；
 //     ② `t` 必须从 `/share/init?surl=<surl>` 页面里取 —— 自造值 / 不带这个参数恒定 `errno 105`
@@ -20,6 +22,9 @@
 //   GET  /share/init?surl=<id 去首位1>                  → HTML（含 t）
 //   POST /share/verify?surl=&t=&bdstoken=null&…         → errno 0 + Set-Cookie: BDCLND=<sekey>
 //   GET  /s/<id>（带 BDCLND）                           → HTML(yunData)：shareid / share_uk / 根文件项
+//   GET  /userx/v1/info/get                            → 当前账号 uid（只读签名上下文）
+//   GET  /share/list?fid=&origin=dlna&time=&rand=        → 精确分享文件 dlink（免转存优先）
+//   —— 只读取链不可用时的转存兜底 ——
 //   GET  /api/gettemplatevariable?fields=["bdstoken"]   → result.bdstoken
 //   POST /api/create?a=commit { path, isdir:1 }         → 建落盘目录（已存在 errno -8，可忽略）
 //   POST /share/transfer?shareid&from&bdstoken&sekey    → errno 0，extra.list[0].to_fs_id / .to
@@ -30,7 +35,7 @@
 // 与 UC / 夸克**同构**：全局串行锁（转存是「服务端共享目录 + 落盘 fid/路径」状态机，并发会互相污染）、
 // 落盘到应用专用目录、播完即删（走 SpiderHost 的 pendingQuarkDeletes 队列）。
 import type { Logger } from '../../shared/types';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mergeSetCookies } from './cookieMerge';
 
 const REF = 'https://pan.baidu.com/';
@@ -41,6 +46,9 @@ const UA =
 /** ★★ 拉 dlink 只能用**网盘客户端 UA**：浏览器 UA 恒定 403 31326（真机实测，勿改） */
 export const BAIDU_DL_UA = 'netdisk;P2SP;3.0.0;windows;;;';
 const Q = 'channel=chunlei&web=1&app_id=250528&clienttype=0';
+const SHARE_UA = 'netdisk;12.24.6;WinBox;android-android;12;JSbridge4.4.0;jointBridge;1.1.0';
+const SHARE_DEVICE = '73CED981D0F186D12BC18CAE1684FFD5|VSRCQTF6W';
+const SHARE_USER_API = 'https://mbd.baidu.com/userx/v1/info/get?appname=baiduboxapp&fields=%5B%22bg_image%22,%22member%22,%22uid%22,%22avatar%22,%22avatar_member%22%5D&lang=zh-cn';
 /** 转存落盘目录名（用户可见、可自行清理；与用户自有文件隔离，杜绝误删 —— 与夸克同口径） */
 export const BAIDU_CACHE_DIR_NAME = 'Win-Box缓存';
 /** 落盘目录内部分页列举上限（一季通常 ≤ 200 集，3 页 × 100 足够） */
@@ -167,7 +175,7 @@ export function extractBaiduShare(text: string): { short: string; pwd: string } 
 /**
  * ★ 2026-10-09：从百度网盘**播放描述 JSON** 里取内层文件线索（用于「整季文件夹 / 多文件」时选对那一集）。
  *   优先 `path` 末段（percent-decode 后的文件名），其次 `name` / `server_filename`。
- *   取不到返回 `''`（`baiduResolveShare` 会回退「首个视频」）。
+ *   取不到返回 `''`；多文件缺少标识时拒绝盲选首集。
  */
 export function extractBaiduInnerName(text: string): string {
   const s = String(text || '');
@@ -367,6 +375,68 @@ function isCacheItemPath(path: string): boolean {
     path.split('/').slice(2).every((part) => part !== '' && part !== '.' && part !== '..');
 }
 
+/** fty 的只读分享签名；设备/版本常量必须与请求参数一致，不是 MD5。 */
+export function baiduShareRand(bduss: string, uid: string, time: string): string {
+  const sha1 = (s: string) => createHash('sha1').update(s).digest('hex');
+  return sha1(sha1(bduss) + uid + 'ebrcUYiuxaZv2XGu7KIYKxUrqfnOfpDF' + time + SHARE_DEVICE + '11.30.2ae5821440fab5e1a61a025f014bd8972');
+}
+
+/**
+ * 只读分享取链：不创建目录、不转存、不登记清理；分享者 fs_id 必须精确命中。
+ * 有 dlink 仍以客户端 UA 发一个单连接 Range 验证，避免将过期/403 地址当成成功。
+ * 未验证成功返回 null，由调用方保留已有转存路径。日志只记录阶段，不打印签名/会话/直链。
+ */
+async function trySharedDirectLink(file: BaiduSharedFile, cookie: string, logger?: Logger): Promise<BaiduTransferResult | null> {
+  const bduss = cookieValueOf(cookie, 'BDUSS');
+  if (!bduss) return null;
+  const sharedCookie = mergeSetCookies(cookie, [`BDCLND=${encodedSekey(file.sekey)}`]);
+  const started = Date.now();
+  let stage = '账号上下文';
+  try {
+    const get = async (url: string): Promise<any> => {
+      const r = await globalThis.fetch(url, {
+        headers: { Cookie: sharedCookie, 'User-Agent': SHARE_UA, Referer: REF },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!r.ok) return null;
+      return r.json();
+    };
+    const user = await get(SHARE_USER_API);
+    const uid = String(user?.data?.fields?.uid || '');
+    if (Number(user?.errno) !== 0 || !/^\d+$/.test(uid)) return null;
+    stage = '签名分享取链';
+    const time = String(Date.now());
+    const url = new URL('https://pan.baidu.com/share/list');
+    const params = {
+      shareid: file.shareId, uk: file.uk, fid: file.fsid,
+      sekey: decodeURIComponent(encodedSekey(file.sekey)), origin: 'dlna', devuid: SHARE_DEVICE,
+      clienttype: '1', channel: 'android_12_zhao_bd-netdisk_1024266h', version: '11.30.2',
+      time, rand: baiduShareRand(bduss, uid, time),
+    };
+    for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+    const result = await get(url.href);
+    const exact = Array.isArray(result?.list)
+      ? result.list.filter((x: any) => String(x.fs_id) === file.fsid && Number(x.isdir) === 0) : [];
+    if (Number(result?.errno) !== 0 || exact.length !== 1 || !exact[0].dlink) return null;
+    const dlink = String(exact[0].dlink);
+    if (!/^https?:\/\//i.test(dlink)) return null;
+    stage = '媒体 Range 验证';
+    const header = { Cookie: sharedCookie, 'User-Agent': BAIDU_DL_UA, Referer: REF };
+    const media = await globalThis.fetch(dlink, {
+      headers: { ...header, Range: 'bytes=0-0' }, signal: AbortSignal.timeout(8000),
+    });
+    const valid = media.status === 206 && /^bytes 0-0\/[1-9]\d*$/i.test(media.headers.get('content-range') || '') &&
+      !/text\/|json|xml/i.test(media.headers.get('content-type') || '');
+    await media.body?.cancel();
+    if (!valid) return null;
+    logger?.i(`baidu 分享免转存取链及 Range 验证成功，耗时 ${Date.now() - started}ms`);
+    return { ok: true, url: dlink, header };
+  } catch {
+    logger?.w(`baidu 分享免转存未完成（${stage}），保留转存兜底`);
+    return null;
+  }
+}
+
 /** ★ 全局串行锁：转存是「服务端共享目录 + 落盘路径」状态机，并发会互相污染（与夸克/UC 同理） */
 let transferChain: Promise<unknown> = Promise.resolve();
 
@@ -375,20 +445,20 @@ let transferChain: Promise<unknown> = Promise.resolve();
  * @param short  分享 id（`pan.baidu.com/s/<short>`）
  * @param pwd    提取码（无则空串）
  * @param cookie 绑定百度的完整 cookie（driveList()['baidu']）
- * @param opts.innerName 已知集名（分享是整季文件夹时用于精确选集；缺省取第一集）
+ * @param opts.innerName 已知集名；缺少标识时只接受唯一视频，绝不默认首集。
  */
 export function baiduResolveShare(
   short: string,
   pwd: string,
   cookie: string,
-  opts: { innerName?: string; logger?: Logger } = {},
+  opts: { innerFid?: string; innerName?: string; logger?: Logger } = {},
 ): Promise<BaiduTransferResult> {
   const run = transferChain.then(() => baiduResolveInner(short, pwd, cookie, opts));
   transferChain = run.catch(() => undefined);
   return run;
 }
 
-/** 已知所选分享文件：复用详情阶段的会话，只转存该文件，不列举/转存整季。 */
+/** 已知所选分享文件：优先只读直链；失败仅转存所选文件，不列举/转存整季。 */
 export function baiduResolveSharedFile(
   file: BaiduSharedFile,
   cookie: string,
@@ -398,6 +468,8 @@ export function baiduResolveSharedFile(
     const fail = (reason: string): BaiduTransferResult => ({ ok: false, url: '', header: {}, reason });
     if (!cookie) return fail('未绑定百度账号（Cookie 缺失）');
     if (![file.shareId, file.uk, file.fsid].every((s) => /^\d+$/.test(s)) || !file.sekey) return fail('分享文件会话不完整');
+    const direct = await trySharedDirectLink(file, cookie, logger);
+    if (direct) return direct;
     const sekey = encodedSekey(file.sekey);
     const s: Sess = { cookie: mergeSetCookies(cookie, [`BDCLND=${sekey}`]) };
     const bdstoken = await fetchBdstoken(s);
@@ -414,7 +486,7 @@ async function baiduResolveInner(
   short: string,
   pwd: string,
   cookie: string,
-  opts: { innerName?: string; logger?: Logger },
+  opts: { innerFid?: string; innerName?: string; logger?: Logger },
 ): Promise<BaiduTransferResult> {
   const log = opts.logger ?? ({ i: () => {}, w: () => {}, e: () => {} } as unknown as Logger);
   const fail = (reason: string): BaiduTransferResult => ({ ok: false, url: '', header: {}, reason });
@@ -457,9 +529,25 @@ async function baiduResolveInner(
   const rootItems = parseShareItems(pg.text);
   if (!rootItems.length) return fail('分享内没有可播文件');
 
-  // 4) 选定要转存的条目：单个目录 → 整目录；否则按集名 → 首个视频
-  const picked = pickRootItem(rootItems, opts.innerName, log);
+  // 优先分享者文件 ID；嵌套文件按 fid 读取元数据，不退回根目录/首集。
+  let picked: BaiduShareItem | string;
+  if (opts.innerFid) {
+    if (!/^\d+$/.test(opts.innerFid)) return fail('所选百度文件 ID 无效');
+    const root = rootItems.find(x => x.fsid === opts.innerFid && !x.isdir);
+    if (root) picked = root;
+    else {
+      const meta = await req(s, `https://pan.baidu.com/share/list?shareid=${shareid}&uk=${shareUk}&fid=${opts.innerFid}&sekey=${sekey}&${Q}`);
+      const exact = Array.isArray(meta.json?.list) ? meta.json.list.filter((x: any) => String(x.fs_id) === opts.innerFid && Number(x.isdir) === 0) : [];
+      if (Number(meta.json?.errno) !== 0 || exact.length !== 1) return fail('分享中未找到所选文件 ID，拒绝播放其它集');
+      picked = { fsid: opts.innerFid, name: String(exact[0].server_filename || ''), path: String(exact[0].path || ''), isdir: false };
+    }
+  } else picked = pickRootItem(rootItems, opts.innerName);
   if (typeof picked === 'string') return fail(picked);
+
+  if (!picked.isdir) {
+    const direct = await trySharedDirectLink({ shareId: shareid, uk: shareUk, fsid: picked.fsid, sekey, name: picked.name }, s.cookie, log);
+    if (direct) return direct;
+  }
 
   // 5) bdstoken（transfer / list / filemetas 都要）
   const bdstoken = await fetchBdstoken(s);
@@ -527,8 +615,8 @@ async function transferSelectedFile(
       if (!hit) return fail(`落盘目录内未找到所选文件「${innerName}」，拒绝播放其它集`);
       file = hit;
     } else {
+      if (vids.length !== 1) return fail('分享包含多集但缺少所选文件标识，拒绝默认播放首集');
       file = vids[0];
-      log.w(`baidu 分享是整季文件夹，未带集信息 → 取首集 ${file.name}`);
     }
   } else {
     // 转存后必须按本人盘的实际路径复核，绝不直接信任 transfer 返回的旧/错误 fs_id。
@@ -558,7 +646,7 @@ async function transferSelectedFile(
   const url = Number(dl.json?.errno) === 0 ? String(dl.json?.info?.[0]?.dlink || '') : '';
   if (!url) return fail(`未取到下载地址（errno=${dl.json?.errno ?? dl.status}）`);
 
-  log.i(`baiduTransfer 直链 ok: ${url.slice(0, 90)}...`);
+  log.i('baiduTransfer 转存取链成功');
   return {
     ok: true,
     url,
@@ -602,7 +690,7 @@ export async function baiduDirectLinkByFsid(
     );
     const url = Number(dl.json?.errno) === 0 ? String(dl.json?.info?.[0]?.dlink || '') : '';
     if (!url) return fail(`未取到下载地址（errno=${dl.json?.errno ?? dl.status}）`);
-    log.i(`baiduTransfer(fs_id) 直链 ok: ${url.slice(0, 90)}...`);
+    log.i('baiduTransfer(fs_id) 取链成功');
     return { ok: true, url, header: { 'User-Agent': BAIDU_DL_UA, Referer: REF, Cookie: s.cookie } };
   } catch (e) {
     return fail(`异常(${(e as Error).message.slice(0, 80)})`);
@@ -612,12 +700,11 @@ export async function baiduDirectLinkByFsid(
 /**
  * 从分享根层条目里挑出要转存的那个。
  * 规则（保守，宁可报错不播错）：① 集名精确命中优先；② 只有一个条目就用它；
- * ③ 有目录优先整目录；④ 否则取首个视频；⑤ 拿不准 → 返回原因字符串。
+ * ③ 唯一目录可下钻按集名定位；④ 否则只接受唯一视频；⑤ 拿不准 → 返回原因字符串。
  */
 function pickRootItem(
   items: BaiduShareItem[],
   innerName: string | undefined,
-  log: Logger,
 ): BaiduShareItem | string {
   if (innerName) {
     const hit = pickByName(items, innerName);
@@ -630,10 +717,8 @@ function pickRootItem(
   const dirs = items.filter((x) => x.isdir);
   if (dirs.length === 1) return dirs[0];
   const vids = sortByNaturalName(items.filter((x) => !x.isdir && VIDEO_RE.test(x.name)));
-  if (vids.length) {
-    if (items.length > 1) log.w(`baidu 分享根层有 ${items.length} 项且未带集信息 → 取首个视频 ${vids[0].name}`);
-    return vids[0];
-  }
+  if (vids.length === 1) return vids[0];
+  if (vids.length > 1) return '分享包含多集但缺少所选文件标识，拒绝默认播放首集';
   return '分享内没有可播的视频文件';
 }
 

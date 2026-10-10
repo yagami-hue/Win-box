@@ -614,6 +614,7 @@ export class JarSpiderBridge {
     const got = await fetchWithDisguise(this.host!.http, jarUrl, {
       accept: (b) => isJarOrDex(b),
       attempts,
+      retryWithCookie: true, // jinenge：首次 403 种 Cookie，再用同一 UA 请求即返回真 jar
       timeoutMs: 60000,
       buffer: 2, // 沿用 jar 路径既有的 base64 语义（由 fetchWithDisguise 归一成 Buffer）
       onTry: (t) => {
@@ -623,12 +624,13 @@ export class JarSpiderBridge {
         this.host?.logger.i(`jvm-bridge jar 下载尝试「${t.label}」${t.ok ? '命中' : '未命中'}：${feat} ← ${jarUrl}`);
       },
     });
-    let jarBytes = got.buf ?? got.last ?? Buffer.alloc(0);
-    if (got.buf && got.used && got.used.label !== '默认 UA') {
-      this.host?.logger.i(`jvm-bridge jar 按「${got.used.label}」重试成功（默认 UA 拿到的不是 jar）: ${jarUrl}`);
+    // last 仅供诊断，绝不能把 HTML/403/404 错误页送进 dex2jar。
+    if (!got.buf || got.buf.length < 100) {
+      throw new Error(`jar 下载失败：未取得有效 jar/dex（已尝试：${describeFailures(got.tries)}）`);
     }
-    if (jarBytes.length < 100) {
-      throw new Error(`jar 下载失败: ${jarUrl}（已尝试：${describeFailures(got.tries)}）`);
+    const jarBytes = got.buf;
+    if (got.buf && got.used && got.used.label !== '默认 UA') {
+      this.host?.logger.i(`jvm-bridge jar 按「${got.used.label}」重试成功（首次响应未通过 jar 校验）: ${jarUrl}`);
     }
     // 下载是异步的，期间目录仍可能被外部删除 → 再次兜底
     this.ensureCacheDir();

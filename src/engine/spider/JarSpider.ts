@@ -82,11 +82,15 @@ export class JarSpider extends Spider {
       } else if (/Invalid URL|Failed to parse URL/i.test(msg)) {
         this.loadError = 'jar 地址不合法（配置里的路径无法解析），可能需要重新导入配置';
       } else if (/jar 下载失败|status/i.test(msg)) {
-        this.loadError = 'jar 下载失败，资源地址可能已失效或网络不通';
+        this.loadError = /HTTP 403/.test(msg)
+          ? 'jar 下载失败：上游返回 HTTP 403，自动重试后仍被拒绝，请稍后重试或联系源提供者'
+          : /HTTP 404/.test(msg)
+            ? 'jar 下载失败：上游返回 HTTP 404，请检查配置里的 jar 地址'
+            : 'jar 下载失败，资源地址可能已失效、返回非 jar 内容或网络不通';
       } else if (/转换内存不足|OutOfMemoryError/i.test(msg)) {
         this.loadError = 'jar 转换内存不足（该 jar 体积偏大）：已按更大堆重试仍失败，请关闭其他占内存的程序后清理缓存再试';
       } else if (/转换产物为空|dex2jar/i.test(msg)) {
-        this.loadError = 'jar 转换失败，下载到的可能不是有效的 jar 文件';
+        this.loadError = 'jar 转换失败：下载内容未能产出可用 class，请检查转换日志及源兼容性';
       } else if (/ENOENT/.test(msg)) {
         this.loadError = 'jar 缓存目录异常（文件或目录缺失）';
       } else {

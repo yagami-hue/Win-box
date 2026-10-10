@@ -27,7 +27,7 @@ vi.mock('electron', async () => {
 /** 解链结果与调用记录（mock 掉真实网络；extract/is* 等纯函数保持真实实现） */
 const hoisted = vi.hoisted(() => ({
   baidu: {
-    calls: [] as Array<{ short: string; pwd: string; innerName: string }>,
+    calls: [] as Array<{ short: string; pwd: string; innerName: string; innerFid?: string }>,
     result: {
       ok: true,
       url: 'https://d11.baidu-cdn.test/file/x.mp4?token=1',
@@ -47,7 +47,7 @@ const hoisted = vi.hoisted(() => ({
     resolve: vi.fn(),
   },
   uc: {
-    calls: [] as Array<{ pwdId: string; passcode: string }>,
+    calls: [] as Array<{ pwdId: string; passcode: string; innerFid: string; innerName: string }>,
     result: { ok: true, url: 'https://uc-cdn.test/f/x.mkv?token=2', header: { 'User-Agent': 'UA', Cookie: 'c=1', Referer: 'https://drive.uc.cn/' } },
   },
   quark: {
@@ -64,8 +64,8 @@ const hoisted = vi.hoisted(() => ({
 
 vi.mock('../src/main/net/baiduTransfer', async (orig) => ({
   ...(await orig<typeof import('../src/main/net/baiduTransfer')>()),
-  baiduResolveShare: async (short: string, pwd: string, _cookie: string, opts?: { innerName?: string }) => {
-    hoisted.baidu.calls.push({ short, pwd, innerName: opts?.innerName || '' });
+  baiduResolveShare: async (short: string, pwd: string, _cookie: string, opts?: { innerName?: string; innerFid?: string }) => {
+    hoisted.baidu.calls.push({ short, pwd, innerName: opts?.innerName || '', ...(opts?.innerFid ? { innerFid: opts.innerFid } : {}) });
     return { ...hoisted.baidu.result };
   },
   baiduDirectLinkByFsid: async (fsid: string) => {
@@ -77,8 +77,8 @@ vi.mock('../src/main/net/baiduTransfer', async (orig) => ({
 
 vi.mock('../src/main/net/ucTransfer', async (orig) => ({
   ...(await orig<typeof import('../src/main/net/ucTransfer')>()),
-  ucResolveShare: async (pwdId: string, passcode: string) => {
-    hoisted.uc.calls.push({ pwdId, passcode });
+  ucResolveShare: async (pwdId: string, passcode: string, _cookie: string, opts?: { innerFid?: string; innerName?: string }) => {
+    hoisted.uc.calls.push({ pwdId, passcode, innerFid: opts?.innerFid || '', innerName: opts?.innerName || '' });
     return { ...hoisted.uc.result };
   },
 }));
@@ -144,6 +144,33 @@ describe('parsePanProxyQuery（端口 -1，不能用 new URL）', () => {
 });
 
 describe('SpiderHost：do=pan → 原生解链', () => {
+  it('明确 UC 描述未绑定时只要求绑定 UC，不误用已绑定夸克账号', async () => {
+    const { host, key } = makeHost('');
+    const store = (host as unknown as { drives: { set: (k: string, v: string) => void } }).drives;
+    store.set('quark', 'quark-cookie');
+    const quarkStart = hoisted.quark.calls.length;
+    const r = await host.play(key, '优汐无限1', JSON.stringify({ sId: 'ucshare123', fid: 'file-2' }));
+    expect(r.needDriveCookieBind).toBe('uc');
+    expect(r.message).toContain('UC');
+    expect(hoisted.quark.calls.length).toBe(quarkStart);
+  });
+  it('FTY 优汐 sId/fid 描述先走 UC，切不同文件保持分享上下文，不调用夸克或 jar', async () => {
+    const { host, key } = makeHost('');
+    const store = (host as unknown as { drives: { set: (k: string, v: string) => void } }).drives;
+    store.set('uc', 'uc-cookie');
+    store.set('quark', 'quark-cookie');
+    const ucStart = hoisted.uc.calls.length, quarkStart = hoisted.quark.calls.length;
+    const vm = (host as any).vm;
+    vm.play = vi.fn();
+    for (const fid of ['file-2', 'file-3', 'file-2']) {
+      const r = await host.play(key, '优汐无限1', JSON.stringify({ sId: 'ucshare123', fid, file_name: fid + '.mkv' }));
+      expect(r.parse).toBe(0);
+      expect(hoisted.uc.calls.at(-1)).toMatchObject({ pwdId: 'ucshare123', innerFid: fid, innerName: fid + '.mkv' });
+    }
+    expect(hoisted.uc.calls.length - ucStart).toBe(3);
+    expect(hoisted.quark.calls.length).toBe(quarkStart);
+    expect(vm.play).not.toHaveBeenCalled();
+  });
   const sharedFile = { shareId: '49252031905', uk: '1100830236519', fsid: '812960976845060', sekey: 'key%2Bvalue%3D', name: '01.mp4' };
   const sharedDescriptor = JSON.stringify({
     share_id: sharedFile.shareId, uk: sharedFile.uk, fs_id: sharedFile.fsid,
@@ -230,10 +257,39 @@ describe('SpiderHost：do=pan → 原生解链', () => {
     hoisted.uc.calls.length = 0;
     const { host, key } = makeHost(ENC_UC_PAN, { uc: 'uc_token=1' });
     const r = await host.play(key, 'UC无限#1', 'ep-2');
-    expect(hoisted.uc.calls).toEqual([{ pwdId: '2c66665853b34', passcode: 'a1b2' }]);
+    expect(hoisted.uc.calls).toEqual([{ pwdId: '2c66665853b34', passcode: 'a1b2', innerFid: '', innerName: '' }]);
     expect(r.parse).toBe(0);
     expect(r.url).toContain('http://127.0.0.1:9978/play?');
     expect(decodeURIComponent(r.url)).toContain('https://uc-cdn.test/f/x.mkv?token=2');
+  });
+
+  it('UC 返回分享 URL 时保留原始选集的文件标识，上下集不重复第一集', async () => {
+    hoisted.uc.calls.length = 0;
+    const { host, key } = makeHost(ENC_UC_PAN, { uc: 'uc_token=1' });
+    for (const i of [2, 3, 2]) {
+      const r = await host.play(key, 'UC无限#1', JSON.stringify({ fid: `fid-${i}`, file_name: `0${i}.mkv` }));
+      expect(r.parse).toBe(0);
+    }
+    expect(hoisted.uc.calls.map(c => [c.innerFid, c.innerName])).toEqual([
+      ['fid-2', '02.mkv'], ['fid-3', '03.mkv'], ['fid-2', '02.mkv'],
+    ]);
+  });
+
+  it('百度返回分享 URL 时仍保留原选集 fs_id/文件名，切集不默认首集', async () => {
+    hoisted.baidu.calls.length = 0;
+    const { host, key } = makeHost(ENC_BAIDU_PAN, { baidu: 'BDUSS=t' });
+    for (const i of [2, 3, 2]) await host.play(key, '百度无限', JSON.stringify({ fs_id: String(1000000 + i), path: `/季/0${i}.mp4` }));
+    expect(hoisted.baidu.calls.map(c => [c.innerFid, c.innerName])).toEqual([
+      ['1000002', '02.mp4'], ['1000003', '03.mp4'], ['1000002', '02.mp4'],
+    ]);
+  });
+
+  it('UC do=pan 的 shareId/fileId 是分离的分享和文件标识', async () => {
+    hoisted.uc.calls.length = 0;
+    const { host, key } = makeHost('http://127.0.0.1:-1/proxy?do=pan&site=uc&shareId=2c66665853b34&fileId=fid-second', { uc: 'uc_token=1' });
+    const r = await host.play(key, 'UC无限#1', 'ep-2');
+    expect(r.parse).toBe(0);
+    expect(hoisted.uc.calls).toEqual([{ pwdId: '2c66665853b34', passcode: '', innerFid: 'fid-second', innerName: '' }]);
   });
 
   it('三条通道都没识别出分享 → parse:1 + 单条原因上屏（带 site，不再双报「百度/UC」）', async () => {
@@ -280,7 +336,7 @@ describe('SpiderHost：do=pan → 原生解链', () => {
     const pan = 'http://127.0.0.1:-1/proxy?do=pan&site=uc&fileId=' + encodeURIComponent('https://fast.uc.cn/s/abc9x9?pwd=q1w2');
     const { host, key } = makeHost(pan, { uc: 'uc_ck=2' });
     const r = await host.play(key, 'UC线路', 'ep-q3');
-    expect(hoisted.uc.calls).toEqual([{ pwdId: 'abc9x9', passcode: 'q1w2' }]);
+    expect(hoisted.uc.calls).toEqual([{ pwdId: 'abc9x9', passcode: 'q1w2', innerFid: '', innerName: '' }]);
     expect(r.parse).toBe(0);
   });
 
@@ -323,7 +379,7 @@ describe('SpiderHost：do=pan → 原生解链', () => {
       '"fs_id":"328674630465284","shareUser":"","path":"%2Fsharelink0-480637669818448%2F%E5%8D%83%E9%87%91%2FE02.mp4"}';
     const { host, key } = makeHost(desc, { baidu: 'BDUSS=t; STOKEN=s' });
     const r = await host.play(key, '嘟嘟无限2', 'ep-bd1');
-    expect(hoisted.baidu.calls).toEqual([{ short: '1DssJrJXy-2W4yPXvwew5QA', pwd: '', innerName: 'E02.mp4' }]);
+    expect(hoisted.baidu.calls).toEqual([{ short: '1DssJrJXy-2W4yPXvwew5QA', pwd: '', innerName: 'E02.mp4', innerFid: '328674630465284' }]);
     expect(r.parse).toBe(0);
     expect(r.url).toContain('http://127.0.0.1:9978/play?');
     expect(decodeURIComponent(r.url)).toContain('https://d11.baidu-cdn.test/file/x.mp4?token=1');

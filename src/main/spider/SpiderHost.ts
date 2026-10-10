@@ -1021,12 +1021,12 @@ export class SpiderHost {
     } catch { return null; }
   }
 
-  private async baiduFromPanUrl(url: string, flag: string, miss?: string[], jvmPort?: number | null): Promise<PlayResult | null> {
-    const share = extractBaiduShare(url);
+  private async baiduFromPanUrl(url: string, flag: string, miss?: string[], jvmPort?: number | null, episodeId = ''): Promise<PlayResult | null> {
+    const share = extractBaiduShare(url) || extractBaiduShare(episodeId);
     const cookie = (this.driveList() as Record<string, string>)['baidu'] || '';
     const pan = parsePanProxyQuery(url);
     const fid = String(pan.fileId || '').trim();
-    const sharedFile = extractBaiduSharedFile(url) ||
+    const sharedFile = extractBaiduSharedFile(episodeId) || extractBaiduSharedFile(url) ||
       (jvmPort && String(pan.site || '').toLowerCase().startsWith('baidu') && /^\d+$/.test(fid)
         ? await this.baiduContextFromJvm(jvmPort, fid) : null);
     if (sharedFile) {
@@ -1084,7 +1084,8 @@ export class SpiderHost {
     try {
       const t = await baiduResolveShare(share.short, share.pwd, cookie, {
         // ★ 2026-10-09：播放描述 JSON 里带 `path`（末段=文件名）→ 整季文件夹时按集名选对那一集
-        innerName: extractBaiduInnerName(url) || undefined,
+        innerFid: extractEpisodeFid(episodeId) || extractEpisodeFid(url) || (/^\d+$/.test(fid) ? fid : undefined),
+        innerName: extractBaiduInnerName(episodeId) || extractEpisodeName(episodeId) || extractBaiduInnerName(url) || undefined,
         logger: fileLogger,
       });
       if (t.path) {
@@ -1119,8 +1120,11 @@ export class SpiderHost {
    * ★ 2026-10-08（用户报「UC 网盘资源无法播放」）：桌面端此前**只有百度**这一条兜底 ——
    *   jar 给 UC 分享的线路一律「视为无地址」→ 用户侧黑屏且无原因。这里补齐 UC 通道（免转存优先）。
    */
-  private async ucFromPanUrl(url: string, flag: string, miss?: string[]): Promise<PlayResult | null> {
-    const share = extractUcShare(url);
+  private async ucFromPanUrl(url: string, flag: string, miss?: string[], episodeId = ''): Promise<PlayResult | null> {
+    const pan = parsePanProxyQuery(url);
+    const share = extractUcShare(episodeId, flag) || extractUcShare(url, flag) ||
+      (/^uc/i.test(pan.site || '') && /^[0-9a-z_-]+$/i.test(pan.shareId || '')
+        ? { pwdId: pan.shareId, passcode: pan.passcode || pan.pwd || '' } : null);
     if (!share) {
       // ★ 2026-10-09：「未识别」不再逐通道 push（同 baiduFromPanUrl，见其注释）。
       return null;
@@ -1131,7 +1135,13 @@ export class SpiderHost {
       return null;
     }
     try {
-      const t = await ucResolveShare(share.pwdId, share.passcode, cookie, { logger: fileLogger });
+      // 分享 URL 与所选文件是两种不同标识；jar 可能只在原始选集描述中保留 fid/集名。
+      const fileId = pan.fileId && !/[/:?]/.test(pan.fileId) ? pan.fileId : '';
+      const t = await ucResolveShare(share.pwdId, share.passcode, cookie, {
+        innerFid: extractEpisodeFid(episodeId) || extractEpisodeFid(url) || fileId,
+        innerName: extractEpisodeName(episodeId) || extractEpisodeName(url),
+        logger: fileLogger,
+      });
       if (!t.ok || !t.url) {
         fileLogger.w(`ucTransfer(do=pan) 未成功(${t.reason || '未知原因'})`);
         miss?.push(`UC：解链失败(${t.reason || '未知原因'})`);
@@ -1142,7 +1152,7 @@ export class SpiderHost {
         if (this.pendingQuarkDeletes.length > 200) this.pendingQuarkDeletes.shift();
         this.persistPendingQuark();
       }
-      fileLogger.i(`ucTransfer(do=pan) 直链 ok: ${t.url.slice(0, 90)}...`);
+      fileLogger.i('ucTransfer(do=pan) 取链成功');
       return {
         parse: 0,
         url: wrapPlayUrlWithHeaders(t.url, t.header || {}),
@@ -2072,6 +2082,15 @@ export class SpiderHost {
   private async playInner(key: string, flag: string, id: string, retried = false): Promise<PlayResult> {
     const b = this.getSource(key);
     if (!b) throw new Error(`源不存在: ${key}`);
+    // fty「优汐」与夸克共用 sId/fid 描述；明确 UC 上下文优先，不能误发到夸克。
+    if (extractUcShare(id, flag) && !isUcSharePlay(id)) {
+      const miss: string[] = [];
+      const got = await this.ucFromPanUrl(id, flag, miss, id);
+      if (got) return got;
+      return { parse: 1, url: '', playUrl: '', flag, jx: 0,
+        ...(!this.driveList()['uc'] ? { needDriveCookieBind: 'uc' } : {}),
+        message: `UC 网盘取流失败（${miss.join('；') || '分享文件解链失败'}）` };
+    }
     // Native Quark resolution precedes playerContent and JVM self-resolution.
     if (isQuarkSharePlay(id) || /^quark/i.test(parsePanProxyQuery(id).site || '')) {
       const miss: string[] = [];
@@ -2180,15 +2199,15 @@ export class SpiderHost {
     }
     // ★ 2026-09-30（用户要求「实现百度网盘桌面端解链」）：百度分享型播放（episode 本身就是
     //   `pan.baidu.com/s/…`，如「盘搜/百酷」这类聚合源）且已绑定百度 → 原生 baiduResolveShare 取直链。
-    //   原生通道采用「转存 → 取链」，
-    //     落盘到应用专用目录「Win-Box缓存」，播完即删（走 pendingQuarkDeletes 队列）。
+    //   精确定位后优先签名分享免转存；失败时才落盘到应用专用目录「Win-Box缓存」，
+    //     播完即删（走 pendingQuarkDeletes 队列）。
     let bdFail = '';
     // FTY 详情描述已带所选文件与 seKey：无需等待可能超时的 playerContent 再取回同一描述。
     if (extractBaiduSharedFile(id)) {
       const miss: string[] = [];
       const got = await this.baiduFromPanUrl(id, flag, miss);
       if (got) return got;
-      // 完整描述已足以转存；失败原因如空间不足不能被 jar playerContent 超时覆盖。
+      // 完整描述已足以精确取链；失败原因如空间不足不能被 jar playerContent 超时覆盖。
       return {
         parse: 1, url: '', playUrl: '', flag, jx: 0,
         ...(!this.driveList()['baidu'] ? { needDriveCookieBind: 'baidu' } : {}),
@@ -2207,6 +2226,7 @@ export class SpiderHost {
       } else if (share) {
         try {
           const t = await baiduResolveShare(share.short, share.pwd, bdCookie, {
+            innerFid: extractEpisodeFid(id),
             innerName: extractBaiduInnerName(id) || extractEpisodeName(id),
             logger: fileLogger,
           });
@@ -2328,9 +2348,9 @@ export class SpiderHost {
         for (const ch of order) {
           const got =
             ch === 'baidu'
-              ? await this.baiduFromPanUrl(r.url, flag, miss, jvmPort)
+              ? await this.baiduFromPanUrl(r.url, flag, miss, jvmPort, id)
               : ch === 'uc'
-                ? await this.ucFromPanUrl(r.url, flag, miss)
+                ? await this.ucFromPanUrl(r.url, flag, miss, id)
                 : await this.quarkFromPanUrl(r.url, flag, miss);
           if (got) return got;
         }

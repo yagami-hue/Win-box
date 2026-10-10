@@ -44,7 +44,7 @@ const NAV = [
   // ★ 2026-09-29（WebDAV 存储）：把自建 OpenList/AList/Nextcloud 等当媒体库浏览播放
   { to: '/storage', label: '存储', ico: '🗄' },
   { to: '/config', label: '配置', ico: '⚙' },
-  // ★ 2026-09-28（用户要求）：最后新增「说明」页（详细免责声明 + GitHub / 爱发电入口）
+  // 说明页（详细免责声明 + GitHub / 支持作者入口）
   { to: '/about', label: '说明', ico: 'ℹ' },
 ];
 
@@ -330,7 +330,7 @@ function AppShell() {
     return () => window.removeEventListener('focus', onFocus);
   }, [isPlayerWin]);
 
-  // 用户同意免责声明 → 记录标记，下次启动不再弹出
+  // 首次同意后主窗口进入说明页；记录标记，下次启动不再弹出或跳转。
   const agreeDisclaim = () => {
     try {
       localStorage.setItem('winbox-disclaim-agreed', '1');
@@ -338,6 +338,7 @@ function AppShell() {
       /* ignore */
     }
     setDisclaim(false);
+    if (!isPlayerWin && !isDetailWindow() && !isSearchWindow()) nav('/about', { replace: true });
   };
 
   const DisclaimerModal = (

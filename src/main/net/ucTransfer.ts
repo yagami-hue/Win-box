@@ -19,6 +19,7 @@
 // 不复制那套「按 fid 精确命中、集名唯一匹配、绝不盲选」的护栏逻辑。
 import type { Logger } from '../../shared/types';
 import { resolveShareFile, type ShareListFetcher } from './quarkTransfer';
+import { mergeSetCookies } from './cookieMerge';
 
 const REF = 'https://drive.uc.cn/';
 const BASE = 'https://pc-api.uc.cn/1/clouddrive';
@@ -76,7 +77,18 @@ export function isUcSharePlay(id: string): boolean {
  * `...?public=1`、`...?pwd=abcd`（提取码可选）。
  * ★ 兼容 query 值里的 percent-encoded 分享链接（见 shareTextCandidates）。
  */
-export function extractUcShare(id: string): { pwdId: string; passcode: string } | null {
+export function extractUcShare(id: string, flag = ''): { pwdId: string; passcode: string } | null {
+  // fty 的 UC/夸克描述都使用 sId/fid，sId 本身不能决定网盘。
+  // 仅在明确 UC 线路（优汐是 fty 的 UC 名称）下解释该描述；不凭通用字段猜提供商。
+  if (/^(?:UC(?:\b|网盘)|优汐)/i.test(flag)) {
+    try {
+      const d = JSON.parse(id);
+      if (d && typeof d === 'object' && typeof d.sId === 'string' && /^[0-9a-z_-]+$/i.test(d.sId) &&
+          typeof d.fid === 'string' && d.fid && !/[/:?]/.test(d.fid)) {
+        return { pwdId: d.sId, passcode: String(d.passcode || d.pwd || '') };
+      }
+    } catch { /* 仍尝试显式 UC 分享 URL */ }
+  }
   for (const s of shareTextCandidates(id)) {
     const m = UC_SHARE_ID_RE.exec(s);
     if (!m) continue;
@@ -90,8 +102,13 @@ async function jpost(
   path: string,
   cookie: string | null,
   body: unknown,
-): Promise<{ status: number; json: any; text: string }> {
-  const headers: Record<string, string> = { 'User-Agent': UA, Referer: REF, 'Content-Type': 'application/json' };
+): Promise<{ status: number; json: any; text: string; setCookie?: string }> {
+  const headers: Record<string, string> = {
+    'User-Agent': UA,
+    Referer: REF,
+    Origin: REF.replace(/\/$/, ''),
+    'Content-Type': 'application/json',
+  };
   if (cookie) headers.Cookie = cookie;
   const r = await globalThis.fetch(`${BASE}${path}?${Q}`, { method: 'POST', headers, body: JSON.stringify(body) });
   const text = await r.text();
@@ -101,12 +118,15 @@ async function jpost(
   } catch {
     /* 非 JSON：交给调用方看 text */
   }
-  return { status: r.status, json, text };
+  // UC download responses can refresh the playback session (__puus and peers).
+  // Preserve this without ever logging the cookie; the CDN may reject the first
+  // media Range when only the account cookie is sent.
+  return { status: r.status, json, text, setCookie: r.headers.get('set-cookie') || undefined };
 }
 
 async function jget(path: string, cookie: string): Promise<{ status: number; json: any; text: string }> {
   const r = await globalThis.fetch(`${BASE}${path}?${Q}`, {
-    headers: { 'User-Agent': UA, Referer: REF, Cookie: cookie },
+    headers: { 'User-Agent': UA, Referer: REF, Origin: REF.replace(/\/$/, ''), Cookie: cookie },
   });
   const text = await r.text();
   let json: any = {};
@@ -183,8 +203,12 @@ async function ucResolveInner(
   });
   const directUrl = String(direct.json?.data?.[0]?.download_url || '');
   if (directUrl) {
-    log.i(`uc 免转存直链 ok: ${directUrl.slice(0, 90)}...`);
-    return { ok: true, url: directUrl, header };
+    log.i('uc 分享免转存取链成功');
+    // The URL is bound to the session cookie returned by /file/download on
+    // some UC CDN nodes.  Returning only the original account cookie causes a
+    // reproducible 403 on the first Range request despite a valid download_url.
+    const playCookie = direct.setCookie ? mergeSetCookies(cookie, direct.setCookie) : cookie;
+    return { ok: true, url: directUrl, header: { ...header, Cookie: playCookie } };
   }
   log.w(`uc 免转存直链未取到（code=${direct.json?.code ?? direct.status}），回退转存路径`);
 
@@ -228,8 +252,9 @@ async function ucResolveInner(
   const url = String(dl.json?.data?.[0]?.download_url || '');
   if (!url) return fail(`未取到下载地址（code=${dl.json?.code ?? dl.status}）`);
 
-  log.i(`uc 转存直链 ok: ${url.slice(0, 90)}...`);
-  return { ok: true, url, header, fid: ownFid, pdirFid: '0' };
+  log.i('uc 转存取链成功');
+  const playCookie = dl.setCookie ? mergeSetCookies(cookie, dl.setCookie) : cookie;
+  return { ok: true, url, header: { ...header, Cookie: playCookie }, fid: ownFid, pdirFid: '0' };
 }
 
 /** 删除本人盘文件（仅回退路径转存过的才需要；「关播放窗口即删」清理用） */

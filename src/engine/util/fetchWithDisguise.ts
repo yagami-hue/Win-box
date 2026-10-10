@@ -146,6 +146,36 @@ export function cookieFromHeaders(headers: Record<string, string | string[]> | u
   return parts.join('; ');
 }
 
+/** 仅用于本次同址重试：同名 Cookie 后值覆盖前值，不持久化、不执行响应里的脚本。 */
+function mergeRetryCookie(current: string, fresh: string): string {
+  const values = new Map<string, string>();
+  for (const part of `${current}; ${fresh}`.split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) values.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+  }
+  return [...values].map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+/** 防止把重定向站点、其他域/路径或 Secure Cookie 发给原下载地址。 */
+function retryCookieFromHeaders(headers: Record<string, string | string[]> | undefined, url: string, finalUrl?: string): string {
+  try {
+    const target = new URL(url);
+    const response = new URL(finalUrl || url);
+    if (target.origin !== response.origin) return '';
+    const raw = headers?.['set-cookie'] ?? headers?.['Set-Cookie'];
+    const lines = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const eligible = lines.filter(line => {
+      const attrs = line.split(';').slice(1).map(s => s.trim());
+      if (attrs.some(a => /^secure$/i.test(a)) && target.protocol !== 'https:') return false;
+      const domain = attrs.find(a => /^domain=/i.test(a))?.slice(7).toLowerCase().replace(/^\./, '');
+      if (domain && target.hostname !== domain && !target.hostname.endsWith('.' + domain)) return false;
+      const path = attrs.find(a => /^path=/i.test(a))?.slice(5) || response.pathname.slice(0, response.pathname.lastIndexOf('/') + 1);
+      return target.pathname === path || (target.pathname.startsWith(path) && (path.endsWith('/') || target.pathname[path.length] === '/'));
+    });
+    return cookieFromHeaders({ 'set-cookie': eligible });
+  } catch { return ''; }
+}
+
 /**
  * 按阶梯逐档尝试（可叠加「换协议再试一次」）。
  * @param accept 判据（订阅：像不像 JSON；jar：魔数是不是 jar/dex）
@@ -164,6 +194,8 @@ export async function fetchWithDisguise(
     buffer?: 0 | 1 | 2;
     /** 全失败后是否再试同路径另一种协议（默认 true） */
     tryAltProtocol?: boolean;
+    /** 下载站点首次 403 种 Cookie：保持同一 UA，同址最多重试一次；默认关闭。 */
+    retryWithCookie?: boolean;
     onTry?: (t: TryInfo) => void;
   },
 ): Promise<DisguiseResult> {
@@ -174,7 +206,7 @@ export async function fetchWithDisguise(
   let capturedCookie = '';
   let last: Buffer | undefined;
 
-  const once = async (u: string, a: DisguiseAttempt): Promise<{ buf: Buffer | null }> => {
+  const once = async (u: string, a: DisguiseAttempt, cookieRetry = false): Promise<{ buf: Buffer | null; retryCookie?: string }> => {
     const headers: Record<string, string> = {};
     if (a.ua) headers['User-Agent'] = a.ua;
     if (a.referer) headers['Referer'] = a.referer;
@@ -186,7 +218,8 @@ export async function fetchWithDisguise(
         method: 'get',
         timeoutMs,
         buffer: bufMode,
-        redirect: 1,
+        // 自动带入的会话 Cookie 仅发回原地址，禁止跟随重定向泄露给另一站。
+        redirect: cookieRetry ? 0 : 1,
         headers: Object.keys(headers).length ? headers : undefined,
         ...(a.doh ? { doh: a.doh } : {}),
       });
@@ -197,16 +230,19 @@ export async function fetchWithDisguise(
         if (ck2) capturedCookie = ck2;
       }
       const info: TryInfo = { label: a.label, url: u, ok: false, status: res.status, sniff: sniffBody(buf) };
-      if (opts.accept(buf)) {
+      if (res.status >= 200 && res.status < 300 && opts.accept(buf)) {
         info.ok = true;
         tries.push(info);
         opts.onTry?.(info);
         return { buf };
       }
-      info.reason = `内容不像目标（${info.sniff?.kind}，${buf.length}B）`;
+      info.reason = res.status >= 200 && res.status < 300
+        ? `内容不像目标（${info.sniff?.kind}，${buf.length}B）`
+        : `HTTP ${res.status} 非成功响应`;
       tries.push(info);
       opts.onTry?.(info);
-      return { buf: null };
+      const fresh = opts.retryWithCookie ? retryCookieFromHeaders(res.headers, u, res.finalUrl) : '';
+      return { buf: null, ...(fresh ? { retryCookie: mergeRetryCookie(ck, fresh) } : {}) };
     } catch (e) {
       const info: TryInfo = { label: a.label, url: u, ok: false, reason: (e as Error).message || '请求失败' };
       tries.push(info);
@@ -224,6 +260,11 @@ export async function fetchWithDisguise(
     }
     const r = await once(url, a);
     if (r.buf) return { buf: r.buf, used: a, tries, cookie: capturedCookie || undefined, last };
+    if (r.retryCookie) {
+      const retry = { ...a, label: a.label + ' + 会话 Cookie', cookie: r.retryCookie };
+      const next = await once(url, retry, true);
+      if (next.buf) return { buf: next.buf, used: retry, tries, cookie: capturedCookie || undefined, last };
+    }
   }
 
   // 全失败 → 换另一种协议同路径再试一次（仅 okhttp UA，控制时长）
@@ -233,6 +274,11 @@ export async function fetchWithDisguise(
       const a: DisguiseAttempt = { label: 'okhttp UA（换 ' + (alt.startsWith('https') ? 'https' : 'http') + '）', ua: UA_OKHTTP, referer: refererAlt };
       const r = await once(alt, a);
       if (r.buf) return { buf: r.buf, used: a, altUrl: alt, tries, cookie: capturedCookie || undefined, last };
+      if (r.retryCookie) {
+        const retry = { ...a, label: a.label + ' + 会话 Cookie', cookie: r.retryCookie };
+        const next = await once(alt, retry, true);
+        if (next.buf) return { buf: next.buf, used: retry, altUrl: alt, tries, cookie: capturedCookie || undefined, last };
+      }
     }
   }
   return { buf: null, last, tries, cookie: capturedCookie || undefined };

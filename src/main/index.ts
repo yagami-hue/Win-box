@@ -206,7 +206,7 @@ app.whenReady().then(async () => {
   // ★ 2026-10-09：构建标记 —— 日志排障第一行就能确认「跑的是哪只构建」。
   //   背景：同版本号覆盖安装时用户日志无法区分新旧产物（1.20.0 两轮都叫 1.20.0），
   //   此标记随每轮 main 改动手工递增（含当轮关键词，grep 即证）。
-    fileLogger.i('build: 20261010.4 search-window-episode-context (independent search / exact route IDs / history browse isolation / episode line context / HTML media / Quark native / local Python / MPV lifecycle)');
+    fileLogger.i('build: 20261010.5 release-1.20.4 (exact episodes / drive streams / video resolution / Jar cookie retry / author support / first-run about)');
 
   try {
     await proxy.start();

@@ -1,18 +1,18 @@
 // src/renderer/pages/AboutPage.tsx
-// ★ 2026-09-28（用户要求）：新增「说明」页 —— 详细版免责声明 + GitHub / 爱发电入口。
-//   链接一律走 window.open：主进程 setWindowOpenHandler 会拦截并交给系统浏览器（shell.openExternal），
-//   不在应用内加载任何外部页面。
+// 说明页：详细版免责声明、GitHub 主页与本地赞赏图弹窗。
+import { useRef } from 'react';
+import { createPortal } from 'react-dom';
+import supportImage from '@author-support-image';
 
 /** 项目主页（源码 / 更新发布） */
 const GITHUB_URL = 'https://github.com/yagami-hue/Win-box';
-/** 爱发电赞助页（完全自愿；不提供任何额外功能） */
-const AFDIAN_URL = 'https://afdian.com/a/WinBox';
 
 function openExternal(url: string) {
   window.open(url, '_blank', 'noopener,noreferrer');
 }
 
 export default function AboutPage() {
+  const supportDialog = useRef<HTMLDialogElement>(null);
   return (
     <>
       <div className="topbar">
@@ -76,7 +76,7 @@ export default function AboutPage() {
         <section className="about-sec">
           <h3>七、开源主页与赞助（自愿）</h3>
           <p>
-            源码、更新与问题反馈见 GitHub 主页；如果你愿意支持作者持续维护，可通过爱发电赞助。
+            源码、更新与问题反馈见 GitHub 主页；如果你愿意支持作者持续维护，可点击「支持作者」查看赞赏码。
           </p>
           <div className="about-links">
             <button className="about-link" onClick={() => openExternal(GITHUB_URL)} title={GITHUB_URL}>
@@ -85,11 +85,11 @@ export default function AboutPage() {
               </svg>
               <span>GitHub 主页</span>
             </button>
-            <button className="about-link about-sponsor" onClick={() => openExternal(AFDIAN_URL)} title={AFDIAN_URL}>
+            <button className="about-link about-sponsor" onClick={() => supportDialog.current?.showModal()} title="查看作者赞赏码" aria-haspopup="dialog">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M12 20.2s-7.2-4.5-7.2-10A4.6 4.6 0 0112 7.1a4.6 4.6 0 017.2 3.1c0 5.5-7.2 10-7.2 10z" />
               </svg>
-              <span>爱发电 · 赞助</span>
+              <span>支持作者</span>
             </button>
           </div>
           <p className="muted">
@@ -101,6 +101,27 @@ export default function AboutPage() {
           </p>
         </section>
       </div>
+      {createPortal(
+        <dialog
+          ref={supportDialog}
+          className="about-support-dialog"
+          aria-labelledby="about-support-title"
+          onClick={(event) => {
+            if (event.target !== event.currentTarget) return;
+            const rect = event.currentTarget.getBoundingClientRect();
+            if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
+              event.currentTarget.close();
+            }
+          }}
+        >
+          <div className="about-support-header">
+            <h3 id="about-support-title">支持作者</h3>
+            <button autoFocus onClick={() => supportDialog.current?.close()} aria-label="关闭赞赏码">关闭</button>
+          </div>
+          <img className="about-support-image" src={supportImage} alt="作者赞赏图" draggable={false} />
+        </dialog>,
+        document.body,
+      )}
     </>
   );
 }

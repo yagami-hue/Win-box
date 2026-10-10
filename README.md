@@ -9,7 +9,7 @@
 
 **链接**：[GitHub 主页](https://github.com/yagami-hue/Win-box) · [爱发电 · 赞助](https://afdian.com/a/WinBox)（自愿，见文末说明）
 
-**当前版本：1.20.3** · [下载](https://github.com/yagami-hue/Win-box/releases/tag/release1.20.3) · [更新记录](CHANGELOG.md)
+**当前版本：1.20.4** · [下载](https://github.com/yagami-hue/Win-box/releases/tag/release1.20.4) · [更新记录](CHANGELOG.md)
 
 ---
 
@@ -36,6 +36,20 @@ pnpm run build            # 构建（主进程 + 渲染层）
 ```
 
 运行时依赖（**不入库**，按需自行准备）：JDK / JRE、`stubs.jar` 桥、嵌入式 CPython、shell-shim、unidbg 运行时等。
+
+## 发布附件
+
+当前更新器下载完整安装包，不使用 `.blockmap`；NSIS 配置已关闭差分包生成。
+发布时仅上传当前版本的 `.exe` 安装包，不上传 `.blockmap` 或构建元数据，也不要使用整个输出目录的通配符上传。
+
+```bash
+pnpm run release:upload -- --dry-run  # 预览当前版本的上传文件，不执行上传
+pnpm run release:upload              # 上传到已创建的 release<版本号>
+```
+
+上传命令读取 `package.json` 的版本和输出目录，只选择当前版本的 Setup / 可选 portable `.exe`；不自动创建 Release、修改正文或覆盖已有附件。
+
+源码仓库的支持作者图片为纯空白占位图。正式发行构建可设置 `WINBOX_SUPPORT_IMAGE` 为本机图片路径；原图放在已忽略的 `.tmp/` 中，不提交到源码仓库，也不单独上传为 Release 附件。
 
 ## 目录结构
 

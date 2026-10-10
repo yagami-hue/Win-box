@@ -619,6 +619,16 @@ tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rg
   border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); color: var(--text); font-size: 13px; }
 .about-link:hover { border-color: var(--accent); color: var(--accent); }
 .about-link.about-sponsor:hover { border-color: #ff7a9a; color: #ff7a9a; }
+.about-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.about-support-dialog {
+  max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); padding: 14px;
+  border: 1px solid var(--border); border-radius: 14px; background: var(--bg-elev); color: var(--text);
+  box-sizing: border-box; overflow: auto; box-shadow: 0 18px 60px rgba(0,0,0,.5);
+}
+.about-support-dialog::backdrop { background: rgba(0,0,0,.55); backdrop-filter: blur(4px); }
+.about-support-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.about-support-header h3 { margin: 0; font-size: 16px; }
+.about-support-image { display: block; width: min(440px, calc(100vw - 62px), calc(100vh - 112px)); height: auto; border-radius: 8px; }
 
 /* ---- 外挂字幕渲染（原生 TextTrack + VTTCue，用 CSS 变量控制字号/位置） ---- */
 .vplayer video::cue { font-size: var(--sub-font, 20px); font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;

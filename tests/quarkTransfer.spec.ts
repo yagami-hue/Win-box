@@ -2,6 +2,18 @@ import { describe, it, expect } from 'vitest';
 import { resolveShareFile, extractEpisodeFid, extractEpisodeName, episodeKeyOf, matchTransferredFile, isQuarkSharePlay, extractQuarkShare, isDirNode, isRealFileNode, quarkPlayUrl, QUARK_CACHE_DIR_NAME, SESSION_DIR_PREFIX, sessionDirName } from '../src/main/net/quarkTransfer';
 import type { ShareListFetcher } from '../src/main/net/quarkTransfer';
 
+describe('网盘所选文件描述兼容', () => {
+  it('保留 fileId 与百度 fs_id，数字按字符串提取不丢精度', () => {
+    expect(extractEpisodeFid('{"fileId":"fid-second"}')).toBe('fid-second');
+    expect(extractEpisodeFid('{"fs_id":98765432101234567}')).toBe('98765432101234567');
+    expect(extractEpisodeFid('{"fs_id":"812960976845060"}')).toBe('812960976845060');
+  });
+  it('分享 URL 不当作文件 ID，非法 query 编码也不抛出', () => {
+    expect(extractEpisodeFid('{"fileId":"https://drive.uc.cn/s/share"}')).toBe('');
+    expect(extractEpisodeFid('https://drive.uc.cn/s/share?fid=%zz')).toBe('%zz');
+  });
+});
+
 // ★ 会话子目录（tr_xxx）：每次播放落盘唯一目录，规避"上次文件未删完 → 第二次转存同名冲突"
 describe('sessionDirName（唯一会话子目录）', () => {
   it('格式为 tr_<时间戳>_<随机> 且带前缀', () => {

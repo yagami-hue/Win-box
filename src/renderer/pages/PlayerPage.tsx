@@ -8,6 +8,7 @@ import TitleBar from '../components/TitleBar';
 import { client } from '../api/client';
 import { uiMem, recordWatch, saveUiMemory, markHistoryOnlyWriter, historyGroupKey } from '../lib/uiMemory';
 import { formatEpisodeLabel } from '../lib/epName';
+import { playerWindowTitle } from '../lib/videoResolution';
 import { makeStaleGuard, acceptInitSeq } from '../lib/staleGuard';
 import type { PlayResult } from '../../shared/types';
 
@@ -43,6 +44,8 @@ export default function PlayerPage() {
   const [epIndex, setEpIndex] = useState(0);
   const [activeUrl, setActiveUrl] = useState('');
   const [curName, setCurName] = useState('');
+  const [resolution, setResolution] = useState('');
+  const windowTitle = playerWindowTitle(curName, resolution);
   const [resolving, setResolving] = useState(false);
   // ★ 网盘资源未绑定 cookie（主进程 play 检出）→ 传给播放器提示去配置页绑定
   const [driveBind, setDriveBind] = useState<string | null>(null);
@@ -82,6 +85,7 @@ export default function PlayerPage() {
     const display = mainTitle ? `${mainTitle} - ${label}` : label;
     setEpIndex(idx);
     setCurName(display);
+    setResolution('');
     setResolving(true);
     setActiveUrl('');
     setParseMsg('');
@@ -282,7 +286,7 @@ export default function PlayerPage() {
           改用一条 18px 细拖拽条：拖窗口、双击还原；按钮悬停才显形，最大限度让画面占满 */}
       {mini ? (
         <div className="mini-strip" onDoubleClick={() => void client.playerSetMini(false)}>
-          <span className="mini-strip-title" title={curName || 'Win-Box'}>{curName || 'Win-Box'}</span>
+          <span className="mini-strip-title" title={windowTitle}>{windowTitle}</span>
           <div className="mini-strip-btns">
             {/* ★ 2026-10-08（用户要求）：置顶按钮在 mini 条上（与标题栏同款）；开启态 accent 高亮 */}
             <button
@@ -321,7 +325,7 @@ export default function PlayerPage() {
         </div>
       ) : (
         <TitleBar
-          title={curName || 'Win-Box'}
+          title={windowTitle}
           showMini
           mini={mini}
           onMiniToggle={() => void client.playerSetMini(!mini)}
@@ -344,6 +348,7 @@ export default function PlayerPage() {
             <VideoPlayer
               url={activeUrl}
               resourceName={curName}
+              onResolutionChange={setResolution}
               danmakuTitle={((init?.subtitleTitle || init?.title) || '').trim()}
               driveBindProvider={driveBind}
               // ★ 2026-09-29：在播放器里绑定网盘成功后自动重新解析当前集（不必手动重开播放窗口）

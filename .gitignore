@@ -12,6 +12,8 @@ Thumbs.db
 .workbuddy/
 .trae/
 .tmp/
+# 作者赞赏原图仅用于本机发行构建，源码仓库使用空白占位图
+src/renderer/assets/author-support.png
 
 # 分发版 EULA（与开源 MIT LICENSE 冲突，不入源码仓库）
 LICENSE.txt

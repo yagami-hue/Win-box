@@ -208,6 +208,35 @@ describe('JarSpiderBridge.doConvert — 缓存目录自愈', () => {
     await bridge.ensureConverted('https://example.com/plain.jar');
     expect((host as never as { http: { request: { mock: { calls: unknown[] } } } }).http.request.mock.calls.length).toBe(1);
   });
+
+  it('首次 403 种 Cookie → 同 UA 重试，真 jar 才写盘/转换', async () => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    const cacheDir = join(jvmDir, 'converted');
+    const host = makeHost([]) as any;
+    host.http.request = vi.fn(async (req: any) => req.headers?.Cookie === 'gate=yes'
+      ? { status: 200, headers: {}, content: FAKE_JAR_B64 }
+      : { status: 403, headers: { 'set-cookie': 'gate=yes; Path=/; Secure' }, content: Buffer.from('<html>retry</html>').toString('base64') });
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir }, host);
+    const out = await bridge.ensureConverted('https://example.com/app/tvbox/lib/a.jar;md5;unused');
+    expect(existsSync(out)).toBe(true);
+    expect(host.http.request).toHaveBeenCalledTimes(2);
+    expect(host.http.request.mock.calls[1][0].headers['User-Agent']).toBeUndefined();
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([403, 404, 200])('HTTP %s HTML 绝不落 raw.jar、不启动 dex2jar', async status => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    const cacheDir = join(jvmDir, 'converted');
+    const host = makeHost([]) as any;
+    host.http.request = vi.fn(async () => ({ status, headers: {}, content: Buffer.from('<html>' + 'blocked'.repeat(100) + '</html>').toString('base64') }));
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir }, host);
+    await expect(bridge.ensureConverted('https://example.com/blocked.jar')).rejects.toThrow(/jar 下载失败.*未取得有效/);
+    expect(spawnMock).not.toHaveBeenCalled();
+    const fs = await import('node:fs');
+    expect(fs.readdirSync(cacheDir).some(n => n.endsWith('.jar'))).toBe(false);
+  });
 });
 
 describe('JarSpiderBridge.resolvePaths — 失效产物不得外传', () => {

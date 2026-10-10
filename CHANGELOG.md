@@ -1,5 +1,11 @@
 # 更新记录
 
+## 1.20.4 · 2026-10-10
+
+Win-Box 1.20.4
+
+下载：<https://github.com/yagami-hue/Win-box/releases/tag/release1.20.4>
+
 ## 1.20.3 · 2026-10-10
 
 ### 搜索与详情窗口

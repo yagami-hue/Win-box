@@ -11,11 +11,17 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeJarUrl } from '../src/engine/spider/JarSpiderBridge';
 import { createHash } from 'node:crypto';
+import { parseSiteConfigWithBase } from '../src/engine/config/ApiConfigParser';
 
 const md5 = (s: string) => createHash('md5').update(s).digest('hex');
 const BASE = 'https://raw.liucn.cc/box/fty.jar';
 
 describe('normalizeJarUrl', () => {
+  it('jinenge 相对 jar 按配置所在目录解析，而不是站根目录', () => {
+    const raw = '{"spider":"./lib/jinenge.jar;md5;1d7a5147033044a81f91d5f4a510f9ed","sites":[]}';
+    const cfg = parseSiteConfigWithBase(raw, 'https://jinenge.us.kg/app/tvbox/tvbox.json').config;
+    expect(normalizeJarUrl(cfg.spider)).toBe('https://jinenge.us.kg/app/tvbox/lib/jinenge.jar');
+  });
   it('剥离 ;md5; 后缀，只留 URL', () => {
     expect(normalizeJarUrl(`${BASE};md5;3d161697458ecbcd2651a749db761ba1`)).toBe(BASE);
   });

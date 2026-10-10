@@ -117,6 +117,55 @@ describe('disguiseLadder — 档位与顺序', () => {
 });
 
 describe('fetchWithDisguise — 阶梯行为（假 HttpClient）', () => {
+  it('jar Cookie 重试保持同址/同 UA，合并同名更新且不打印 Cookie', async () => {
+    const jar = [0x50, 0x4b, 0x03, 0x04];
+    const { http, calls } = fakeHttp([
+      { status: 403, content: Array.from(Buffer.from('<html>retry</html>')), headers: { 'set-cookie': ['sid=new; Path=/; Secure', 'gate=ok; Path=/'] } },
+      { content: jar },
+    ]);
+    const r = await fetchWithDisguise(http, 'https://a.b/x.jar', {
+      accept: b => b[0] === 0x50, retryWithCookie: true,
+      attempts: [{ label: 'client', ua: UA_OKHTTP, cookie: 'sid=old; keep=yes' }],
+    });
+    expect(r.buf).toEqual(Buffer.from(jar));
+    expect(calls).toHaveLength(2);
+    expect(calls[1].url).toBe(calls[0].url);
+    expect(calls[1].headers?.['User-Agent']).toBe(UA_OKHTTP);
+    expect(calls[1].headers?.Cookie).toBe('sid=new; keep=yes; gate=ok');
+    expect(calls[1].redirect).toBe(0);
+    expect(JSON.stringify(r.tries)).not.toContain('sid=new');
+  });
+
+  it.each([
+    { finalUrl: 'https://elsewhere.b/gate', cookie: 'gate=ok; Path=/' },
+    { finalUrl: 'https://a.b/x.jar', cookie: 'gate=ok; Domain=elsewhere.b; Path=/' },
+    { finalUrl: 'https://a.b/x.jar', cookie: 'gate=ok; Path=/other' },
+  ])('不把别域/别路径 Cookie 发给原地址：%j', async ({ finalUrl, cookie }) => {
+    const { http, calls } = fakeHttp([{ status: 403, content: [], finalUrl, headers: { 'set-cookie': cookie } }]);
+    await fetchWithDisguise(http, 'https://a.b/x.jar', {
+      accept: () => false, retryWithCookie: true, attempts: [{ label: 'client' }], tryAltProtocol: false,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('HTTP 地址重试不发送 Secure Cookie', async () => {
+    const { http, calls } = fakeHttp([{ status: 403, content: [], headers: { 'set-cookie': 'gate=ok; Path=/; Secure' } }]);
+    await fetchWithDisguise(http, 'http://a.b/x.jar', {
+      accept: () => false, retryWithCookie: true, attempts: [{ label: 'client' }], tryAltProtocol: false,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('同一档 Cookie 重试有上限，错误状态即使有目标魔数也不能命中', async () => {
+    const { http, calls } = fakeHttp([{ status: 403, content: [0x50, 0x4b, 3, 4], headers: { 'set-cookie': 'gate=no; Path=/' } }]);
+    const r = await fetchWithDisguise(http, 'https://a.b/x.jar', {
+      accept: () => true, retryWithCookie: true, attempts: [{ label: 'client' }], tryAltProtocol: false,
+    });
+    expect(r.buf).toBeNull();
+    expect(calls).toHaveLength(2);
+    expect(describeFailures(r.tries)).toContain('HTTP 403');
+  });
+
   it('第一档给 HTML、okhttp 档给 JSON → 命中，且记录两档特征', async () => {
     const { http, calls } = fakeHttp([
       { content: Array.from(Buffer.from('<html><body>拦截页</body></html>', 'utf-8')) },

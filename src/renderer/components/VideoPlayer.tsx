@@ -14,6 +14,7 @@ import { parseDanmakuResponse } from '../../engine/danmaku/parseDanmakuXml';
 import { danmakuQueryCandidates, parseEpisodeInput, episodeFieldFromName, formatCandidateLabel } from '../../engine/danmaku/normalizeQuery';
 import { customEndpointsText, mergeEndpoints, pickAnimesForExpand, seasonOf, sortCandidatesByEp } from '../../engine/danmaku/endpoints';
 import { resolvePlayTarget } from '../lib/playTarget';
+import { formatVideoResolution } from '../lib/videoResolution';
 // ★ 2026-09-30（用户要求）：图片/音乐分流 + 直播态判定（纯函数，见 lib/mediaKind.ts）
 import { detectMediaKind, isLikelyLive } from '../lib/mediaKind';
 // ★ 2026-10-08（用户要求）：跳过片头片尾 —— 逐集记录 + 本资源最近一次设置继承（纯函数与存储见 lib/skipSegments.ts）
@@ -249,6 +250,8 @@ interface VideoPlayerProps {
   onNext?: () => void;
   /** 当前资源名（剧名+集号），用于外挂字幕检索。缺省则不显示字幕搜索。 */
   resourceName?: string;
+  /** 视频分辨率回传到窗口标题；未知/换源时为空。 */
+  onResolutionChange?: (resolution: string) => void;
   /** 可搜索的剧名副名（用于弹幕匹配）。缺省（如直播/无集数源）则不显示弹幕按钮。 */
   danmakuTitle?: string;
   /** 小窗口模式：控制条只保留 上/下集 + 播放暂停；全屏等功能消失 */
@@ -355,8 +358,40 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   kernelRef.current = kernel;
   const kernelPrefRef = useRef<KernelPref>(kernelPref);
   kernelPrefRef.current = kernelPref;
-  const [htmlSource, setHtmlSource] = useState<{ source: string; url: string } | null>(null);
+  const [htmlSource, setHtmlSource] = useState<{ source: string; url: string; width?: number; height?: number } | null>(null);
   const htmlUrl = htmlSource?.source === url ? htmlSource.url : '';
+  const resolutionCallbackRef = useRef(props.onResolutionChange);
+  resolutionCallbackRef.current = props.onResolutionChange;
+  const resolutionRef = useRef('');
+  const reportResolution = useCallback((width: unknown, height: unknown) => {
+    const next = formatVideoResolution(width, height);
+    if (resolutionRef.current === next) return;
+    resolutionRef.current = next;
+    resolutionCallbackRef.current?.(next);
+  }, []);
+  useEffect(() => {
+    reportResolution(0, 0);
+  }, [url, kernel, reportResolution]);
+  const sourceResolution = htmlSource?.source === url ? formatVideoResolution(htmlSource.width, htmlSource.height) : '';
+  useEffect(() => {
+    if (kernel !== 'html5' || !htmlUrl || isImage || isAudio) return;
+    const v = ref.current;
+    if (!v) return;
+    const update = () => {
+      // 兼容流可能降采样至 1080p；标题优先显示 ffprobe 得到的原资源尺寸。
+      if (sourceResolution) reportResolution(htmlSource?.width, htmlSource?.height);
+      else reportResolution(v.videoWidth, v.videoHeight);
+    };
+    v.addEventListener('loadedmetadata', update);
+    v.addEventListener('resize', update); // HLS 自适应清晰度切换也会更新
+    v.addEventListener('canplay', update);
+    if (sourceResolution) update();
+    return () => {
+      v.removeEventListener('loadedmetadata', update);
+      v.removeEventListener('resize', update);
+      v.removeEventListener('canplay', update);
+    };
+  }, [url, htmlUrl, htmlSource, sourceResolution, kernel, isImage, isAudio, reportResolution]);
   useEffect(() => {
     if (kernel !== 'html5' || !url || isAudio || isImage) return;
     setHtmlSource(null);
@@ -373,7 +408,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       const result = await r.json();
       if (!r.ok || !result.url) throw new Error(result.error || '媒体兼容处理失败');
       if (result.session) sessionUrl = new URL(`/html/${result.session}/release`, url).href;
-      if (alive) setHtmlSource({ source: url, url: result.url });
+      if (alive) setHtmlSource({ source: url, url: result.url, width: result.width, height: result.height });
       else if (sessionUrl) void fetch(sessionUrl).catch(() => undefined);
     }).catch(e => { if (alive) { setLoading(false); setErr(`HTML 播放准备失败：${e.message}`); } });
     return () => { alive = false; controller.abort(); if (sessionUrl) void fetch(sessionUrl).catch(() => undefined); };
@@ -1356,6 +1391,12 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         //   而不是一见 fatal 就把错误甩给用户。
         const hls = new Hls({
           enableWorker: true,
+          // The local compatibility endpoint may need to seek/transcode a
+          // large remote file before its first 6-second segment is ready.
+          // Match its bounded 180s wait instead of hls.js's 20s default.
+          manifestLoadingTimeOut: 180000,
+          levelLoadingTimeOut: 180000,
+          fragLoadingTimeOut: 180000,
           manifestLoadingMaxRetry: 4,
           manifestLoadingRetryDelay: 800,
           levelLoadingMaxRetry: 4,
@@ -1590,6 +1631,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       mpvStateRef.current = { ...mpvStateRef.current, ...st };
       mpvTimeRef.current = st.time ?? 0;
       if (st.videoW || st.videoH) mpvSizeRef.current = { w: st.videoW, h: st.videoH };
+      reportResolution(st.videoW, st.videoH);
       if (st.loaded) setLoading(false);
       if (st.time != null) {
         setCur(st.time);

@@ -262,13 +262,7 @@ export default function DetailPage({
     setEp(i);
     uiMem.detail.set(memKey, { flag, ep: i, scrollTop: contentRef.current?.scrollTop ?? 0 });
     schedulePersist();
-    // 若独立播放器窗口已打开，同步切换过去（用户在主窗口选集页点集 → 播放器跟着换集）
-    void client.playerIsOpen().then((r) => {
-      if (r.open && detail && key) void client.playerSwitchEp({
-        key, vodId: detail.id || id || '', flag,
-        episodes: detail.episodes[flag] || [], epIndex: i,
-      }).catch(() => undefined);
-    }).catch(() => undefined);
+    // 单击仅选择；播放按钮/双击才提交播放意图，不打断已打开的播放器。
   }
 
   // ★ 2026-09-30（用户要求）：剧集列表分页（每页至多 EP_PAGE_SIZE 集，页码越界自动夹取）
@@ -280,13 +274,13 @@ export default function DetailPage({
     requestAnimationFrame(() => epListRef.current?.scrollIntoView({ block: 'start' }));
   }
 
-  async function play() {
+  async function play(index = ep) {
     if (!detail || !flag) return;
     const eps = detail.episodes[flag] || [];
-    const target = eps[ep];
+    const target = eps[index];
     if (!target) return;
     // 同一意图（源|线路|集）重复点击：与旧行为一致地忽略，别让慢源被连点两次解析
-    const intent = `${key}|${flag}|${ep}`;
+    const intent = `${key}|${flag}|${index}`;
     if (busy && playIntentRef.current === intent) return;
     playIntentRef.current = intent;
     // ★ 2026-09-28：开一代；晚到的旧结果（换源/换集/再点一次之后）一律丢弃 —— 见 playGenRef 注释
@@ -309,7 +303,7 @@ export default function DetailPage({
         return;
       }
       // ★ 网盘源集名过长 → 播放器标题/历史记录统一用「第N集 · 体积」
-      const label = formatEpisodeLabel(target.name, ep);
+      const label = formatEpisodeLabel(target.name, index);
       onPlay(r.url || target.url, `${displayName} - ${label}`, key!, id!, {
         pic: detail.pic,
         remarks: label,
@@ -318,7 +312,7 @@ export default function DetailPage({
         vodId: detail.id,
         // 换集导航数据：完整集列表 + 当前集下标 + 播放源 flag
         episodes: detail.episodes[flag] || [],
-        epIndex: ep,
+        epIndex: index,
         flag,
       });
     } catch (e) {
@@ -482,14 +476,14 @@ export default function DetailPage({
                     const gi = epPaged.start + i; // 全局集下标：选择/高亮/播放都按它，翻页不影响已选集
                     return (
                       // ★ 2026-09-24：网盘源集名是一整串文件名 → 只展示「第N集 · 体积」（title 保留原名可悬停查看）
-                      <div key={gi} className={`ep ${gi === ep ? 'active' : ''}`} onClick={() => chooseEp(gi)} title={e.name || e.url}>
+                      <div key={gi} className={`ep ${gi === ep ? 'active' : ''}`} onClick={() => chooseEp(gi)} onDoubleClick={() => { void play(gi); }} title={`${e.name || e.url}（单击选择，双击播放）`}>
                         {formatEpisodeLabel(e.name, gi)}
                       </div>
                     );
                   })}
                 </div>
                 <div className="row" style={{ marginTop: 14, alignItems: 'center' }}>
-                  <button className={`primary${nf ? ' nf-play-btn' : ''}`} disabled={busy} onClick={play}>
+                  <button className={`primary${nf ? ' nf-play-btn' : ''}`} disabled={busy} onClick={() => { void play(); }}>
                     {busy ? '正在解析播放地址…' : '▶ 播放选中'}
                   </button>
                   {epPaged.pageCount > 1 && (

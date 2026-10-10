@@ -59,7 +59,7 @@ function makeJvmDir(): string {
   return dir;
 }
 
-const FAKE_JAR_B64 = Buffer.alloc(2048, 7).toString('base64');
+const FAKE_JAR_B64 = buildZip([{ name: 'classes.dex', bytes: Buffer.alloc(2048, 7) }]).toString('base64');
 
 function makeHost() {
   return {

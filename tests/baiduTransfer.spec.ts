@@ -1,7 +1,8 @@
 // tests/baiduTransfer.spec.ts — 百度解链的纯函数（★ 2026-09-30 新增）
 // 覆盖两个真机踩过的协议坑：surl 去首位 `1`、分享页 HTML 的条目解析。
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { isBaiduSharePlay, extractBaiduShare, verifySurl, parseShareItems, extractBaiduInnerName, extractBaiduSharedFile, baiduErrnoText, baiduResolveSharedFile, baiduResolveShare, baiduFileDelete, BAIDU_DL_UA } from '../src/main/net/baiduTransfer';
+import { isBaiduSharePlay, extractBaiduShare, verifySurl, parseShareItems, extractBaiduInnerName, extractBaiduSharedFile, baiduErrnoText, baiduResolveSharedFile, baiduResolveShare, baiduFileDelete, baiduShareRand, BAIDU_DL_UA } from '../src/main/net/baiduTransfer';
+import { createHash } from 'node:crypto';
 
 describe('isBaiduSharePlay', () => {
   it('识别百度分享链接（含 jar 的 do=pan 形态）', () => {
@@ -31,6 +32,7 @@ describe('百度分享文件转存链路（不触网）', () => {
       const u = new URL(String(input));
       let json: unknown;
       switch (u.pathname) {
+        case '/userx/v1/info/get': json = { errno: -6 }; break;
         case '/api/gettemplatevariable': json = { errno: 0, result: { bdstoken: 'token' } }; break;
         case '/api/create': json = { errno: -8 }; break;
         case '/share/transfer': {
@@ -136,6 +138,151 @@ describe('百度分享文件转存链路（不触网）', () => {
     const r = await baiduResolveShare('1testshare', 'txr7', 'BDUSS=user', { innerName: '01.mp4' });
     expect(r).toMatchObject({ ok: true, header: { 'User-Agent': BAIDU_DL_UA } });
     expect(r.path).toMatch(/^\/Win-Box缓存\/tr_[0-9a-f-]+$/);
+  });
+
+  it('签名接口不可用时仍只转存原选集，不将分享者 ID 误作本人盘 ID', async () => {
+    const downstream = network();
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(String(input));
+      if (u.pathname === '/userx/v1/info/get') return new Response('{"errno":0,"data":{"fields":{"uid":"123456"}}}');
+      if (u.pathname === '/share/list') return new Response('{"errno":8001}');
+      return downstream(input, init);
+    });
+    vi.stubGlobal('fetch', fetch);
+    const r = await baiduResolveSharedFile(file, 'BDUSS=user');
+    expect(r.ok).toBe(true);
+    expect(r.path).toMatch(/^\/Win-Box缓存\/tr_/);
+    const share = fetch.mock.calls.find(([u]) => new URL(String(u)).pathname === '/share/list');
+    expect(new URL(String(share?.[0])).searchParams.get('fid')).toBe(file.fsid);
+    const transferred = fetch.mock.calls.find(([u]) => new URL(String(u)).pathname === '/share/transfer');
+    expect(new URLSearchParams(String(transferred?.[1]?.body)).get('fsidlist')).toBe(`[${file.fsid}]`);
+  });
+
+  function shareNetwork(items: unknown[], listed?: unknown[]) {
+    const downstream = network();
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(String(input));
+      if (u.pathname === '/share/init') return new Response('{"t":1791500000000}');
+      if (u.pathname === '/share/verify') return new Response('{"errno":0}', { headers: { 'Set-Cookie': 'BDCLND=key; Path=/' } });
+      if (u.pathname === '/s/1testshare') return new Response(JSON.stringify({ shareid: Number(file.shareId), share_uk: file.uk, file_list: items }));
+      if (u.pathname === '/share/list') return new Response(JSON.stringify({ errno: 0, list: listed || [] }));
+      return downstream(input, init);
+    });
+    vi.stubGlobal('fetch', fetch);
+    return fetch;
+  }
+
+  const rootFile = (fsid: string, name: string) => ({ fs_id: Number(fsid), isdir: 0, path: `/${name}`, server_filename: name });
+  it('按所选 fs_id 转存第二集，不信任根列表顺序', async () => {
+    const fetch = shareNetwork([rootFile('111111', '01.mp4'), rootFile('222222', '02.mp4')]);
+    expect((await baiduResolveShare('1testshare', '', 'BDUSS=user', { innerFid: '222222' })).ok).toBe(true);
+    const call = fetch.mock.calls.find(([u]) => String(u).includes('/share/transfer'))!;
+    expect(new URLSearchParams(String(call[1]?.body)).get('fsidlist')).toBe('[222222]');
+  });
+  it('嵌套第二集按 fid 查元数据，只转存所选文件', async () => {
+    const fetch = shareNetwork([{ ...rootFile('999999', '季'), isdir: 1 }], [rootFile('222222', '02.mp4')]);
+    expect((await baiduResolveShare('1testshare', '', 'BDUSS=user', { innerFid: '222222' })).ok).toBe(true);
+    const call = fetch.mock.calls.find(([u]) => String(u).includes('/share/transfer'))!;
+    expect(new URLSearchParams(String(call[1]?.body)).get('fsidlist')).toBe('[222222]');
+  });
+  it('缺集信息或所选 ID 未命中时拒绝首集，不调用转存', async () => {
+    const fetch = shareNetwork([rootFile('111111', '01.mp4'), rootFile('222222', '02.mp4')]);
+    expect((await baiduResolveShare('1testshare', '', 'BDUSS=user')).reason).toContain('拒绝默认播放首集');
+    expect((await baiduResolveShare('1testshare', '', 'BDUSS=user', { innerFid: '333333' })).reason).toContain('未找到所选文件 ID');
+    expect(fetch.mock.calls.some(([u]) => String(u).includes('/share/transfer'))).toBe(false);
+  });
+});
+
+describe('百度签名分享免转存（不触网）', () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+  const file = { shareId: '49252031905', uk: '1100830236519', fsid: '812960976845060', sekey: 'key%2Bwith%2Fslash%3D' };
+  const cookie = 'BDUSS=test-user; BDCLND=old';
+  const dlink = 'https://cdn.test/shared.mp4';
+  function directNetwork(opts: { errno?: number; fid?: string; status?: number; range?: string; type?: string; uid?: string; throwAt?: string } = {}) {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(String(input));
+      if (u.pathname === opts.throwAt) throw Error('secret URL must not be logged');
+      if (u.pathname === '/userx/v1/info/get') return new Response(JSON.stringify({ errno: 0, data: { fields: { uid: opts.uid ?? '123456' } } }));
+      if (u.pathname === '/share/list') return new Response(JSON.stringify({ errno: opts.errno ?? 0, list: [{ fs_id: opts.fid || file.fsid, isdir: 0, dlink }] }));
+      if (u.href === dlink) return new Response('x', { status: opts.status ?? 206, headers: { 'Content-Range': opts.range ?? 'bytes 0-0/1000000', 'Content-Type': opts.type ?? 'video/mp4' } });
+      // A failed readonly attempt may enter the existing fallback, but must not treat a bad link as success.
+      if (u.pathname === '/api/gettemplatevariable') return new Response('{"errno":-6}');
+      throw Error(`Unexpected endpoint ${u.pathname}`);
+    });
+    vi.stubGlobal('fetch', fetch);
+    return fetch;
+  }
+
+  it('签名为两层 SHA-1（不是 MD5），时间/设备/版本与分享请求一致', () => {
+    const sha1 = (s: string) => createHash('sha1').update(s).digest('hex');
+    const expected = sha1(sha1('test-user') + '123456' + 'ebrcUYiuxaZv2XGu7KIYKxUrqfnOfpDF' + '1791500000000' + '73CED981D0F186D12BC18CAE1684FFD5|VSRCQTF6W' + '11.30.2ae5821440fab5e1a61a025f014bd8972');
+    expect(baiduShareRand('test-user', '123456', '1791500000000')).toBe(expected);
+    expect(expected).toHaveLength(40);
+  });
+
+  it('精确文件直链经单连接 Range 验证后返回，不调用转存/创建目录/自有文件接口', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1791500000000);
+    const fetch = directNetwork();
+    const r = await baiduResolveSharedFile(file, cookie);
+    expect(r).toMatchObject({ ok: true, url: dlink, header: { Cookie: 'BDUSS=test-user; BDCLND=key%2Bwith%2Fslash%3D', 'User-Agent': BAIDU_DL_UA } });
+    expect(r.path).toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    const [shareUrl, shareInit] = fetch.mock.calls[1];
+    const params = new URL(String(shareUrl)).searchParams;
+    expect(params.get('fid')).toBe(file.fsid);
+    expect(params.get('sekey')).toBe('key+with/slash=');
+    expect(params.get('rand')).toBe(baiduShareRand('test-user', '123456', params.get('time')!));
+    expect((shareInit?.headers as Record<string, string>).Cookie).toContain('BDCLND=key%2Bwith%2Fslash%3D');
+    expect((fetch.mock.calls[2][1]?.headers as Record<string, string>).Range).toBe('bytes=0-0');
+    expect(fetch.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true);
+  });
+
+  it('普通分享完成提取码验证后也可免转存，按选集 ID 而不是根文件顺序取链', async () => {
+    const downstream = directNetwork({ fid: '222222' });
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const u = new URL(String(input));
+      if (u.pathname === '/share/init') return new Response('{"t":1791500000000}');
+      if (u.pathname === '/share/verify') return new Response('{"errno":0}', { headers: { 'Set-Cookie': 'BDCLND=new%2Bsession' } });
+      if (u.pathname === '/s/1testshare') return new Response(JSON.stringify({
+        shareid: Number(file.shareId), share_uk: file.uk,
+        file_list: [
+          { fs_id: 111111, isdir: 0, path: '/01.mp4', server_filename: '01.mp4' },
+          { fs_id: 222222, isdir: 0, path: '/02.mp4', server_filename: '02.mp4' },
+        ],
+      }));
+      return downstream(input, init);
+    });
+    vi.stubGlobal('fetch', fetch);
+    const r = await baiduResolveShare('1testshare', 'code', cookie, { innerFid: '222222' });
+    expect(r).toMatchObject({ ok: true, url: dlink });
+    expect(r.path).toBeUndefined();
+    const call = fetch.mock.calls.find(([url]) => new URL(String(url)).searchParams.get('origin') === 'dlna')!;
+    expect(new URL(String(call[0])).searchParams.get('fid')).toBe('222222');
+    expect(new URL(String(call[0])).searchParams.get('sekey')).toBe('new+session');
+    expect(fetch.mock.calls.some(([url]) => /\/api\/(create|list|filemetas|gettemplatevariable)|\/share\/transfer/.test(new URL(String(url)).pathname))).toBe(false);
+  });
+
+  it.each([
+    { errno: 8001 }, { fid: '111111' }, { status: 403 }, { status: 200 },
+    { range: 'bytes 10-10/1000000' }, { type: 'application/json' }, { type: 'application/xml' }, { uid: '' },
+    { throwAt: '/share/list' },
+  ])('签名/文件/媒体验证失败不能返回伪成功（%j）', async (opts) => {
+    const fetch = directNetwork(opts);
+    const log = { i: vi.fn(), w: vi.fn(), e: vi.fn() };
+    expect((await baiduResolveSharedFile(file, cookie, log)).ok).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/api/gettemplatevariable'))).toBe(true);
+    expect(JSON.stringify(log.w.mock.calls)).not.toContain('secret');
+    expect(JSON.stringify(log.i.mock.calls)).not.toContain('BDUSS');
+  });
+
+  it('重复切到不同集分别签名取链，不缓存/误用上集文件或链接', async () => {
+    const fetch = directNetwork();
+    await baiduResolveSharedFile(file, cookie);
+    const other = { ...file, fsid: '812960976845061' };
+    const second = directNetwork({ fid: other.fsid });
+    expect((await baiduResolveSharedFile(other, cookie)).ok).toBe(true);
+    expect(new URL(String(fetch.mock.calls[1][0])).searchParams.get('fid')).toBe(file.fsid);
+    expect(new URL(String(second.mock.calls[1][0])).searchParams.get('fid')).toBe(other.fsid);
   });
 });
 

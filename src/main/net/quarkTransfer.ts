@@ -676,7 +676,7 @@ export function extractQuarkShare(text: string): { sId: string; passcode: string
  * ★ 从 episode id（夸克分享 JSON 或直达链接）提取「内层文件 fid」。
  * 玩偶/立播等源的 episode JSON 字段不统一（fid / vfid / file_id / fids 数组 / URL ?fid= 参数），
  * 只认 `"fid"` 会把字段名不同的传成 undefined → 转存落到「目录第一个文件」= 播第6集落第29集。
- * 按常见字段名逐一尝试；取不到返回 ''（上游 resolveShareFile 无 preferFid 时仍会回退首文件）。
+ * 按常见字段名逐一尝试；取不到返回 ''，多文件分享必须拒绝盲选。
  */
 export function extractEpisodeFid(id: string): string {
   if (!id) return '';
@@ -685,16 +685,20 @@ export function extractEpisodeFid(id: string): string {
     /"fid"\s*:\s*"([^"]+)"/,
     /"vfid"\s*:\s*"([^"]+)"/,
     /"file_id"\s*:\s*"([^"]+)"/,
+    /"fileId"\s*:\s*"([^"]+)"/,
+    /"fs_id"\s*:\s*"?(\d+)"?/,
     /"fid"\s*:\s*\[?\s*"([^"]+)"/,
     /"fids"\s*:\s*\[\s*"([^"]+)"/,
   ];
   for (const re of pats) {
     const m = re.exec(id);
-    if (m?.[1]) return m[1];
+    if (m?.[1] && !/[/:?]/.test(m[1])) return m[1];
   }
   // 直达链接 query（pan.quark.cn/s/xxx?fid=…&更多 或 #/ 内嵌页；取值到 & 或 # 为止）
   const q = /[?&](?:fid|vfid|file_id)=([^&#"'\\\s]+)/i.exec(id);
-  if (q?.[1]) return decodeURIComponent(q[1]);
+  if (q?.[1]) {
+    try { return decodeURIComponent(q[1]); } catch { return q[1]; }
+  }
   return '';
 }
 
