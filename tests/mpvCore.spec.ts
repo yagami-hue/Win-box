@@ -120,6 +120,119 @@ describe('mpvCore · 状态归一', () => {
     expect(live.live).toBe(true);
   });
 
+  it.each(['before', 'after'])('点播有限时长在 file-loaded %s 到达时都纠正初始直播提示', (order) => {
+    const s = initialKernelState(true);
+    if (order === 'after') reduceMpvMessage(s, { event: 'file-loaded' });
+    reduceMpvMessage(s, { event: 'property-change', name: 'duration', data: 7200 });
+    if (order === 'before') reduceMpvMessage(s, { event: 'file-loaded' });
+    expect(s.loaded).toBe(true);
+    expect(s.duration).toBe(7200);
+    expect(s.live).toBe(false);
+    // 结束/重探测时 duration 消失，也不能把已识别的点播重新变成直播。
+    reduceMpvMessage(s, { event: 'property-change', name: 'duration', data: null });
+    expect(s.live).toBe(false);
+  });
+
+  it('未知/无效时长不会把点播自动改成直播，也不会清除真实直播提示', () => {
+    for (const hint of [false, true]) {
+      const s = initialKernelState(hint);
+      reduceMpvMessage(s, { event: 'file-loaded' });
+      for (const data of [null, undefined, 0, Infinity, Number.NaN]) {
+        reduceMpvMessage(s, { event: 'property-change', name: 'duration', data });
+        expect(s.live).toBe(hint);
+      }
+    }
+  });
+
+  describe.each(['eof-reached', 'end-file'])('结束事件 %s', (event) => {
+    const eofMessage = event === 'eof-reached'
+      ? { event: 'property-change', name: 'eof-reached', data: true }
+      : { event: 'end-file', reason: 'eof' };
+
+    it('加载完成但尚未播放时 EOF 是读取失败，不是播放完成', () => {
+      const s = initialKernelState();
+      reduceMpvMessage(s, { event: 'file-loaded' });
+      reduceMpvMessage(s, eofMessage);
+      expect(s.eof).toBe(false);
+      expect(s.error).toBe('读取或解码失败');
+    });
+
+    it('已播放一点但远未到已知时长末尾时，不触发完成/自动下一集', () => {
+      const s = initialKernelState();
+      reduceMpvMessage(s, { event: 'file-loaded' });
+      reduceMpvMessage(s, { event: 'property-change', name: 'duration', data: 7200 });
+      reduceMpvMessage(s, { event: 'property-change', name: 'time-pos', data: 1.5 });
+      expect(s.playbackStarted).toBe(true);
+      expect(reduceMpvMessage(s, eofMessage)).toBe(true);
+      expect(s.eof).toBe(false);
+      expect(s.error).toBe('视频流提前结束');
+      expect(reduceMpvMessage(s, eofMessage)).toBe(false);
+    });
+
+    it('续播位置推进也不能把中途断流当成完成', () => {
+      const s = initialKernelState();
+      reduceMpvMessage(s, { event: 'file-loaded' });
+      reduceMpvMessage(s, { event: 'property-change', name: 'duration', data: 7200 });
+      reduceMpvMessage(s, { event: 'property-change', name: 'time-pos', data: 3600 });
+      reduceMpvMessage(s, eofMessage);
+      expect(s.eof).toBe(false);
+      expect(s.error).toBe('视频流提前结束');
+    });
+
+    it('真正到达末尾时仍正常完成，容忍最后一帧的时间偏差', () => {
+      const s = initialKernelState();
+      reduceMpvMessage(s, { event: 'file-loaded' });
+      reduceMpvMessage(s, { event: 'property-change', name: 'duration', data: 100 });
+      reduceMpvMessage(s, { event: 'property-change', name: 'time-pos', data: 99 });
+      reduceMpvMessage(s, eofMessage);
+      expect(s.eof).toBe(true);
+      expect(s.error).toBeNull();
+    });
+
+    it('未知时长的视频播起来后仍可正常结束', () => {
+      const s = initialKernelState();
+      reduceMpvMessage(s, { event: 'file-loaded' });
+      reduceMpvMessage(s, { event: 'property-change', name: 'time-pos', data: 12.5 });
+      reduceMpvMessage(s, eofMessage);
+      expect(s.eof).toBe(true);
+      expect(s.error).toBeNull();
+    });
+
+    it('明确的解码错误后，即使位置在末尾也不会触发正常完成', () => {
+      const s = initialKernelState();
+      reduceMpvMessage(s, { event: 'file-loaded' });
+      reduceMpvMessage(s, { event: 'property-change', name: 'time-pos', data: 100 });
+      reduceMpvMessage(s, { event: 'end-file', reason: 'error', error: 'decoder failed' });
+      reduceMpvMessage(s, eofMessage);
+      expect(s.eof).toBe(false);
+      expect(s.error).toBe('decoder failed');
+    });
+
+    it('中途断流不会覆盖已有的具体读取/解码错误', () => {
+      const s = initialKernelState();
+      reduceMpvMessage(s, { event: 'file-loaded' });
+      reduceMpvMessage(s, { event: 'property-change', name: 'duration', data: 7200 });
+      reduceMpvMessage(s, { event: 'property-change', name: 'time-pos', data: 1.5 });
+      reduceMpvMessage(s, { event: 'end-file', reason: 'error', error: 'decoder failed' });
+      expect(reduceMpvMessage(s, eofMessage)).toBe(false);
+      expect(s.eof).toBe(false);
+      expect(s.error).toBe('decoder failed');
+    });
+  });
+
+  it('EOF 后晚到的读取错误撤销完成态，重复错误不再推送', () => {
+    const s = initialKernelState();
+    reduceMpvMessage(s, { event: 'file-loaded' });
+    reduceMpvMessage(s, { event: 'property-change', name: 'time-pos', data: 100 });
+    reduceMpvMessage(s, { event: 'property-change', name: 'eof-reached', data: true });
+    expect(s.eof).toBe(true);
+    const error = { event: 'end-file', reason: 'error', error: 'decoder failed' };
+    expect(reduceMpvMessage(s, error)).toBe(true);
+    expect(s.eof).toBe(false);
+    expect(s.error).toBe('decoder failed');
+    expect(reduceMpvMessage(s, error)).toBe(false);
+  });
+
   it('eof：只有真实播放结束才置位；首包失败进入错误态', () => {
     const s = initialKernelState();
     expect(reduceMpvMessage(s, { event: 'end-file', reason: 'stop' })).toBe(false);

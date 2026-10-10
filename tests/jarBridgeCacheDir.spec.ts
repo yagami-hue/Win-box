@@ -237,6 +237,36 @@ describe('JarSpiderBridge.doConvert — 缓存目录自愈', () => {
     const fs = await import('node:fs');
     expect(fs.readdirSync(cacheDir).some(n => n.endsWith('.jar'))).toBe(false);
   });
+
+  it('同 jar 20 个源预热只下载一轮、失败只记录一次；抑制窗口后可重试', async () => {
+    const jvmDir = makeJvmDir();
+    dirs.push(jvmDir);
+    const logs: string[] = [];
+    const host = makeHost(logs) as any;
+    host.http.request = vi.fn(async () => ({ status: 404, headers: {}, content: Buffer.from('{"error":"missing"}').toString('base64') }));
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted') }, host);
+    const url = 'https://example.com/missing.jar';
+    expect(bridge.conversionFailure(url)).toBe('');
+    await Promise.all(Array.from({ length: 20 }, () => bridge.warmup(url + ';md5;unused')));
+    expect(host.http.request).toHaveBeenCalledTimes(4);
+    expect(logs.filter(l => l.includes('warmup 失败'))).toHaveLength(1);
+    expect(bridge.conversionFailure(url)).toContain('HTTP 404');
+    expect(bridge.pendingConvert(url)).toBeNull();
+    expect(bridge.conversionProgress(url)).toBeNull();
+    await bridge.warmup(url);
+    await expect(bridge.ensureConverted(url)).rejects.toThrow('HTTP 404');
+    expect(host.http.request).toHaveBeenCalledTimes(4);
+    expect(spawnMock).not.toHaveBeenCalled();
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 120001);
+    try {
+      expect(bridge.conversionFailure(url)).toBe('');
+      host.http.request.mockImplementation(async () => ({ status: 200, headers: {}, content: FAKE_JAR_B64 }));
+      await bridge.ensureConverted(url);
+      expect(bridge.conversionFailure(url)).toBe('');
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+    } finally { clock.mockRestore(); }
+  });
 });
 
 describe('JarSpiderBridge.resolvePaths — 失效产物不得外传', () => {

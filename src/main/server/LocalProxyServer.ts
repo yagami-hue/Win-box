@@ -59,7 +59,7 @@ const AGGREGATE_MIN_LEN = 1 * 1024 * 1024;
 /**
  * ★ 2026-10-08（用户报「jd4k 点开就提示已播放完毕」根因修复）：jpg 伪装分片嗅探窗口。
  *   分片 = [JPEG 缩略图][真 TS 载荷]（实测前导 ≈9.7KB），这里给到 128KB 足够容纳更大的缩略图；
- *   非 JPEG 的响应读到首个 ≥2 字节即提前停止（不增加正常流的起播延迟）。
+ *   也覆盖 [PNG 图片][TS]；非图片响应读到首个 ≥2 字节即提前停止。
  */
 const DETECT_HEAD_LEN = 128 * 1024;
 // ★★ 2026-09-19 回归 release65 定论：**加速节点（dl-c-zb 等）禁聚合、单连接透传**。
@@ -768,17 +768,17 @@ private imgProxy(u: URL, res: ServerResponse): void {
     const isBaiduDirect = isBaiduTarget(target);
     const rng = range === undefined ? '' : Array.isArray(range) ? range[0] : String(range);
     // ★★ 2026-10-08（用户报「橘汁4K · jd4k 点开就提示已播放完毕」根因修复）★★
-    //   **jpg 伪装分片剥离**：仅对「整段起始」请求（无 Range 或 `bytes=0-`）嗅探响应头 ≤128KB；
-    //   命中 [JPEG 缩略图][TS 载荷] 拼接体 → 只把 TS 部分回给播放器（否则 ffmpeg 按 mjpeg 解析、
-    //   读包失败 ×10 → mpv 当 EOF → 「已播放完毕」假象；识别口径见 jpegPreludeLen 注释）。
+    //   图片伪装分片剥离：仅对「整段起始」请求（无 Range 或 `bytes=0-`）嗅探响应头 ≤128KB；
+    //   命中 [JPEG/PNG 图片][TS 载荷] → 只把 TS 部分回给播放器（否则 ffmpeg 按图片解析、
+    //   读包失败 → mpv 当 EOF → 「已播放完毕」假象；识别口径见 imagePreludeLen）。
     //   非伪装响应：保留已消费字节，透传时先写预读头部再接剩余流。
     //   ★ 带偏移的 Range 请求不嗅探（HLS 拖动 = 重开分片，实测 mpv/ffmpeg 均从 0 开始取）。
     if (resp.status < 400 && resp.body && (rng === '' || parseByteRange(rng)?.start === 0)) {
       const head = await this.readHead(resp.body as unknown as NodeJS.ReadableStream, DETECT_HEAD_LEN, (b) => {
-        if (b.length >= 2 && !(b[0] === 0xff && b[1] === 0xd8)) return true; // 非 JPEG → 立即停（普通流零延迟影响）
-        return jpegPreludeLen(b) > 0; // JPEG：找到 EOI + TS 对齐即停
+        if (b.length >= 2 && !((b[0] === 0xff && b[1] === 0xd8) || (b[0] === 0x89 && b[1] === 0x50))) return true;
+        return imagePreludeLen(b) > 0; // 图片结束且 TS 对齐即停
       });
-      const pre = head.length ? jpegPreludeLen(head) : 0;
+      const pre = head.length ? imagePreludeLen(head) : 0;
       if (pre > 0) {
         const lenHeader = resp.headers['content-length'];
         const total = lenHeader === undefined ? NaN : parseInt(String(lenHeader), 10);
@@ -803,7 +803,7 @@ private imgProxy(u: URL, res: ServerResponse): void {
             (upstream as { destroy?: () => void }).destroy?.();
           }
         });
-        this.logger.i(`proxy /play: 已剥离 jpg 伪装前导 ${pre} 字节 → TS（${redactUrl(target)}）`);
+        this.logger.i(`proxy /play: 已剥离图片伪装前导 ${pre} 字节 → TS（${redactUrl(target)}）`);
         return;
       }
       // 短响应可能在预读后已经 end/destroy，此时 unshift 会丢失字节甚至挂起。
@@ -1310,6 +1310,26 @@ export function jpegPreludeLen(head: Buffer): number {
   if (eoi < 2) return 0;
   const off = eoi + 2;
   return isTsAligned(head, off) ? off : 0;
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/** 完整 JPEG/PNG 后紧接至少四个 TS 同步头才剥离；纯图片、截断或坏块均原样透传。 */
+export function imagePreludeLen(head: Buffer): number {
+  if (head[0] === 0xff && head[1] === 0xd8) return jpegPreludeLen(head);
+  if (head.length < 33 || !head.subarray(0, 8).equals(PNG_SIGNATURE)) return 0;
+  // 首块必须是固定长度的 IHDR，再沿块长度走到 IEND；不能搜索像素数据中的同名字符串。
+  if (head.readUInt32BE(8) !== 13 || head.toString('ascii', 12, 16) !== 'IHDR') return 0;
+  for (let off = 8; off + 12 <= head.length;) {
+    const len = head.readUInt32BE(off);
+    const end = off + 12 + len;
+    if (end > head.length) return 0;
+    if (head.toString('ascii', off + 4, off + 8) === 'IEND') {
+      return len === 0 && isTsAligned(head, end) ? end : 0;
+    }
+    off = end;
+  }
+  return 0;
 }
 
 /** [off, off+188*3) 是否每 188 字节出现 `0x47` 同步头（MPEG-TS 对齐；0x47 命中 4 次算确认） */

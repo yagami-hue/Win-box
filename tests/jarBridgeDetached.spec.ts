@@ -197,6 +197,7 @@ describe('JarSpiderBridge — 转换脱离 App 进程（detached / 收编 / 接�
     expect(mid).not.toBeNull();
     expect(mid!.elapsedMs).toBeGreaterThanOrEqual(0);
     expect(mid!.attached).toBe(false);
+    expect(mid!.stage).toBe('convert');
 
     await p;
     expect(bridge.conversionProgress(url)).toBeNull();

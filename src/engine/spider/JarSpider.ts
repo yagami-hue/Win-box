@@ -10,6 +10,28 @@ import { enrichExt } from './driveExt';
 /** 首次使用该源时「jar 未转换」的最长等待（超过就先放行，让后台继续转换，用户稍后重试） */
 const PREPARE_WAIT_MS = 8000;
 
+/** 首页调用与全源搜索闸门共用，避免同一失败一处报 404、另一处却说仍在转换。 */
+export function jarLoadError(msg: string): string {
+  if (/Invalid URL|Failed to parse URL/i.test(msg)) {
+    return 'jar 地址不合法（配置里的路径无法解析），可能需要重新导入配置';
+  }
+  if (/jar 下载失败|status/i.test(msg)) {
+    return /HTTP 403/.test(msg)
+      ? 'jar 下载失败：上游返回 HTTP 403，自动重试后仍被拒绝，请稍后重试或联系源提供者'
+      : /HTTP 404/.test(msg)
+        ? 'jar 下载失败：上游返回 HTTP 404，请检查配置里的 jar 地址'
+        : 'jar 下载失败，资源地址可能已失效、返回非 jar 内容或网络不通';
+  }
+  if (/转换内存不足|OutOfMemoryError/i.test(msg)) {
+    return 'jar 转换内存不足（该 jar 体积偏大）：已按更大堆重试仍失败，请关闭其他占内存的程序后清理缓存再试';
+  }
+  if (/转换产物为空|dex2jar/i.test(msg)) {
+    return 'jar 转换失败：下载内容未能产出可用 class，请检查转换日志及源兼容性';
+  }
+  if (/ENOENT/.test(msg)) return 'jar 缓存目录异常（文件或目录缺失）';
+  return `jar 加载失败：${msg}`;
+}
+
 export class JarSpider extends Spider {
   private bridge: JarSpiderBridge;
   private clsName: string;
@@ -56,10 +78,15 @@ export class JarSpider extends Spider {
       //   而进源请求只有 20s / 搜索单源只有 10s 预算 —— 直接 await 会让请求超时被标成「加载失败」。
       //   这里最多等 PREPARE_WAIT_MS，超时即返回「正在准备运行时」的可读原因；
       //   转换本身在后台继续（ensureConverted 的 promise 是共享的），用户再点一次就是热的。
-      await Promise.race([
-        Promise.all(urls.map((u) => this.bridge.ensureConverted(u))),
-        new Promise((_res, rej) => setTimeout(() => rej(new Error('__PREPARING__')), PREPARE_WAIT_MS)),
-      ]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all(urls.map((u) => this.bridge.ensureConverted(u))),
+          new Promise((_res, rej) => { timer = setTimeout(() => rej(new Error('__PREPARING__')), PREPARE_WAIT_MS); }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
       this.ready = true;
       this.loadError = '';
       return true;
@@ -79,22 +106,8 @@ export class JarSpider extends Spider {
         // ★ 2026-09-27：后台转换还在跑（不是失败）—— 不让用户看到「加载失败」，而是「还要等」，
         //   HomePage 的自动重试正则会继续等它（见该处的 /首次使用该源|正在后台/）。
         this.loadError = this.preparingMessage();
-      } else if (/Invalid URL|Failed to parse URL/i.test(msg)) {
-        this.loadError = 'jar 地址不合法（配置里的路径无法解析），可能需要重新导入配置';
-      } else if (/jar 下载失败|status/i.test(msg)) {
-        this.loadError = /HTTP 403/.test(msg)
-          ? 'jar 下载失败：上游返回 HTTP 403，自动重试后仍被拒绝，请稍后重试或联系源提供者'
-          : /HTTP 404/.test(msg)
-            ? 'jar 下载失败：上游返回 HTTP 404，请检查配置里的 jar 地址'
-            : 'jar 下载失败，资源地址可能已失效、返回非 jar 内容或网络不通';
-      } else if (/转换内存不足|OutOfMemoryError/i.test(msg)) {
-        this.loadError = 'jar 转换内存不足（该 jar 体积偏大）：已按更大堆重试仍失败，请关闭其他占内存的程序后清理缓存再试';
-      } else if (/转换产物为空|dex2jar/i.test(msg)) {
-        this.loadError = 'jar 转换失败：下载内容未能产出可用 class，请检查转换日志及源兼容性';
-      } else if (/ENOENT/.test(msg)) {
-        this.loadError = 'jar 缓存目录异常（文件或目录缺失）';
       } else {
-        this.loadError = `jar 加载失败：${msg}`;
+        this.loadError = jarLoadError(msg);
       }
       this.host.logger.w(`jar-spider ${this.siteKey}: ${this.loadError}（原始：${msg}）`);
       return false;
@@ -111,14 +124,17 @@ export class JarSpider extends Spider {
   private preparingMessage(): string {
     let elapsed = 0;
     let attached = false;
+    let downloading = false;
     for (const u of this.jarUrls()) {
       const p = this.bridge.conversionProgress(u);
       if (!p) continue;
       elapsed = Math.max(elapsed, p.elapsedMs);
       attached = attached || p.attached;
+      downloading = downloading || p.stage === 'download';
     }
     const waited = elapsed >= 1000 ? `已 ${formatDuration(elapsed)}，` : '';
     const hint = attached ? '正在接管上次没跑完的转换（关软件也继续转），' : '';
+    if (downloading) return `首次使用该源：正在后台下载蜘蛛 jar（${waited}下载完成后继续准备运行时）`;
     return `首次使用该源：正在后台编译蜘蛛运行时（${waited}${hint}大 jar 首次约需数分钟，完成后会自动加载）`;
   }
 
@@ -172,14 +188,27 @@ export class JarSpider extends Spider {
    */
   runtimeState(): 'ready' | 'preparing' | 'unavailable' {
     const urls = this.jarUrls();
-    if (urls.length === 0) return 'unavailable';
+    if (urls.length === 0) {
+      this.loadError = `该源未指定 jar 地址（api=${this.api || '空'}），无法加载蜘蛛`;
+      return 'unavailable';
+    }
+    // 先检查失败，不能把抑制窗口内已经停止的任务重新标成准备中。
+    for (const u of urls) {
+      if (this.bridge.peekConverted(u)) continue;
+      const failure = this.bridge.conversionFailure(u);
+      if (failure) {
+        this.loadError = jarLoadError(failure);
+        return 'unavailable';
+      }
+    }
     let anyPreparing = false;
     for (const u of urls) {
       if (this.bridge.peekConverted(u)) continue;
-      // 已在转换/下载（或本次顺手启动）→ preparing；否则也算是 preparing（已被 warmup 拉起）
+      // 只有在途任务或本次新启动任务才算 preparing；已失败的任务在上面单独处理。
       if (!this.bridge.pendingConvert(u)) this.bridge.warmup(u).catch(() => undefined);
       anyPreparing = true;
     }
+    this.loadError = anyPreparing ? this.preparingMessage() : '';
     return anyPreparing ? 'preparing' : 'ready';
   }
 

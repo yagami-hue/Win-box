@@ -100,14 +100,58 @@ export function playerIsMini(): boolean {
 }
 
 export function playerIsFullscreen(): boolean {
-  return !!playerWin && !playerWin.isDestroyed() && playerWin.isFullScreen();
+  return !!playerWin && !playerWin.isDestroyed() && (fullscreenActive || playerWin.isFullScreen());
 }
 
-export function playerSetFullscreen(fullscreen: boolean): boolean {
+let fullscreenRequest: Promise<boolean> = Promise.resolve(false);
+let fullscreenBounds: Electron.Rectangle | null = null;
+// Transparent Windows windows emit fullscreen events but may keep reporting
+// false from BrowserWindow.isFullScreen(). The event-backed flag is therefore
+// part of the actual state used by the MPV player.
+let fullscreenActive = false;
+
+/**
+ * Electron changes fullscreen asynchronously on Windows.  Returning the
+ * requested value here made the renderer briefly believe it had entered
+ * fullscreen even when the native transition was still pending (and a fast
+ * second click could therefore toggle the wrong direction).  Wait for the
+ * native event and report the actual state instead.
+ */
+export function playerSetFullscreen(fullscreen: boolean): Promise<boolean> {
   const w = playerWin;
-  if (!w || w.isDestroyed() || mini) return false;
-  w.setFullScreen(!!fullscreen);
-  return !!fullscreen;
+  if (!w || w.isDestroyed() || mini) return Promise.resolve(false);
+  const wanted = !!fullscreen;
+  fullscreenRequest = fullscreenRequest.then(async () => {
+    const current = playerWin;
+    if (!current || current.isDestroyed() || mini) return false;
+    if ((fullscreenActive || current.isFullScreen()) === wanted) return wanted;
+    if (wanted) {
+      fullscreenBounds = current.isMaximized() ? current.getNormalBounds() : current.getBounds();
+      if (current.isMaximized()) current.unmaximize();
+    }
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (wanted) current.removeListener('enter-full-screen', finish);
+        else current.removeListener('leave-full-screen', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, 1500);
+      if (wanted) current.once('enter-full-screen', finish);
+      else current.once('leave-full-screen', finish);
+      current.setFullScreen(wanted);
+    });
+    if (!wanted && !current.isDestroyed() && !current.isFullScreen() && fullscreenBounds) {
+      if (current.isMaximized()) current.unmaximize();
+      current.setBounds(fullscreenBounds);
+      fullscreenBounds = null;
+    }
+    return !current.isDestroyed() && (fullscreenActive || current.isFullScreen());
+  });
+  return fullscreenRequest;
 }
 
 /** 切换小窗口模式。mini=true 进入（缩小+禁全屏），false 恢复原窗口 */
@@ -193,12 +237,14 @@ export function openPlayerWindow(init: PlayerInit): void {
   });
   playerWin.on('enter-full-screen', () => {
     if (playerWin && !playerWin.isDestroyed()) {
+      fullscreenActive = true;
       playerWin.webContents.invalidate();
       playerWin.webContents.send('player:fullscreen', true);
     }
   });
   playerWin.on('leave-full-screen', () => {
     if (playerWin && !playerWin.isDestroyed()) {
+      fullscreenActive = false;
       playerWin.webContents.invalidate();
       playerWin.webContents.send('player:fullscreen', false);
     }
@@ -208,7 +254,7 @@ export function openPlayerWindow(init: PlayerInit): void {
     const w = playerWin;
     if (!w || w.isDestroyed()) return;
     if (mini) miniBounds = w.getBounds();
-    else if (!w.isMaximized()) normalBounds = w.getBounds();
+    else if (!w.isMaximized() && !playerIsFullscreen()) normalBounds = w.getBounds();
   };
   playerWin.on('move', trackBounds);
   playerWin.on('resize', trackBounds);
@@ -217,6 +263,8 @@ export function openPlayerWindow(init: PlayerInit): void {
     return { action: 'deny' };
   });
   playerWin.on('closed', () => {
+    fullscreenActive = false;
+    fullscreenBounds = null;
     playerWin = null;
     // ★ 关闭播放窗口 → 通知清理本次夸克落盘文件（观看进度保留在本地历史）
     for (const h of closeHooks) {

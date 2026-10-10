@@ -70,6 +70,7 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
   ipcMain.handle(IPC.WIN_MAXIMIZE, (e) => {
     const w = winOf(e);
     if (!w) return;
+    if (isPlayerWindow(w) && w.isFullScreen()) { void playerSetFullscreen(false); return; }
     if (w.isMaximized()) w.unmaximize();
     else w.maximize();
   });
@@ -519,7 +520,7 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     return { mini: playerIsMini() };
   }, log);
   registerHandler(IPC.PLAYER_IS_MINI, () => ({ mini: playerIsMini() }), log);
-  registerHandler(IPC.PLAYER_SET_FULLSCREEN, (_e: any, fullscreen: boolean) => ({ fullscreen: playerSetFullscreen(!!fullscreen) }), log);
+  registerHandler(IPC.PLAYER_SET_FULLSCREEN, async (_e: any, fullscreen: boolean) => ({ fullscreen: await playerSetFullscreen(!!fullscreen) }), log);
   registerHandler(IPC.PLAYER_IS_FULLSCREEN, () => ({ fullscreen: playerIsFullscreen() }), log);
   registerHandler('player:close', () => {
     closePlayerWindow();

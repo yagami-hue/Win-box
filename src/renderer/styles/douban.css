@@ -378,6 +378,11 @@
 :root[data-theme='douban'] .vsp-btn.primary { background: linear-gradient(135deg, #38A932, #1F7A1B); color: #fff; }
 :root[data-theme='douban'] .vsp-item { background: #fff; border: 1px solid var(--border); }
 :root[data-theme='douban'] .vp-cpanel, :root[data-theme='douban'] .vp-vpanel { background: rgba(24, 22, 28, .82); }
+:root[data-theme='douban'] .vp-subpanel,
+:root[data-theme='douban'] .vsp-dmsrc-item,
+:root[data-theme='douban'] .vsp-dmsrc-name { color: var(--text); }
+:root[data-theme='douban'] .vsp-dmsrc-item input { flex-shrink: 0; }
+:root[data-theme='douban'] .vsp-dmsrc-name { min-width: 0; }
 
 /* ================== 音频播放器（独立窗口，保持暗色舞台） ================== */
 :root[data-theme='douban'] .aud-play { color: #fff; }

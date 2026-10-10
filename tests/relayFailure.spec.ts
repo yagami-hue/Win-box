@@ -23,6 +23,39 @@ beforeEach(() => {
 afterAll(() => proxy.stop());
 
 describe('媒体中继异步失败与 DNS 备用通道', () => {
+  it.each([200, 206])('PNG 伪装分片剥离前导并修正响应长度，status=%s', async (status) => {
+    const prefix = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from([0, 0, 0, 13]), Buffer.from('IHDR'), Buffer.alloc(17),
+      Buffer.alloc(4), Buffer.from('IEND'), Buffer.alloc(4),
+    ]);
+    const payload = Buffer.alloc(188 * 8, 0xaa);
+    for (let i = 0; i < 8; i++) payload[i * 188] = 0x47;
+    const body = Buffer.concat([prefix, payload]);
+    const upstream = Readable.from([body.subarray(0, 2), body.subarray(2, 35), body.subarray(35, 650), body.subarray(650)]);
+    request.mockResolvedValueOnce({ statusCode: status, headers: {
+      'content-type': 'image/png', 'content-length': String(body.length),
+      ...(status === 206 ? { 'content-range': `bytes 0-${body.length - 1}/${body.length}` } : {}),
+    }, body: upstream });
+    const response = await fetch(base + '/play?url=https%3A%2F%2Fcdn.example%2Fsegment.png&ua=source-test', {
+      headers: status === 206 ? { Range: 'bytes=0-' } : {}, signal: AbortSignal.timeout(2000),
+    });
+    expect(response.status).toBe(status);
+    expect(response.headers.get('content-type')).toBe('video/mp2t');
+    expect(response.headers.get('content-length')).toBe(String(payload.length));
+    expect(response.headers.get('content-range')).toBe(status === 206 ? `bytes 0-${payload.length - 1}/${payload.length}` : null);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(payload);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('普通 PNG 图片原样透传', async () => {
+    const body = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(100)]);
+    request.mockResolvedValueOnce({ statusCode: 200, headers: { 'content-type': 'image/png', 'content-length': String(body.length) }, body: Readable.from([body]) });
+    const response = await fetch(base + '/play?url=https%3A%2F%2Fcdn.example%2Fimage.png', { signal: AbortSignal.timeout(2000) });
+    expect(response.headers.get('content-type')).toBe('image/png');
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(body);
+  });
+
   it('request completion keeps a delayed response alive; client cancellation closes upstream', async () => {
     const body = new Readable({ read() {} });
     request.mockResolvedValueOnce({ statusCode: 206, headers: { 'content-type': 'video/mp4', 'content-range': 'bytes 1-3/4', 'content-length': '3' }, body });

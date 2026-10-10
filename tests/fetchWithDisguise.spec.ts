@@ -230,4 +230,24 @@ describe('fetchWithDisguise — 阶梯行为（假 HttpClient）', () => {
     expect(describeFailures(r.tries)).toContain('ECONNRESET');
     expect(describeFailures(r.tries)).toContain('疑似加密');
   });
+
+  it('达到整条下载期限后停止后续 UA 和换协议尝试', async () => {
+    const calls: HttpRequest[] = [];
+    const http: HttpClient = {
+      request: async (req) => {
+        calls.push(req);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return { status: 200, headers: {}, content: [], finalUrl: req.url };
+      },
+    };
+    const r = await fetchWithDisguise(http, 'https://a.b/x.jar', {
+      accept: () => false,
+      attempts: [{ label: '默认 UA' }, { label: 'okhttp UA', ua: UA_OKHTTP }],
+      totalTimeoutMs: 20,
+    });
+    expect(calls).toHaveLength(1);
+    expect(r.tries).toHaveLength(1);
+    expect(r.tries[0].reason).toContain('停止后续尝试');
+    expect(calls[0].totalTimeoutMs).toBeLessThanOrEqual(20);
+  });
 });

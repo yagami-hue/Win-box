@@ -86,6 +86,8 @@ export interface MpvStatus {
 export interface MpvStartOptions {
   url: string;
   live?: boolean;
+  /** Keep a paused video paused when switching kernels. */
+  paused?: boolean;
   /** 起播位置（秒，0/缺省 = 从头） */
   startTime?: number;
   /** 初始音量 0..1（缺省 1） */
@@ -122,7 +124,7 @@ export interface MpvKernelState {
   eof: boolean;
   /** 文件已加载（file-loaded） */
   loaded: boolean;
-  /** 直播（file-loaded 后 duration 仍未知） */
+  /** 启动直播提示；拿到有限正时长后纠正为点播，未知时长不自动判直播 */
   live: boolean;
   playbackStarted: boolean;
   error: string | null;

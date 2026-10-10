@@ -187,6 +187,8 @@ export async function fetchWithDisguise(
     accept: (buf: Buffer) => boolean;
     attempts?: DisguiseAttempt[];
     timeoutMs?: number;
+    /** 整条伪装/换协议阶梯的总期限；到期后不再启动新的尝试。 */
+    totalTimeoutMs?: number;
     /**
      * 响应体要哪种形态（透传给 `http.request`）：1 = 字节数组（默认）、2 = base64、0 = 文本。
      * 各调用方保持原有语义（jar 路径历史上用 base64），本模块只负责归一成 Buffer。
@@ -201,28 +203,54 @@ export async function fetchWithDisguise(
 ): Promise<DisguiseResult> {
   const attempts = opts.attempts ?? disguiseLadder({ referer: siteRootOf(url) });
   const timeoutMs = opts.timeoutMs ?? 30_000;
+  const deadline = opts.totalTimeoutMs && opts.totalTimeoutMs > 0
+    ? Date.now() + opts.totalTimeoutMs
+    : 0;
   const bufMode = opts.buffer ?? 1;
   const tries: TryInfo[] = [];
   let capturedCookie = '';
   let last: Buffer | undefined;
+  let stoppedByDeadline = false;
 
-  const once = async (u: string, a: DisguiseAttempt, cookieRetry = false): Promise<{ buf: Buffer | null; retryCookie?: string }> => {
+  const once = async (u: string, a: DisguiseAttempt, cookieRetry = false): Promise<{ buf: Buffer | null; retryCookie?: string; deadlineExceeded?: boolean }> => {
     const headers: Record<string, string> = {};
     if (a.ua) headers['User-Agent'] = a.ua;
     if (a.referer) headers['Referer'] = a.referer;
     const ck = a.cookie === true ? capturedCookie : a.cookie || '';
     if (ck) headers['Cookie'] = ck;
+    const remaining = deadline ? deadline - Date.now() : 0;
+    if (deadline && remaining <= 0) {
+      const reason = `请求总超时（${opts.totalTimeoutMs}ms），停止后续尝试`;
+      const info: TryInfo = { label: a.label, url: u, ok: false, reason };
+      tries.push(info);
+      opts.onTry?.(info);
+      return { buf: null, deadlineExceeded: true };
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const res = await http.request({
+      const request = http.request({
         url: u,
         method: 'get',
-        timeoutMs,
+        timeoutMs: deadline ? Math.min(timeoutMs, remaining) : timeoutMs,
+        ...(deadline ? { totalTimeoutMs: remaining } : {}),
         buffer: bufMode,
         // 自动带入的会话 Cookie 仅发回原地址，禁止跟随重定向泄露给另一站。
         redirect: cookieRetry ? 0 : 1,
         headers: Object.keys(headers).length ? headers : undefined,
         ...(a.doh ? { doh: a.doh } : {}),
       });
+      const res = deadline
+        ? await Promise.race([
+          request,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              const error = new Error(`请求总超时（${opts.totalTimeoutMs}ms）`) as Error & { deadlineExceeded?: boolean };
+              error.deadlineExceeded = true;
+              reject(error);
+            }, remaining);
+          }),
+        ])
+        : await request;
       const buf = toBodyBuffer(res.content, bufMode);
       if (buf.length) last = buf;
       if (!capturedCookie) {
@@ -244,10 +272,19 @@ export async function fetchWithDisguise(
       const fresh = opts.retryWithCookie ? retryCookieFromHeaders(res.headers, u, res.finalUrl) : '';
       return { buf: null, ...(fresh ? { retryCookie: mergeRetryCookie(ck, fresh) } : {}) };
     } catch (e) {
-      const info: TryInfo = { label: a.label, url: u, ok: false, reason: (e as Error).message || '请求失败' };
+      const deadlineError = e as Error & { deadlineExceeded?: boolean };
+      const exceeded = !!deadline && (Date.now() >= deadline || deadlineError.deadlineExceeded === true || /请求总超时/.test(deadlineError.message || ''));
+      const info: TryInfo = {
+        label: a.label,
+        url: u,
+        ok: false,
+        reason: exceeded ? `请求总超时（${opts.totalTimeoutMs}ms），停止后续尝试` : ((e as Error).message || '请求失败'),
+      };
       tries.push(info);
       opts.onTry?.(info);
-      return { buf: null };
+      return { buf: null, deadlineExceeded: exceeded };
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   };
 
@@ -260,24 +297,34 @@ export async function fetchWithDisguise(
     }
     const r = await once(url, a);
     if (r.buf) return { buf: r.buf, used: a, tries, cookie: capturedCookie || undefined, last };
+    if (r.deadlineExceeded) {
+      stoppedByDeadline = true;
+      break;
+    }
     if (r.retryCookie) {
       const retry = { ...a, label: a.label + ' + 会话 Cookie', cookie: r.retryCookie };
       const next = await once(url, retry, true);
       if (next.buf) return { buf: next.buf, used: retry, tries, cookie: capturedCookie || undefined, last };
+      if (next.deadlineExceeded) {
+        stoppedByDeadline = true;
+        break;
+      }
     }
   }
 
   // 全失败 → 换另一种协议同路径再试一次（仅 okhttp UA，控制时长）
-  if (opts.tryAltProtocol !== false) {
+  if (!stoppedByDeadline && opts.tryAltProtocol !== false) {
     const alt = protocolAltUrl(url);
     if (alt) {
       const a: DisguiseAttempt = { label: 'okhttp UA（换 ' + (alt.startsWith('https') ? 'https' : 'http') + '）', ua: UA_OKHTTP, referer: refererAlt };
       const r = await once(alt, a);
       if (r.buf) return { buf: r.buf, used: a, altUrl: alt, tries, cookie: capturedCookie || undefined, last };
+      if (r.deadlineExceeded) return { buf: null, last, tries, cookie: capturedCookie || undefined };
       if (r.retryCookie) {
         const retry = { ...a, label: a.label + ' + 会话 Cookie', cookie: r.retryCookie };
         const next = await once(alt, retry, true);
         if (next.buf) return { buf: next.buf, used: retry, altUrl: alt, tries, cookie: capturedCookie || undefined, last };
+        if (next.deadlineExceeded) return { buf: null, last, tries, cookie: capturedCookie || undefined };
       }
     }
   }

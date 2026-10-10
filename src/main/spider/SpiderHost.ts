@@ -1733,9 +1733,18 @@ export class SpiderHost {
         const sp = this.vm.spiderFactory.getCSP(b, this.host) as {
           runtimeState?: () => 'ready' | 'preparing' | 'unavailable';
           pendingRuntime?: () => Promise<unknown> | null;
+          lastReason?: string;
         };
         if (typeof sp.runtimeState !== 'function') continue;
-        if (sp.runtimeState() === 'ready') continue;
+        const state = sp.runtimeState();
+        if (state === 'ready') continue;
+        if (state === 'unavailable') {
+          skipped[i] = {
+            key: b.key, name: b.name || b.key, status: 'error',
+            error: sp.lastReason || '运行时不可用：请检查该源的 jar 地址或运行时配置', ms: 0,
+          };
+          continue;
+        }
         notReadyYet.add(i);
         const w = sp.pendingRuntime?.();
         if (w) prepWaiters.push(w);
@@ -1747,10 +1756,15 @@ export class SpiderHost {
         this.onSearchAllProgress?.({ wd: term, done: 0, total: pool.length, pending: pool.length });
       } catch { /* 忽略 */ }
       if (prepWaiters.length > 0) {
-        await Promise.race([
-          Promise.all(prepWaiters),
-          new Promise((res) => setTimeout(res, SEARCH_ALL_PREPARE_MS)),
-        ]);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            Promise.all(prepWaiters),
+            new Promise((res) => { timer = setTimeout(res, SEARCH_ALL_PREPARE_MS); }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
       }
     }
     for (let i = 0; i < pool.length; i++) {
@@ -1767,22 +1781,27 @@ export class SpiderHost {
       }
       if (notReadyYet.has(i)) {
         // 预备等待后**再判一次**：等到了就照常参与本轮
-        let ready = true;
+        let state = 'ready';
+        let reason = '';
         try {
-          const sp = this.vm.spiderFactory.getCSP(b, this.host) as { runtimeState?: () => string };
-          ready = typeof sp.runtimeState !== 'function' || sp.runtimeState() === 'ready';
-        } catch { ready = true; }
-        if (!ready) {
+          const sp = this.vm.spiderFactory.getCSP(b, this.host) as { runtimeState?: () => string; lastReason?: string };
+          state = sp.runtimeState?.() ?? 'ready';
+          reason = sp.lastReason || '';
+        } catch { state = 'ready'; }
+        if (state !== 'ready') {
           skipped[i] = {
             key: b.key,
             name: b.name || b.key,
             status: 'error',
-            error: '运行时就绪中（正在后台下载/转换 jar，约 10~40 秒）：本次未参与，稍后重搜即包含该源',
+            error: state === 'unavailable'
+              ? reason || '运行时不可用：请检查该源的 jar 地址或运行时配置'
+              : `运行时就绪中：${reason || '正在后台下载/转换 jar'}；本次未参与，完成后可重搜`,
             ms: 0,
           };
           continue;
         }
       }
+      if (skipped[i]) continue;
       active.push(i);
     }
     const total = active.length;

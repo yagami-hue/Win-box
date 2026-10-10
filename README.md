@@ -9,7 +9,7 @@
 
 **链接**：[GitHub 主页](https://github.com/yagami-hue/Win-box) · [爱发电 · 赞助](https://afdian.com/a/WinBox)（自愿，见文末说明）
 
-**当前版本：1.20.4** · [下载](https://github.com/yagami-hue/Win-box/releases/tag/release1.20.4) · [更新记录](CHANGELOG.md)
+**当前版本：1.20.5** · [下载](https://github.com/yagami-hue/Win-box/releases/tag/release1.20.5) · [更新记录](CHANGELOG.md)
 
 ---
 
@@ -46,6 +46,8 @@ pnpm run build            # 构建（主进程 + 渲染层）
 pnpm run release:upload -- --dry-run  # 预览当前版本的上传文件，不执行上传
 pnpm run release:upload              # 上传到已创建的 release<版本号>
 ```
+
+上传脚本默认使用本机 `127.0.0.1:7897` HTTPS 代理加速 GitHub CLI；可用 `GH_UPLOAD_PROXY` 指定代理，设置为 `direct`（或 `none`）则直连。
 
 上传命令读取 `package.json` 的版本和输出目录，只选择当前版本的 Setup / 可选 portable `.exe`；不自动创建 Release、修改正文或覆盖已有附件。
 

@@ -59,44 +59,65 @@ export class HttpClient implements IHttpClient {
     }
 
     const maxRedir = req.redirect === 0 ? 0 : 10;
+    const deadline = req.totalTimeoutMs && req.totalTimeoutMs > 0
+      ? Date.now() + req.totalTimeoutMs
+      : 0;
     // 出站链：用户设的**网络代理**（非本机目标）优先，其次 DoH（req.doh），最后直连
     const dispatcher = dispatchChain(req.url, req.doh ? dohDispatcher() : agent)[0];
     let url = req.url;
     let finalUrl = url;
     for (let i = 0; i <= maxRedir; i++) {
-      const r = await undiciRequest(url, {
-        method,
-        headers,
-        body: body as any,
-        headersTimeout: req.timeoutMs || 30000,
-        bodyTimeout: req.timeoutMs || 30000,
-        dispatcher,
-      });
-      const loc = r.headers['location'];
-      if (r.statusCode >= 300 && r.statusCode < 400 && loc && i < maxRedir && method !== 'HEAD') {
-        // 跟随重定向（GET/HEAD 不重发 body）
-        url = new URL(Array.isArray(loc) ? loc[0] : loc, url).toString();
-        finalUrl = url;
-        // 重定向后通常不带 body
-        if (method === 'POST') { /* 保留 body */ }
-        continue;
-      }
-      const buf = Buffer.from(await r.body.arrayBuffer());
-      const respHeaders: Record<string, string | string[]> = {};
-      for (const [k, v] of Object.entries(r.headers)) {
-        respHeaders[k] = v as string | string[];
-      }
-      const charset = (req.charset || decodeCharsetGuess(r.headers['content-type'] as string));
+      const remaining = deadline ? deadline - Date.now() : 0;
+      if (deadline && remaining <= 0) throw new Error(`请求总超时（${req.totalTimeoutMs}ms）`);
+      const phaseTimeout = req.timeoutMs || 30000;
+      const requestTimeout = deadline ? Math.min(phaseTimeout, remaining) : phaseTimeout;
+      const controller = new AbortController();
+      let deadlineExpired = false;
+      const timer = deadline ? setTimeout(() => {
+        deadlineExpired = true;
+        controller.abort();
+      }, remaining) : undefined;
+      try {
+        const r = await undiciRequest(url, {
+          method,
+          headers,
+          body: body as any,
+          headersTimeout: requestTimeout,
+          bodyTimeout: requestTimeout,
+          dispatcher,
+          signal: controller.signal,
+        });
+        const loc = r.headers['location'];
+        if (r.statusCode >= 300 && r.statusCode < 400 && loc && i < maxRedir && method !== 'HEAD') {
+          // 跟随重定向（GET/HEAD 不重发 body）
+          url = new URL(Array.isArray(loc) ? loc[0] : loc, url).toString();
+          finalUrl = url;
+          // 重定向后通常不带 body
+          if (method === 'POST') { /* 保留 body */ }
+          continue;
+        }
+        const buf = Buffer.from(await r.body.arrayBuffer());
+        const respHeaders: Record<string, string | string[]> = {};
+        for (const [k, v] of Object.entries(r.headers)) {
+          respHeaders[k] = v as string | string[];
+        }
+        const charset = (req.charset || decodeCharsetGuess(r.headers['content-type'] as string));
 
-      let content: string | number[];
-      if (req.buffer === 1) {
-        content = Array.from(buf);
-      } else if (req.buffer === 2) {
-        content = buf.toString('base64');
-      } else {
-        content = decodeCharset(buf, charset);
+        let content: string | number[];
+        if (req.buffer === 1) {
+          content = Array.from(buf);
+        } else if (req.buffer === 2) {
+          content = buf.toString('base64');
+        } else {
+          content = decodeCharset(buf, charset);
+        }
+        return { status: r.statusCode, headers: respHeaders, content, finalUrl };
+      } catch (e) {
+        if (deadlineExpired) throw new Error(`请求总超时（${req.totalTimeoutMs}ms）`);
+        throw e;
+      } finally {
+        if (timer) clearTimeout(timer);
       }
-      return { status: r.statusCode, headers: respHeaders, content, finalUrl };
     }
     // 不应到达
     return { status: 0, headers: {}, content: '', finalUrl };

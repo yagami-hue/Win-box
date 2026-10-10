@@ -8,7 +8,7 @@
 //   两者都让 hls.js 抛 keyLoadError 致命错误 → 直接「播放失败」。
 //   修复：带 URI 属性的标签（KEY/MAP/MEDIA/I-FRAME-STREAM-INF/PART…）与分片一律走 /play 中继。
 import { describe, it, expect } from 'vitest';
-import { rewriteM3u8, rewriteUriAttrs, jpegPreludeLen, isTsAligned } from '../src/main/server/LocalProxyServer';
+import { rewriteM3u8, rewriteUriAttrs, imagePreludeLen, jpegPreludeLen, isTsAligned } from '../src/main/server/LocalProxyServer';
 
 const BASE = 'https://cdn.example.com/hls/index.m3u8';
 const UA = 'Mozilla/5.0 UA';
@@ -140,5 +140,47 @@ describe('jpegPreludeLen / isTsAligned — jpg 伪装分片（jd4k）识别', ()
     expect(isTsAligned(buf, 3)).toBe(true);
     expect(isTsAligned(buf, 4)).toBe(false);
     expect(isTsAligned(buf, buf.length)).toBe(false);
+  });
+});
+
+describe('imagePreludeLen — PNG 伪装分片识别', () => {
+  const tsPayload = (packets: number): Buffer => {
+    const b = Buffer.alloc(188 * packets, 0xaa);
+    for (let i = 0; i < packets; i++) b[i * 188] = 0x47;
+    return b;
+  };
+  const png = (): Buffer => Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from([0, 0, 0, 13]), Buffer.from('IHDR'), Buffer.alloc(13), Buffer.alloc(4),
+    Buffer.alloc(4), Buffer.from('IEND'), Buffer.alloc(4),
+  ]);
+
+  it('PNG IEND 后是 188 对齐 TS → 返回图片前导长度', () => {
+    const prefix = png();
+    expect(imagePreludeLen(Buffer.concat([prefix, tsPayload(5)]))).toBe(prefix.length);
+  });
+
+  it('纯 PNG 或伪造块结构不剥离', () => {
+    const prefix = png();
+    expect(imagePreludeLen(prefix)).toBe(0);
+    const malformed = Buffer.from(prefix);
+    malformed.writeUInt32BE(0x7fffffff, 8);
+    expect(imagePreludeLen(Buffer.concat([malformed, tsPayload(5)]))).toBe(0);
+  });
+
+  it('正常 TS 不剥离', () => {
+    expect(imagePreludeLen(tsPayload(5))).toBe(0);
+  });
+
+  it('图片中的 IEND 字样不当作结束块，完整块和 TS 到齐后才剥离', () => {
+    const data = Buffer.concat([Buffer.from('IEND'), tsPayload(4)]);
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const prefix = Buffer.concat([png().subarray(0, 33), len, Buffer.from('IDAT'), data, Buffer.alloc(4), png().subarray(33)]);
+    const body = Buffer.concat([prefix, tsPayload(5)]);
+    for (const end of [2, 8, 32, prefix.length - 1, prefix.length + 564]) {
+      expect(imagePreludeLen(body.subarray(0, end))).toBe(0);
+    }
+    expect(imagePreludeLen(body)).toBe(prefix.length);
   });
 });

@@ -16,6 +16,7 @@ import type { MpvCommand, MpvKernelState, MpvStartOptions, MpvStatus } from '../
 import { IPC } from '../../shared/ipc-channels';
 import { cacheDir, resourcesDir } from '../util/paths';
 import { playerSettings } from './playerSettings';
+import { playerIsFullscreen, playerIsMini } from './PlayerWindow';
 import {
   buildMpvArgs,
   initialKernelState,
@@ -54,6 +55,14 @@ export class MpvController {
   private retiring = new Set<ChildProcess>();
   private pipeSeq = 0;
   private lineBuf = '';
+  /**
+   * `start()` can be called twice before the first process has finished
+   * connecting (React effect cleanup/start does exactly that when the kernel
+   * is switched).  Serialising the whole start operation prevents the second
+   * call from missing the first process and leaving two mpv instances alive.
+   */
+  private startChain: Promise<void> = Promise.resolve();
+  private unbindViewport: (() => void) | null = null;
   /** 本次会话是否已挂上外挂字幕（换字幕前先 sub-remove） */
   private subOn = false;
 
@@ -88,19 +97,28 @@ export class MpvController {
    * 注意：本方法返回时 mpv 已 `loadfile` 目标地址；状态经 MPV_STATE 事件持续推送。
    */
   async start(win: BrowserWindow, opts: MpvStartOptions): Promise<{ session: number; path: string }> {
+    this.stop();
+    const reservation = this.session;
+    const run = this.startChain.then(() => this.startInternal(win, opts, reservation));
+    // Keep the queue usable after a failed start, while returning the actual
+    // result/error to the caller that requested this start.
+    this.startChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async startInternal(win: BrowserWindow, opts: MpvStartOptions, reservation: number): Promise<{ session: number; path: string }> {
     const st = this.status();
     if (!st.available) throw new Error(st.note);
     const url = String(opts?.url || '').trim();
     if (!url) throw new Error('播放地址为空');
 
-    this.stop();
-    const reservation = this.session;
+    if (reservation !== this.session || win.isDestroyed()) return { session: reservation, path: st.path };
     // A retiring process must release the embedded HWND before another VO attaches to it.
     await Promise.all([...this.retiring].map(proc => new Promise<void>(resolve => {
       if (proc.exitCode !== null || proc.signalCode !== null) { resolve(); return; }
       proc.once('exit', () => resolve());
     })));
-    if (reservation !== this.session) return { session: reservation, path: st.path };
+    if (reservation !== this.session || win.isDestroyed()) return { session: reservation, path: st.path };
     this.session += 1;
     const session = this.session;
     this.target = win;
@@ -152,12 +170,31 @@ export class MpvController {
       return { session, path: st.path };
     }
     this.sock = sock;
+    const updateViewport = () => {
+      if (session !== this.session || win.isDestroyed()) return;
+      const height = win.getContentBounds().height;
+      const titleHeight = playerIsFullscreen() ? 0 : playerIsMini() ? 18 : 38;
+      sock.write(mpvCmdLine(['set_property', 'video-margin-ratio-top', titleHeight / Math.max(1, height)]));
+      win.webContents.invalidate();
+    };
+    win.on('resize', updateViewport);
+    win.on('enter-full-screen', updateViewport);
+    win.on('leave-full-screen', updateViewport);
+    this.unbindViewport = () => {
+      win.removeListener('resize', updateViewport);
+      win.removeListener('enter-full-screen', updateViewport);
+      win.removeListener('leave-full-screen', updateViewport);
+    };
+    updateViewport();
     sock.on('data', (d: Buffer) => this.onSockData(d, session));
     sock.on('error', () => undefined);
     sock.on('close', () => {
       if (this.sock === sock) this.sock = null;
     });
     sock.write(mpvObserveLines().join(''));
+    sock.write(mpvCmdLine(['set_property', 'mute', 'no']));
+    sock.write(mpvCmdLine(['set_property', 'pause', opts.paused ? 'yes' : 'no']));
+    sock.write(mpvCmdLine(['set_property', 'volume', Math.max(0, Math.min(1, opts.volume ?? 1)) * 100]));
     sock.write(mpvCmdLine(['loadfile', url, 'replace']));
     return { session, path: st.path };
   }
@@ -195,6 +232,8 @@ export class MpvController {
 
   /** 停止会话（quit → 宽限后强杀；幂等） */
   stop(): void {
+    this.unbindViewport?.();
+    this.unbindViewport = null;
     const sock = this.sock;
     const proc = this.proc;
     this.sock = null;

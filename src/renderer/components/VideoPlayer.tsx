@@ -3,6 +3,7 @@
 // 自定义控制层：播放/暂停、进度条(可拖)、时间、音量、倍速、全屏、
 // 大播放键、加载态、错误提示+重试、闲置自动隐藏、直播标识。
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useHoverDelay } from '../lib/useHoverDelay';
 import Hls from 'hls.js';
 import mpegts from 'mpegts.js';
 import { uiMem, setPlayTime } from '../lib/uiMemory';
@@ -287,9 +288,7 @@ interface VideoPlayerProps {
 }
 
 /** ★ 2026-09-28（用户要求）：控制条图标的「长按开面板」手势状态 */
-type PressState = { timer: ReturnType<typeof setTimeout> | null; longFired: boolean };
 /** 长按判定阈值（ms）：与右键同为「打开调整框」 */
-const LONG_PRESS_MS = 450;
 
 export default function VideoPlayer(props: VideoPlayerProps) {
   const { url, canPrev, canNext, onPrev, onNext, resourceName, danmakuTitle, mini = false, driveBindProvider = null } = props;
@@ -437,6 +436,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   /** 内核切换时的续播位置（html5→mpv / mpv→html5 都不断点） */
   const mpvResumeRef = useRef(0);
   const html5ResumeRef = useRef(0);
+  const handoffRef = useRef<{ url: string; paused: boolean } | null>(null);
   const volRef = useRef(prefsRef.current!.vol);
   const [mpvErr, setMpvErr] = useState('');
   /** mpv 状态推送入口（由 mpv 会话 effect 安装，保证闭包读到最新一集上下文） */
@@ -532,6 +532,13 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const switchKernel = (k: Kernel, persist = true) => {
     if (k === kernelRef.current) return;
     const t = kTime();
+    handoffRef.current = { url, paused: kPaused() && !err && !mpvErr };
+    if (!kIsMpv() && ref.current) {
+      volRef.current = ref.current.volume;
+      setVol(ref.current.volume);
+      setRate(ref.current.playbackRate);
+    }
+    clearAuto();
     if (k === 'mpv') mpvResumeRef.current = t;
     else html5ResumeRef.current = t;
     if (persist) {
@@ -659,7 +666,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const [volDrag, setVolDrag] = useState(false);
   const volFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const volTrackRef = useRef<HTMLDivElement>(null);
-  const volOpen = volFlash || volDrag;
+  const [volHover, setVolHover] = useState(false);
+  const volOpen = volHover || volFlash || volDrag;
 
   // ---- 自动下一集（播完 → 5 秒倒计时可取消；默认开启）----
   const [nextCount, setNextCount] = useState<number | null>(null);
@@ -718,8 +726,6 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   const seekDragRef = useRef(false);
   const [progHover, setProgHover] = useState<{ x: number; t: number } | null>(null);
   // ★ 2026-09-28（用户要求）：图标「左键开关 / 右键或长按开调整框」的手势状态（字幕、弹幕各一份）
-  const subPress = useRef<PressState>({ timer: null, longFired: false });
-  const dmPress = useRef<PressState>({ timer: null, longFired: false });
   const [subCues, setSubCues] = useState<{ start: number; end: number; text: string }[]>([]);
   const [subOffset, setSubOffset] = useState(() => prefsRef.current!.subOffset);
   const [subFont, setSubFont] = useState(20);
@@ -903,7 +909,6 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   };
 
   const toggleDanmaku = () => {
-    setDmPanel(false);
     const next = !dmEnabled;
     setDmEnabled(next);
     if (next) {
@@ -1025,7 +1030,6 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   }, [vol, rate, subOffset, fit]);
 
   const toggleSub = () => {
-    setSubPanel(false);
     const next = !subEnabled;
     setSubEnabled(next);
     // 开启字幕 = 显式要字幕 → 自动用「剧名+集号」检索 assrt（无候选时才发请求，避免浪费）
@@ -1168,12 +1172,12 @@ export default function VideoPlayer(props: VideoPlayerProps) {
 
   // 字幕/弹幕/画面比例面板打开：同步 ref + 清闲置计时并锁定显示（关闭面板恢复自动隐藏）
   useEffect(() => {
-    panelOpenRef.current = !!(subPanel || dmPanel || fitPanel || skipPanel);
-    if (subPanel || dmPanel || fitPanel || skipPanel) {
+    panelOpenRef.current = !!(subPanel || dmPanel || fitPanel || skipPanel || volOpen);
+    if (panelOpenRef.current) {
       if (idleTimer.current) clearTimeout(idleTimer.current);
       setUi(true);
     }
-  }, [subPanel, dmPanel, fitPanel, skipPanel]);
+  }, [subPanel, dmPanel, fitPanel, skipPanel, volOpen]);
 
   // 键盘 ↑/↓ 调节音量时，短暂展开音量面板（1s 后自动淡出）
   const flashVol = useCallback(() => {
@@ -1376,6 +1380,10 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   v.addEventListener('ended', onEnded);
 
     const start = () => {
+      if (handoffRef.current?.url === url && handoffRef.current.paused) {
+        setPaused(true);
+        return;
+      }
       v.play().then(() => setPaused(false)).catch(() => {});
     };
 
@@ -1476,12 +1484,17 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         p.on(mpegts.Events.STATISTICS_INFO, (info: { currentSpeed?: number }) => {
           if (info && info.currentSpeed != null && info.currentSpeed > 0) reportKBps(info.currentSpeed);
         });
-        try {
-          p.play();
-        } catch {
-          /* ignore */
+        const keepPaused = handoffRef.current?.url === url && handoffRef.current.paused;
+        if (keepPaused) {
+          setPaused(true);
+        } else {
+          try {
+            p.play();
+          } catch {
+            /* ignore */
+          }
+          setPaused(false);
         }
-        setPaused(false);
       } else {
         setErr('当前环境不支持 FLV 播放');
       }
@@ -1535,6 +1548,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       v.removeEventListener('ended', onEnded);
       clearAuto();
       if (ref.current && !ref.current.paused) setPlayTime(url, ref.current.currentTime);
+      // A hidden <video> still owns its decoder and audio device.
+      v.pause();
       hlsRef.current?.destroy();
       hlsRef.current = null;
       const f2 = (v as unknown as { __flv?: mpegts.Player }).__flv;
@@ -1545,6 +1560,9 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           /* ignore */
         }
       }
+      (v as unknown as { __flv?: mpegts.Player }).__flv = undefined;
+      v.removeAttribute('src');
+      v.load();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, kernel, htmlUrl]);
@@ -1582,7 +1600,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       buffering: false,
       eof: false,
       loaded: false,
-      live: false,
+      live: liveHint,
       playbackStarted: false,
       error: null,
       videoW: 0,
@@ -1629,6 +1647,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       else if (s.session !== mpvSessionRef.current) return;
       const st = s.state;
       mpvStateRef.current = { ...mpvStateRef.current, ...st };
+      liveKindRef.current = st.live;
+      setIsLive(st.live);
       mpvTimeRef.current = st.time ?? 0;
       if (st.videoW || st.videoH) mpvSizeRef.current = { w: st.videoW, h: st.videoH };
       reportResolution(st.videoW, st.videoH);
@@ -1636,19 +1656,19 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       if (st.time != null) {
         setCur(st.time);
         setPlayTime(url, st.time);
-        maybeSkipMpv(st.time, st.duration ?? 0);
+        if (!st.error) maybeSkipMpv(st.time, st.duration ?? 0);
       }
       setDur(st.duration ?? 0);
       setPaused(st.paused);
       setBuffering(st.buffering);
       if (st.cacheTime != null) setBuffered(st.cacheTime);
       if (st.cacheKbps > 0) setNetSpeed(st.cacheKbps);
-      setIsLive(liveKindRef.current || st.live);
       if (st.error) {
+        clearAuto();
         setMpvErr(`视频流无法解析（${st.error}）—可换线路或切回内置内核重试`);
         setLoading(false);
       }
-      if (st.eof && !eofFired) {
+      if (st.eof && !st.error && !eofFired) {
         eofFired = true;
         // ★ 2026-10-08（用户报「jd4k 点开就提示已播放完毕」）：mpv 的 demux_lavf 把「分片读包失败
         //   ×10」也当 EOF（重试计数耗尽即返回文件结束）——从未真正播起来就报「已播完」是误导；
@@ -1666,8 +1686,14 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     };
 
     void client
-      .mpvStart({ url, live: liveHint, startTime: startAt, volume: volRef.current, rate, fit })
-      .then(() => undefined)
+      .mpvStart({ url, live: liveHint, startTime: startAt, volume: volRef.current, rate, fit,
+        paused: handoffRef.current?.url === url && handoffRef.current.paused })
+      .then(({ session }) => {
+        if (!alive) return;
+        mpvSessionRef.current = session;
+        void client.mpvCmd({ type: 'volume', value: volRef.current }).catch(() => undefined);
+        void client.mpvCmd({ type: 'rate', value: rate }).catch(() => undefined);
+      })
       .catch((e) => {
         if (!alive) return;
         setMpvErr(`MPV 内核启动失败：${e instanceof Error ? e.message : String(e)}（可切回内置内核）`);
@@ -1741,6 +1767,10 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       // ★ 2026-10-08 MPV 内核：无 <video> 也要处理键盘（时间/音量走适配层）
       if (!v && !kIsMpv()) return;
       if (e.repeat) return; // 长按重复由我们自己处理，避免原生 repeat 打断
+      if (e.key === 'Escape' && kIsMpv()) {
+        void client.playerSetFullscreen(false).then(state => setFull(state.fullscreen)).catch(() => undefined);
+        return;
+      }
       if (e.key === ' ') {
         e.preventDefault();
         if (kPaused()) kPlay();
@@ -1861,26 +1891,10 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     setSkipPanel(false); // ★ 与跳过面板互斥
     poke();
   };
-  const clearPress = (ref: React.MutableRefObject<PressState>) => {
-    if (ref.current.timer) { clearTimeout(ref.current.timer); ref.current.timer = null; }
-  };
-  const pressProps = (ref: React.MutableRefObject<PressState>, open: () => void) => ({
-    onContextMenu: (e: React.MouseEvent) => { e.preventDefault(); clearPress(ref); open(); },
-    onPointerDown: () => {
-      ref.current.longFired = false;
-      clearPress(ref);
-      ref.current.timer = setTimeout(() => { ref.current.longFired = true; open(); }, LONG_PRESS_MS);
-    },
-    onPointerUp: () => clearPress(ref),
-    onPointerLeave: () => clearPress(ref),
-    onPointerCancel: () => clearPress(ref),
-  });
-  /** 长按已开面板时吞掉随后的 click（否则又会把刚打开的开关切回去） */
-  const consumeLongFired = (ref: React.MutableRefObject<PressState>): boolean => {
-    if (!ref.current.longFired) return false;
-    ref.current.longFired = false;
-    return true;
-  };
+  const subHover = useHoverDelay(open => open ? openPanel('sub') : setSubPanel(false));
+  const dmHover = useHoverDelay(open => open ? openPanel('dm') : setDmPanel(false));
+  const volumeHover = useHoverDelay(setVolHover);
+  const fullBusyRef = useRef(false);
 
   // 进入小窗口模式时退出元素全屏（mini 下全屏功能消失）
   useEffect(() => {
@@ -1896,11 +1910,24 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     return off;
   }, [props.allowMpv, kernel]);
 
+  useEffect(() => {
+    const root = document.documentElement;
+    if (full && kernel === 'mpv') root.dataset.playerFullscreen = '1';
+    else delete root.dataset.playerFullscreen;
+    return () => { delete root.dataset.playerFullscreen; };
+  }, [full, kernel]);
+
   const toggleFull = () => {
     const wrap = wrapRef.current;
     if (!wrap) return;
     if (kernel === 'mpv') {
-      void client.playerSetFullscreen(!full).then((state) => setFull(!!state.fullscreen)).catch(() => undefined);
+      if (fullBusyRef.current) return;
+      fullBusyRef.current = true;
+      void client.playerIsFullscreen()
+        .then(state => client.playerSetFullscreen(!state.fullscreen))
+        .then(state => setFull(!!state.fullscreen))
+        .catch(() => undefined)
+        .finally(() => { fullBusyRef.current = false; poke(); });
       return;
     }
     if (document.fullscreenElement) void document.exitFullscreen().then(() => setFull(false));
@@ -2025,7 +2052,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       className={`vplayer${ui ? ' vui' : ''}${full ? ' vfull' : ''}${mini ? ' vp-mini' : ''}`}
       style={{ '--sub-font': `${subFont}px`, '--sub-bottom': `${subBottom}px` } as React.CSSProperties}
       onMouseMove={poke}
-      onMouseLeave={() => setUi(false)}
+      onMouseLeave={() => { if (!panelOpenRef.current) setUi(false); }}
       onDoubleClick={mini ? undefined : toggleFull}
     >
       {/* ★ 2026-09-26：画面比例（用户要求）—— video 包进 stage/ratio 两层：
@@ -2295,6 +2322,8 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           <div
             className={`vp-vol${volOpen ? ' open' : ''}`}
             onClick={(e) => e.stopPropagation()}
+            onPointerEnter={() => volumeHover.enter()}
+            onPointerLeave={() => volumeHover.leave()}
           >
             {/* 悬浮面板：竖向条状音量控制（绝对定位，不影响控制条布局）；悬停/拖拽/键盘闪烁时打开 */}
             <div className={`vp-vpanel${volOpen ? ' open' : ''}`}>
@@ -2356,9 +2385,10 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           </div>
           <button
             className="vp-ctl"
-            title={`字幕：${subEnabled ? '开' : '关'}（左键开关 · 右键/长按调整）`}
-            onClick={() => { if (consumeLongFired(subPress)) return; toggleSub(); }}
-            {...pressProps(subPress, () => openPanel('sub'))}
+            title={`字幕：${subEnabled ? '开' : '关'}（点击开关 · 悬停调整）`}
+            onClick={toggleSub}
+            onPointerEnter={() => { dmHover.cancel(); subHover.enter(); }}
+            onPointerLeave={() => subHover.leave()}
           >
             <svg width="15" height="15" viewBox="0 0 24 24">
               <rect x="2.5" y="5" width="19" height="14" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.6" />
@@ -2368,6 +2398,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
             {subEnabled && <span className="vp-subdot" />}
           </button>
           {subPanel && (
+            <div className="vp-panelhost" onPointerEnter={() => subHover.enter(true)} onPointerLeave={() => subHover.leave()}>
             <div className="vp-subpanel" onClick={(e) => e.stopPropagation()}>
               <div className="vsp-row">
                 <button className={`tag ${subEnabled ? 'active' : ''}`} onClick={toggleSub}>字幕：{subEnabled ? '开' : '关'}</button>
@@ -2435,12 +2466,14 @@ export default function VideoPlayer(props: VideoPlayerProps) {
                 </div>
               )}
             </div>
+            </div>
           )}
           <button
             className="vp-ctl"
-            title={`弹幕：${dmEnabled ? '开' : '关'}（左键开关 · 右键/长按调整）`}
-            onClick={() => { if (consumeLongFired(dmPress)) return; toggleDanmaku(); }}
-            {...pressProps(dmPress, () => openPanel('dm'))}
+            title={`弹幕：${dmEnabled ? '开' : '关'}（点击开关 · 悬停调整）`}
+            onClick={toggleDanmaku}
+            onPointerEnter={() => { subHover.cancel(); dmHover.enter(); }}
+            onPointerLeave={() => dmHover.leave()}
           >
             <svg width="15" height="15" viewBox="0 0 24 24">
               <path d="M3.5 8a2 2 0 012-2h13a2 2 0 012 2v8a2 2 0 01-2 2h-13a2 2 0 01-2-2z" fill="none" stroke="currentColor" strokeWidth="1.6" />
@@ -2449,6 +2482,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
             {dmEnabled && <span className="vp-subdot" />}
           </button>
           {dmPanel && (
+            <div className="vp-panelhost" onPointerEnter={() => dmHover.enter(true)} onPointerLeave={() => dmHover.leave()}>
             <div className="vp-subpanel vp-dmpanel" onClick={(e) => e.stopPropagation()}>
               <div className="vsp-row">
                 <button className={`tag ${dmEnabled ? 'active' : ''}`} onClick={toggleDanmaku}>弹幕：{dmEnabled ? '开' : '关'}</button>
@@ -2618,6 +2652,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
                   })}
                 </div>
               )}
+            </div>
             </div>
           )}
           {/* ★ 2026-10-08（用户要求）：跳过片头片尾 —— 左键开设置面板；本集有设置时显示绿点 */}

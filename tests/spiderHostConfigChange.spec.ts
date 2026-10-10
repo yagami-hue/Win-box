@@ -31,6 +31,55 @@ import { rmSync } from 'node:fs';
 import { SpiderHost } from '../src/main/spider/SpiderHost';
 import type { SourceBean } from '../src/shared/types';
 
+describe('SpiderHost — 全源搜索不把已失败 jar 当成准备中', () => {
+  it('真实在途 jar 仍计入 pendingSources，不把准备中源当作失败', async () => {
+    const host = new SpiderHost();
+    const dir = (globalThis as unknown as { __shostDir: string }).__shostDir;
+    try {
+      vi.spyOn(host as any, 'searchableSites').mockReturnValue([{ key: 'pending', name: 'pending', type: 3, api: 'csp_Test', searchable: 1 }]);
+      const vm = (host as any).vm;
+      vi.spyOn(vm.spiderFactory, 'getCSP').mockReturnValue({ runtimeState: () => 'preparing', lastReason: '正在后台下载蜘蛛 jar', pendingRuntime: () => null } as any);
+      const search = vi.spyOn(vm, 'search').mockResolvedValue([]);
+      const report = await host.searchAll('jar-state-pending', { refresh: true });
+      expect(report.pendingSources).toBe(1);
+      expect(JSON.stringify(report)).toContain('正在后台下载蜘蛛 jar');
+      expect(search).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+  it.each(['before', 'during'])('%s：404/未配置立即跳过，正常源继续搜索，pendingSources 不含失败源', async when => {
+    const host = new SpiderHost();
+    const dir = (globalThis as unknown as { __shostDir: string }).__shostDir;
+    try {
+      const sources = ['missing', 'nojar', 'good'].map(key => ({ key, name: key, type: 3, api: 'csp_Test', searchable: 1 } as SourceBean));
+      vi.spyOn(host as any, 'searchableSites').mockReturnValue(sources);
+      const vm = (host as any).vm;
+      const reason = 'jar 下载失败：上游返回 HTTP 404，请检查配置里的 jar 地址';
+      const missing = { runtimeState: vi.fn().mockReturnValue('unavailable'), lastReason: reason, pendingRuntime: vi.fn(() => null) };
+      if (when === 'during') {
+        missing.runtimeState.mockReturnValueOnce('preparing');
+        missing.pendingRuntime.mockReturnValue(Promise.resolve() as any);
+      }
+      const nojar = { runtimeState: () => 'unavailable', lastReason: '该源未指定 jar 地址' };
+      vi.spyOn(vm.spiderFactory, 'getCSP').mockImplementation((b: any) => b.key === 'missing' ? missing : b.key === 'nojar' ? nojar : { runtimeState: () => 'ready' });
+      const search = vi.spyOn(vm, 'search').mockResolvedValue([]);
+      const report = await host.searchAll('jar-state-' + when, { refresh: true });
+      expect(search).toHaveBeenCalledTimes(1);
+      expect(search.mock.calls[0][0]).toMatchObject({ key: 'good' });
+      expect(report.pendingSources || 0).toBe(0);
+      expect(JSON.stringify(report)).toContain('HTTP 404');
+      expect(JSON.stringify(report)).toContain('未指定 jar 地址');
+      expect(JSON.stringify(report)).not.toContain('运行时就绪中');
+      if (when === 'before') expect(missing.pendingRuntime).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+});
+
 function bean(key: string): SourceBean {
   return { key, name: key, type: 0, api: 'https://x/api.php/provide/vod' } as SourceBean;
 }

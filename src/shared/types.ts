@@ -521,6 +521,8 @@ export interface HttpRequest {
   data?: unknown;
   postType?: 'json' | 'form' | 'form-data';
   timeoutMs?: number;
+  /** 整个请求（含重定向和响应体读取）的总期限；未设置时沿用 timeoutMs 的阶段超时语义。 */
+  totalTimeoutMs?: number;
   redirect?: 0 | 1;
   charset?: string;
   buffer?: 0 | 1 | 2; // 0 文本 / 1 字节数组 / 2 base64

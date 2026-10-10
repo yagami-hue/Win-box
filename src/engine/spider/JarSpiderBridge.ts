@@ -249,6 +249,8 @@ export class JarSpiderBridge {
   /** jar URL → 转换后 jar 本地路径（进程内缓存） */
   private converted = new Map<string, string>();
   private convertLocks = new Map<string, Promise<string>>();
+  /** 多个源共用一只 jar 时，后台预热只挂一条完成/失败日志。 */
+  private warmupLocks = new Map<string, Promise<void>>();
   /** ★ 转换失败抑制表（jar URL → 最近一次失败原因 + 时间；见 CONVERT_FAIL_TTL_MS） */
   private convertFailures = new Map<string, { at: number; message: string }>();
   /** 产物有效性缓存（路径 → `size:mtime`）：闸门判定每轮每源都要问一次，不能每次都重读整只 jar */
@@ -309,7 +311,7 @@ export class JarSpiderBridge {
    * ★ 2026-09-27：**转换进度表**（jar URL → 起转时间 + 是否「接管」上次会话的后台转换）。
    *   供上层在等待期显示「已等 X」——用户诉求「等待要有感知」（见 conversionProgress）。
    */
-  private convProgress = new Map<string, { startedAt: number; attached: boolean }>();
+  private convProgress = new Map<string, { startedAt: number; attached: boolean; stage: 'download' | 'convert' }>();
 
   constructor(opts: JarBridgeOptions, private host?: EngineHost) {
     this.jvmDir = opts.jvmDir;
@@ -474,11 +476,8 @@ export class JarSpiderBridge {
     const cached = this.converted.get(url);
     if (cached) return cached;
     // ★ 失败抑制（见 CONVERT_FAIL_TTL_MS）：窗口内直接复用上次失败原因，不再重跑昂贵转换。
-    const failed = this.convertFailures.get(url);
-    if (failed) {
-      if (Date.now() - failed.at < CONVERT_FAIL_TTL_MS) throw new Error(failed.message);
-      this.convertFailures.delete(url);
-    }
+    const failure = this.conversionFailure(url);
+    if (failure) throw new Error(failure);
     let lock = this.convertLocks.get(url);
     if (!lock) {
       lock = this.doConvert(url).finally(() => this.convertLocks.delete(url));
@@ -584,9 +583,13 @@ export class JarSpiderBridge {
     // ★ 写盘前确保目录存在（对齐上游 downloadJarAsync 的 cacheDir.mkdirs()）
     this.ensureCacheDir();
     // 下载也算在「用户等待」里：进度计时从这里开始（下载 + 转换是一条链）
-    if (!this.convProgress.has(jarUrl)) this.convProgress.set(jarUrl, { startedAt: Date.now(), attached: false });
+    const startedAt = Date.now();
+    if (!this.convProgress.has(jarUrl)) this.convProgress.set(jarUrl, { startedAt, attached: false, stage: 'download' });
+    this.host?.logger.i(`jvm-bridge jar 准备开始（key=${key.slice(0, 8)}，下载阶段）`);
     try {
-      return await this.doConvertStage(jarUrl, key, target);
+      const output = await this.doConvertStage(jarUrl, key, target);
+      this.host?.logger.i(`jvm-bridge jar 准备完成（key=${key.slice(0, 8)}，总耗时 ${Date.now() - startedAt}ms）`);
+      return output;
     } finally {
       this.convProgress.delete(jarUrl);
     }
@@ -616,6 +619,7 @@ export class JarSpiderBridge {
       attempts,
       retryWithCookie: true, // jinenge：首次 403 种 Cookie，再用同一 UA 请求即返回真 jar
       timeoutMs: 60000,
+      totalTimeoutMs: 120000,
       buffer: 2, // 沿用 jar 路径既有的 base64 语义（由 fetchWithDisguise 归一成 Buffer）
       onTry: (t) => {
         const feat = [t.status ? `HTTP ${t.status}` : '', t.sniff ? `${t.sniff.kind} ${t.sniff.size}B` : '', t.reason || '']
@@ -629,6 +633,9 @@ export class JarSpiderBridge {
       throw new Error(`jar 下载失败：未取得有效 jar/dex（已尝试：${describeFailures(got.tries)}）`);
     }
     const jarBytes = got.buf;
+    const progress = this.convProgress.get(jarUrl);
+    this.host?.logger.i(`jvm-bridge jar 下载完成（key=${key.slice(0, 8)}，${jarBytes.length}B，耗时 ${progress ? Date.now() - progress.startedAt : 0}ms）`);
+    if (progress) progress.stage = 'convert';
     if (got.buf && got.used && got.used.label !== '默认 UA') {
       this.host?.logger.i(`jvm-bridge jar 按「${got.used.label}」重试成功（首次响应未通过 jar 校验）: ${jarUrl}`);
     }
@@ -674,7 +681,7 @@ export class JarSpiderBridge {
       this.host?.logger.i(
         `jvm-bridge 检测到该 jar 的后台转换仍在进行（pid=${lock.pid}，已 ${formatDuration(Date.now() - lock.startedAt)}）→ 接管等待`,
       );
-      this.convProgress.set(jarUrl, { startedAt: lock.startedAt, attached: true });
+      this.convProgress.set(jarUrl, { startedAt: lock.startedAt, attached: true, stage: 'convert' });
       const ok = await this.waitAttachedConversion(key, rawJar, target, lock);
       if (!ok) {
         throw new ConversionInFlightError(
@@ -1017,12 +1024,12 @@ export class JarSpiderBridge {
    * ★ 2026-09-27：某 jar 的转换进度（上层在「等待期」显示「已等 X」）。
    * @returns null = 当前没有转换在跑；attached = 正在接管上次会话遗留的后台转换
    */
-  conversionProgress(jarUrl: string): { elapsedMs: number; attached: boolean } | null {
+  conversionProgress(jarUrl: string): { elapsedMs: number; attached: boolean; stage: 'download' | 'convert' } | null {
     const url = normalizeJarUrl(jarUrl);
     if (!url) return null;
     const p = this.convProgress.get(url);
     if (!p) return null;
-    return { elapsedMs: Math.max(0, Date.now() - p.startedAt), attached: p.attached };
+    return { elapsedMs: Math.max(0, Date.now() - p.startedAt), attached: p.attached, stage: p.stage };
   }
 
   private dirJars(dir: string): string[] {
@@ -1185,6 +1192,18 @@ export class JarSpiderBridge {
     const url = normalizeJarUrl(jarUrl);
     if (!url || this.converted.has(url)) return null;
     return this.convertLocks.get(url) ?? null;
+  }
+
+  /** 同步读取仍在抑制窗口内的失败；失败不等于「正在准备」，过期后允许重新尝试。 */
+  conversionFailure(jarUrl: string): string {
+    const url = normalizeJarUrl(jarUrl);
+    const failed = this.convertFailures.get(url);
+    if (!failed) return '';
+    if (Date.now() - failed.at >= CONVERT_FAIL_TTL_MS) {
+      this.convertFailures.delete(url);
+      return '';
+    }
+    return failed.message;
   }
 
   /**
@@ -2136,12 +2155,16 @@ export class JarSpiderBridge {
   }
 
   /** 预热：下载+转换（导入配置后后台跑，避免首次点开卡住） */
-  async warmup(jarUrl: string): Promise<void> {
-    try {
-      await this.ensureConverted(jarUrl);
-    } catch (e) {
-      this.host?.logger.w(`jvm-bridge warmup 失败 ${jarUrl}: ${(e as Error).message}`);
-    }
+  warmup(jarUrl: string): Promise<void> {
+    const url = normalizeJarUrl(jarUrl);
+    const pending = this.warmupLocks.get(url);
+    if (pending) return pending;
+    if (this.conversionFailure(url)) return Promise.resolve();
+    const task = this.ensureConverted(url).then(() => undefined).catch((e) => {
+      this.host?.logger.w(`jvm-bridge warmup 失败 ${url}: ${(e as Error).message}`);
+    }).finally(() => this.warmupLocks.delete(url));
+    this.warmupLocks.set(url, task);
+    return task;
   }
 
   /** 终止所有存活 JVM 子进程 + 池（应用退出时调用，确保无残留进程/定时器） */
