@@ -1,7 +1,9 @@
 // src/renderer/pages/DetailPage.tsx — 详情页（返回键 + 播放源/集数/滚动记忆 + 回播放页可继续）
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { detailRouteParams } from '../../shared/detailWin';
 import { client } from '../api/client';
+import { openSearchWindow } from '../lib/searchWin';
 import BackButton from '../components/BackButton';
 import { isDetailWindow } from '../lib/detailWin';
 import { uiMem, schedulePersist } from '../lib/uiMemory';
@@ -28,7 +30,9 @@ export default function DetailPage({
 }: {
   onPlay: (url: string, name: string, fromKey: string, id: string, meta?: { pic?: string; remarks?: string; sourceName?: string; title?: string; vodId?: string; episodes?: Episode[]; epIndex?: number; flag?: string }) => void;
 }) {
-  const { key, id } = useParams<{ key: string; id: string }>();
+  const routerParams = useParams<{ key: string; id: string }>();
+  const location = useLocation();
+  const { key, id } = detailRouteParams(location.pathname) || routerParams;
   const [searchParams] = useSearchParams();
   const nav = useNavigate();
   /** ★ 2026-10-08（用户要求「详情页独立窗口」）：本页是否运行在独立详情窗口里（hash 带 dw=1）→ 返回=关窗 */
@@ -74,7 +78,8 @@ export default function DetailPage({
   const playGenRef = useRef(makeStaleGuard());
   /** 本次解析对应的「意图」（源|线路|集）：同一意图的重复点击仍按老行为忽略，避免慢源被连点两次解析 */
   const playIntentRef = useRef('');
-  const memKey = `${decodeURIComponent(key || '')}:${decodeURIComponent(id || '')}`;
+  // 原始 pathname 只解码一次；不要再次 decode 路由参数。
+  const memKey = `${key || ''}:${id || ''}`;
   /** ★ 2026-09-29：本会话已「无详情 → 自动全源搜索」跳过的 item（返回时不再重复跳） */
   const autoAggRef = useRef(AUTO_AGG_DONE.has(memKey));
   /** ★ 2026-09-24：展示用片名 —— 详情自带优先，缺失时用列表页带入的（立播等源详情不返回 vod_name） */
@@ -84,8 +89,11 @@ export default function DetailPage({
 
   useEffect(() => {
     if (!key || !id) return;
-    const k = decodeURIComponent(key);
-    const i = decodeURIComponent(id);
+    const k = key;
+    const i = id;
+    let alive = true;
+    setDetail(null);
+    autoAggRef.current = AUTO_AGG_DONE.has(memKey);
     setLoading(true);
     setErr('');
     playGenRef.current.next(); // ★ 换了一部片 → 上一条解析作废（并放开 busy，避免按钮被旧请求卡住）
@@ -99,6 +107,7 @@ export default function DetailPage({
     client
       .detail({ key: k, ids: [i] })
       .then((d) => {
+        if (!alive) return;
         setDetail(d);
         if (d && d.flags.length) {
           // 恢复上次选择的播放源/集数（若仍在范围）
@@ -112,8 +121,9 @@ export default function DetailPage({
           uiMem.detail.set(memKey, { flag: f, ep: e, scrollTop: mem?.scrollTop ?? 0 });
         }
       })
-      .catch((e) => setErr((e as Error).message))
-      .finally(() => setLoading(false));
+      .catch((e) => { if (alive) setErr((e as Error).message); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; playGenRef.current.next(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, id]);
 
@@ -254,7 +264,10 @@ export default function DetailPage({
     schedulePersist();
     // 若独立播放器窗口已打开，同步切换过去（用户在主窗口选集页点集 → 播放器跟着换集）
     void client.playerIsOpen().then((r) => {
-      if (r.open) void client.playerSwitchEp(i).catch(() => undefined);
+      if (r.open && detail && key) void client.playerSwitchEp({
+        key, vodId: detail.id || id || '', flag,
+        episodes: detail.episodes[flag] || [], epIndex: i,
+      }).catch(() => undefined);
     }).catch(() => undefined);
   }
 
@@ -282,7 +295,7 @@ export default function DetailPage({
     // ★ parse=1 的地址要走「解析接口 → 隐藏窗口嗅探」，可能耗时十几秒 → 按钮上屏进度，别让用户以为没反应
     setBusy(true);
     try {
-      const r = await client.play({ key: decodeURIComponent(key!), flag, id: target.url });
+      const r = await client.play({ key: key!, flag, id: target.url });
       if (!playGenRef.current.isCurrent(gen)) return; // 过期结果：不要顶掉用户后来选的播放
       // ★ 2026-09-29：网盘专用链接未绑定 Cookie → 弹绑定窗口（预选该网盘）；绑定成功后自动重播
       if (r.needDriveCookieBind) {
@@ -297,7 +310,7 @@ export default function DetailPage({
       }
       // ★ 网盘源集名过长 → 播放器标题/历史记录统一用「第N集 · 体积」
       const label = formatEpisodeLabel(target.name, ep);
-      onPlay(r.url || target.url, `${displayName} - ${label}`, decodeURIComponent(key!), decodeURIComponent(id!), {
+      onPlay(r.url || target.url, `${displayName} - ${label}`, key!, id!, {
         pic: detail.pic,
         remarks: label,
         sourceName: displayName ? displayName.split(' - ')[0] : undefined,
@@ -343,7 +356,7 @@ export default function DetailPage({
     return (detail?.des || '').trim();
   })();
   /** 点击演员 / 推荐影片 → 走 /search 路由对该关键词执行一次全源搜索（HomePage 的 ?agg= 入口） */
-  const goSearch = (kw: string): void => { nav(`/search?agg=${encodeURIComponent(kw)}`); };
+  const goSearch = (kw: string): void => { void openSearchWindow(kw).catch((e) => setErr(String(e))); };
 
   /**
    * ★ 2026-09-29（用户报「sun.json 有分类/封面，点进去无详情」- 通解）：
@@ -358,7 +371,7 @@ export default function DetailPage({
     if (!kw) return;
     autoAggRef.current = true;
     AUTO_AGG_DONE.add(memKey);
-    const t = setTimeout(() => nav(`/search?agg=${encodeURIComponent(kw)}`, { replace: true }), 1200);
+    const t = setTimeout(() => goSearch(kw), 1200);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, detail, detailName]);

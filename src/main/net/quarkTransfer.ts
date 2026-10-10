@@ -219,7 +219,8 @@ async function pickShareFile(
   // 默认分页 fetch：走真实 API（size=50，翻 offset 枚举全量；"第一页 50 条"是本次 Bug
   //   「点第6集落第29集」根因之一——目标集 fid 在 50 条之后匹配不到）
   const defaultFetcher: ShareListFetcher = async (pdirFid, offset) => {
-    const d = await jget(`${BASE}/share/sharepage/detail${Q}&stoken=${encodeURIComponent(stoken)}&pwd_id=${encodeURIComponent(pwdId)}&pdir_fid=${pdirFid}&size=50&offset=${offset}`, cookie);
+    const d = await jget(`${BASE}/share/sharepage/detail${Q}&stoken=${encodeURIComponent(stoken)}&pwd_id=${encodeURIComponent(pwdId)}&pdir_fid=${pdirFid}&_size=50&_page=${Math.floor(offset / 50) + 1}&size=50&offset=${offset}`, cookie);
+    if (d.status !== 200 || d.json?.code !== 0) throw new Error(`分享列表失败 ${d.status}/${d.json?.code ?? '-'}（${String(d.json?.message || '').slice(0, 80)}）`);
     const list = d.json?.data?.list;
     return Array.isArray(list) ? list : [];
   };
@@ -610,7 +611,7 @@ async function listDirFiles(cookie: string, pdirFid: string): Promise<any[]> {
   const out: any[] = [];
   const seen = new Set<string>();
   for (let off = 0; off < 3; off++) {
-    const fl = await jget(`${BASE}/file${QF}&pdir_fid=${pdirFid}&size=50&offset=${off * 50}`, cookie);
+    const fl = await jget(`${BASE}/file${QF}&pdir_fid=${pdirFid}&_size=50&_page=${off + 1}&size=50&offset=${off * 50}`, cookie);
     const list = fl.json?.data?.list;
     if (!Array.isArray(list) || list.length === 0) break;
     for (const f of list) {
@@ -646,6 +647,10 @@ export function isQuarkSharePlay(id: string): boolean {
  * 且 `quarkTransferInner` 的 share/token 请求此前 passcode 恒空串 → **带码分享必失败**。
  */
 export function extractQuarkShare(text: string): { sId: string; passcode: string } | null {
+  try {
+    const obj = JSON.parse(text);
+    if (typeof obj.sId === 'string' && /^[a-z0-9]+$/i.test(obj.sId)) return { sId: obj.sId, passcode: String(obj.passcode || obj.pwd || '') };
+  } catch { /* URL/text */ }
   let cur = String(text || '');
   for (let i = 0; i < 3 && cur; i++) {
     const m = /pan\.quark\.cn\/s\/([0-9a-zA-Z]+)/i.exec(cur);

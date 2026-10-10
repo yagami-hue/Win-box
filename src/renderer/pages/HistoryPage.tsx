@@ -13,7 +13,7 @@ import { pickCover, preloadImage } from '../lib/coverPick';
 import { wrapImageUrlForRelay } from '../../shared/driveProvider';
 // ★ 2026-09-30（用户要求）：显式绑定第三方播放器时，从历史直接由它续播（起播位置作为启动参数）
 import { playVodExternal } from '../lib/externalPlay';
-// ★ 2026-10-08（用户要求）：外观开关「详情页独立窗口」——详情打开方式统一入口
+// 所有详情统一由独立窗口展示。
 import { openDetailRoute } from '../lib/detailWin';
 
 /** 单次补图最多查询多少个不同片名（与首页同口径，避免一次性打爆 TMDB 限流） */
@@ -223,9 +223,7 @@ export default function HistoryPage() {
     //   故点开前重读该 url 的最新记录（updatedAt 最新），拿不到才回退快照。
     const latest = loadLatestWatch(it.url) || it;
     const base = (latest.name || '').split(' - ')[0] || latest.name || '';
-    // ★ 2026-09-29（用户报「切换订阅/接口后，历史播放找不到直接无法播放」）：
-    //   历史记录自带来源 key（sourceKey）→ 播放前**先把当前源切回该接口**再解析播放。
-    //   `setActiveSource` 是 `ui` 类变更（宿主立即返回，不清缓存/不重跑源），开销可忽略。
+    // 历史来源 key 只用于本次解析，不修改点播页已选好的展示源。
     const sk = (latest.sourceKey || '').trim();
     setNotice('');
     void (async () => {
@@ -233,8 +231,7 @@ export default function HistoryPage() {
         try {
           const cfg = await client.cfgGet();
           const exists = (cfg.sources || []).some((s) => s.key === sk);
-          if (exists && cfg.ui?.activeSourceKey !== sk) await client.cfgSetActiveSource(sk);
-          else if (!exists) setNotice(`历史来源「${latest.sourceName || sk}」已不在当前订阅中，已按现有配置尝试播放`);
+          if (!exists) setNotice(`历史来源「${latest.sourceName || sk}」已不在当前订阅中，已按现有配置尝试播放`);
         } catch {
           /* 读取/切换失败不阻塞播放（仍按记录里的 key 解析） */
         }
@@ -261,7 +258,7 @@ export default function HistoryPage() {
         refresh(); // 外部播放器已拉起：历史本条（及进度保留）立即反映到列表
         return;
       }
-      void client.playerOpen({
+      await client.playerOpen({
         key: latest.sourceKey || '',
         flag: latest.flag || '',
         episodes: [{ name: latest.remarks || '播放', url: latest.rawUrl || latest.url }],
@@ -280,12 +277,11 @@ export default function HistoryPage() {
           id: latest.vodId,
         },
       });
-    })();
+    })().catch((e) => setNotice(`历史播放失败：${e instanceof Error ? e.message : String(e)}`));
   };
 
   const openDetail = (it: WatchHistory) => {
-    // ★ 2026-10-08（用户要求「详情页独立窗口」）：与列表点片同一入口（外观开关打开时开独立窗口）
-    if (it.sourceKey && it.vodId) void openDetailRoute((to) => nav(to), it.sourceKey, it.vodId);
+    if (it.sourceKey && it.vodId) void openDetailRoute((to) => nav(to), it.sourceKey, it.vodId).catch((e) => setNotice(`打开详情失败：${e instanceof Error ? e.message : String(e)}`));
     else play(it);
   };
 
@@ -344,7 +340,7 @@ export default function HistoryPage() {
           <button className="linkbtn muted-btn" onClick={() => setNotice('')}>关闭</button>
         </div>
       )}
-      <div className="content" style={{ padding: '12px 14px' }}>
+      <div className="content hist-content">
         {items.length === 0 ? (
           <div className="empty" style={{ marginTop: 40 }}>暂无观看记录 —— 播放任意资源后会自动出现在这里</div>
         ) : (

@@ -635,6 +635,10 @@ describe('SourceViewModel — type3 play 归一化（P1-2 normalizeSpiderPlay �
   });
 
   it('proxy://do=live... → 本地代理路由（与安卓同端口同路由）', async () => {
+    const page = await playVia(JSON.stringify({ parse: 0, url: 'video://https://live.example/channel.html' }));
+    expect(page).toMatchObject({ parse: 1, url: 'https://live.example/channel.html' });
+    const stream = await playVia(JSON.stringify({ parse: 0, url: 'video://https://live.example/live.m3u8' }));
+    expect(stream).toMatchObject({ parse: 0, url: 'https://live.example/live.m3u8' });
     const r = await playVia(JSON.stringify({ url: 'proxy://do=live&type=txt&ext=1' }));
     expect(r).toMatchObject({ parse: 0, url: `${LOCAL_PROXY_BASE}/proxy?do=live&type=txt&ext=1` });
   });

@@ -21,3 +21,11 @@ export function detailWindowRoute(key: string, id: string, query?: string): stri
 export function isDetailWinHash(hash: string): boolean {
   return /[?&]dw=1(?:&|$)/.test(String(hash || ''));
 }
+
+/** 从原始 pathname 解码一次，避开路由库对文字 %2F 的二次替换。 */
+export function detailRouteParams(pathname: string): { key: string; id: string } | null {
+  const match = /^\/detail\/([^/]+)\/([^/]+)$/.exec(pathname);
+  if (!match) return null;
+  try { return { key: decodeURIComponent(match[1]), id: decodeURIComponent(match[2]) }; }
+  catch { return null; }
+}

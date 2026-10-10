@@ -66,7 +66,7 @@ const WHEEL_DB: Array<[string, string]> = [
   ['lxml', 'lxml-4.9.2-cp311-cp311-win_amd64.whl'],
   ['requests', 'requests-2.31.0-py3-none-any.whl'],
   ['urllib3', 'urllib3-1.26.18-py2.py3-none-any.whl'],
-  ['certifi', 'certifi-2023.7.22-py2.py3-none-any.whl'],
+  ['certifi', 'certifi-2026.7.22-py3-none-any.whl'],
   ['charset_normalizer', 'charset_normalizer-3.2.0-py3-none-any.whl'],
   ['idna', 'idna-3.4-py3-none-any.whl'],
 ];
@@ -197,6 +197,19 @@ describe('JarSpiderBridge.prewarmPythonRuntime — 后台预热（★ 2026-09-24
     await bridge.prewarmPythonRuntime();
     expect(existsSync(join(pyDir, '3.11.6', 'runner.py'))).toBe(true);
   });
+
+  it('existing runtime refreshes the old CA bundle before it becomes ready', async () => {
+    const { jvmDir, pyDir } = tmpCache();
+    const host = makeHost(fakeEmbedZip());
+    const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, host);
+    await bridge.prewarmPythonRuntime();
+    const marker = join(pyDir, '3.11.6', 'Lib', 'site-packages', '.certifi-2026.7.22');
+    rmSync(marker);
+    expect(bridge.pyRuntimeReady()).toBe(false);
+    await bridge.prewarmPythonRuntime();
+    expect(bridge.pyRuntimeReady()).toBe(true);
+    expect(existsSync(marker)).toBe(true);
+  });
 });
 
 describe('JarSpiderBridge.callPython — spawn python.exe runner.py', () => {
@@ -209,12 +222,13 @@ describe('JarSpiderBridge.callPython — spawn python.exe runner.py', () => {
     });
     const bridge = new JarSpiderBridge({ jvmDir, cacheDir: join(jvmDir, 'converted'), pyRuntimeDir: pyDir }, makeHost(fakeEmbedZip()));
 
-    const out = await bridge.callPython('C:/cache/spider/py/abc.py', 'Spider', 'homeContent', ['{"siteUrl":"https://s"}']);
+    const out = await bridge.callPython('C:/cache/spider/py/abc.py', 'Spider', 'homeContent', ['{"siteUrl":"https://s"}'], undefined, 'live 源');
     expect(calls.length).toBe(1);
     expect(calls[0].exe).toBe(join(pyDir, '3.11.6', 'python.exe'));
     expect(calls[0].argv[0]).toBe(join(pyDir, '3.11.6', 'runner.py'));
     expect(calls[0].argv.slice(1)).toEqual(['C:/cache/spider/py/abc.py', 'Spider', 'homeContent', '{"siteUrl":"https://s"}']);
     expect(calls[0].opts.env?.PYTHONIOENCODING).toBe('utf-8');
+    expect(calls[0].opts.env?.WINBOX_PY_PROXY).toBe('http://127.0.0.1:9978/proxy?do=py&key=live%20%E6%BA%90');
     expect(out).toBe('');
   });
 

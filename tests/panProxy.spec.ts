@@ -389,14 +389,16 @@ describe('SpiderHost：do=pan → 原生解链', () => {
     );
   });
 
-  it('★ 2026-10-09：旧 -1 形态 do=pan + 端口已知 + 预检通过 → 同样改写 /proxy/<port>', async () => {
+  it('夸克即使 JVM 可用也走原生方案，不请求 jar 预检', async () => {
     const pan = 'http://127.0.0.1:-1/proxy?do=pan&type=2&site=quark&shareId=18d50f449c22&fileId=6174bbf9c9d849329e46bbb9554464b2&fileToken=';
     const { host, key } = makeHost(pan, { quark: 'q=1' });
     (host as unknown as { vm: { proxyPortFor: unknown } }).vm.proxyPortFor = () => 19974;
-    (host as unknown as { probeSelfResolveUrl: (u: string) => Promise<boolean> }).probeSelfResolveUrl = async () => true;
+    const probe = vi.fn(async () => true);
+    (host as unknown as { probeSelfResolveUrl: (u: string) => Promise<boolean> }).probeSelfResolveUrl = probe;
     const r = await host.play(key, '夸克无限#2', 'ep-j3');
     expect(r.parse).toBe(0);
-    expect(r.url).toBe('http://127.0.0.1:9978/proxy/19974?do=pan&type=2&site=quark&shareId=18d50f449c22&fileId=6174bbf9c9d849329e46bbb9554464b2&fileToken=');
+    expect(r.url).toContain('/play?');
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it('★ 2026-10-09：9978 do=pan 地址但端口未知 → 回退原生解链（fs_id → filemetas）', async () => {

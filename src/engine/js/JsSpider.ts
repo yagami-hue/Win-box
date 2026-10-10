@@ -101,7 +101,7 @@ export class JsSpider extends Spider {
   }
 
   override async homeVideoContent(): Promise<string> {
-    return this.callStr(['homeVideoContent', 'homeVid'], [], TIMEOUT_HOME);
+    return this.callStr(['homeVideoContent', 'homeVod', 'homeVid'], [], TIMEOUT_HOME);
   }
 
   override async categoryContent(

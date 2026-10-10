@@ -212,6 +212,11 @@ export function buildMpvArgs(o: BuildMpvArgsOptions): string[] {
     '--force-window=yes',
     '--keep-open=yes',
     '--hwdec=auto-safe',
+    // gpu-next/libplacebo fails FBO allocation on some integrated GPUs after switching sources.
+    '--vo=gpu',
+    '--gpu-api=d3d11',
+    '--gpu-context=d3d11',
+    '--d3d11-feature-level=11_0',
     '--osc=no',
     '--input-default-bindings=no',
     '--input-vo-keyboard=no',

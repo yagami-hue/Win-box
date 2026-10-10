@@ -1,6 +1,7 @@
 import { NavLink, Outlet, Route, Routes, useNavigate } from 'react-router-dom';
 import TitleBar from './components/TitleBar';
 import SearchPanel from './components/SearchPanel';
+import PageErrorBoundary from './components/PageErrorBoundary';
 import SourcePicker from './components/SourcePicker';
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
@@ -20,8 +21,9 @@ import { loadUiMemory, sameEpProgress, saveUiMemory, markHistoryOnlyWriter } fro
 // ★ 2026-09-30（用户要求）：显式绑定第三方播放器时点播直接由它播放（详见 lib/externalPlay.ts）
 import { playVodExternal } from './lib/externalPlay';
 import { useShowDiscover } from './lib/uiPrefs';
-// ★ 2026-10-08（用户要求）：外观开关「详情页独立窗口」——详情打开方式统一入口 + 本窗口身份判定
+// 详情打开方式统一入口 + 固定窗口身份判定。
 import { isDetailWindow, openDetailRoute } from './lib/detailWin';
+import { isSearchWindow, openSearchWindow } from './lib/searchWin';
 import { useTheme } from './lib/theme';
 import { client } from './api/client';
 import type { Episode } from '../shared/types';
@@ -31,7 +33,7 @@ import type { Episode } from '../shared/types';
  *   若整份写盘会把主窗口已清掉的状态复活（与播放器窗口同款问题，见 PlayerPage 顶部那段）。
  *   这里在**模块求值期**声明：本窗口只写历史与进度（任何页面挂载前的第一件事）。
  */
-if (isDetailWindow()) markHistoryOnlyWriter();
+if (isDetailWindow() || isSearchWindow()) markHistoryOnlyWriter();
 
 const NAV = [
   // ★ 2026-09-24（用户定稿）：**发现放第一位，且打开软件默认进发现页**；「点播」= 源主页，移到 /home
@@ -139,8 +141,8 @@ const DB_FAB_ICONS: Record<'discover' | 'vod' | 'history' | 'config', React.Reac
   // 配置 = 齿轮
   config: (
     <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-      <circle cx="10" cy="10" r="2.7" />
-      <path d="M10 2.5v1.9M10 15.6v1.9M2.5 10h1.9M15.6 10h1.9M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" />
+      <path d="m8.3 2.5-.5 1.8-1.5.9-1.8-.5-1.7 2.9 1.3 1.3v2.2l-1.3 1.3 1.7 2.9 1.8-.5 1.5.9.5 1.8h3.4l.5-1.8 1.5-.9 1.8.5 1.7-2.9-1.3-1.3V8.9l1.3-1.3-1.7-2.9-1.8.5-1.5-.9-.5-1.8Z" strokeLinejoin="round" />
+      <circle cx="10" cy="10" r="2.6" />
     </svg>
   ),
 };
@@ -154,7 +156,7 @@ function PageShell() {
   const loc = useLocation();
   return (
     <div className="page-anim" key={loc.pathname}>
-      <Outlet />
+      <PageErrorBoundary><Outlet /></PageErrorBoundary>
     </div>
   );
 }
@@ -225,7 +227,7 @@ function AppShell() {
   const goBack = (): void => {
     if (window.history.length > 1) nav(-1);
     // ★ 2026-10-08：独立详情窗口没有可退的历史 → 返回 = 关窗（更符合「点开一个独立窗口」的直觉）
-    else if (isDetailWindow()) void client.winClose();
+    else if (isDetailWindow() || isSearchWindow()) void client.winClose();
     else nav(backHome, { replace: true });
   };
   // 首次启动免责声明弹窗：已同意过（localStorage 标记）则不再弹出
@@ -307,8 +309,11 @@ function AppShell() {
   // ★ 2026-10-08（用户要求「详情页独立窗口」）：详情窗口复用 —— 主进程在已开的详情窗口上再点片子时
   //   发 `win:navigate`，本窗口切到新路由（不新开窗口、不整页重载，窗口位置/尺寸保留）。
   useEffect(() => {
-    if (!isDetailWindow()) return;
-    return client.winOnNavigate((route) => nav(route));
+    if (!isDetailWindow() && !isSearchWindow()) return;
+    const off = client.winOnNavigate((route) => nav(route));
+    // 首次挂载完成后通知主进程，补发加载期间收到的最新路由。
+    const timer = window.setTimeout(() => { void client.winRouteReady().catch(() => undefined); }, 0);
+    return () => { window.clearTimeout(timer); off(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -405,7 +410,7 @@ function AppShell() {
         epIndex: idx,
         title: base,
         subtitleTitle: base, // ★ 供字幕检索的剧名副名（独立于集名，避免从集名反推失败）
-        lastUrl: target?.url || _url,
+        lastUrl: _url,
         lastName: target ? `${base} - ${target.name}` : name,
         meta: {
           pic: meta?.pic,
@@ -495,13 +500,13 @@ function AppShell() {
    *   （若只放 `/detail` 一条路由，这些跳转会落空白页；页面自身的 topbar 提供各自导航）。
    *   本窗口身份由 hash 的 `dw=1` 决定（见 lib/detailWin.ts）：只写历史/进度、返回=关窗。
    */
-  if (isDetailWindow()) {
+  if (isDetailWindow() || isSearchWindow()) {
     return (
       <div className="app pwin">
         {disclaim && DisclaimerModal}
         <main className="main">
           {/* 无边框窗口必须有可拖拽 + 关闭的标题栏（页面自身 topbar 只提供返回/关闭语义） */}
-          <TitleBar title="影片详情" />
+          <TitleBar title={isSearchWindow() ? '搜索结果' : '影片详情'} />
           {routesNode}
         </main>
       </div>

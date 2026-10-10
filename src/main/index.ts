@@ -83,6 +83,7 @@ proxy.onSpeed = pushSpeed;
 torrent.onSpeed = pushSpeed;
 // ★ 2026-09-26：壳/蜘蛛的宿主代理（`/proxy/<jvmPort>?do=proxy&key=…`）被访问 → 钉住那个 JVM
 proxy.onSpiderProxy = (port) => host.pinSpiderProxy(port);
+proxy.onPythonProxy = (key, params) => host.pythonProxy(key, params);
 // ★ 2026-09-29：`/bt/<hash>/<idx>` 取流口（Range + piece 门控 + 本地读盘）
 proxy.bt = torrent;
 
@@ -98,6 +99,17 @@ function isDev(): boolean {
 // no-sandbox / disable-dev-shm-usage 仍保留（子进程沙箱相关，与渲染无关）。
 app.commandLine.appendSwitch('no-sandbox');
 app.commandLine.appendSwitch('disable-dev-shm-usage');
+
+// 原生崩溃此前没有应用日志；记录进程类型/退出码，不记录资源 URL 或凭据。
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('render-process-gone', (_e, details) => {
+    fileLogger.w(`renderer-gone wc=${contents.id} reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  contents.on('unresponsive', () => fileLogger.w(`renderer-unresponsive wc=${contents.id}`));
+});
+app.on('child-process-gone', (_event, details) => {
+  fileLogger.w(`child-process-gone type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
+});
 
 function createWindow(): void {
   // 默认跟随系统亮暗（Mica 背景会随之切换深浅）
@@ -194,7 +206,7 @@ app.whenReady().then(async () => {
   // ★ 2026-10-09：构建标记 —— 日志排障第一行就能确认「跑的是哪只构建」。
   //   背景：同版本号覆盖安装时用户日志无法区分新旧产物（1.20.0 两轮都叫 1.20.0），
   //   此标记随每轮 main 改动手工递增（含当轮关键词，grep 即证）。
-  fileLogger.i('build: 20261009.10 baidu-session-loader (selected shared file / JVM affinity / isolated JAR fallback / Context-TCCL / relay failure handling)');
+    fileLogger.i('build: 20261010.4 search-window-episode-context (independent search / exact route IDs / history browse isolation / episode line context / HTML media / Quark native / local Python / MPV lifecycle)');
 
   try {
     await proxy.start();

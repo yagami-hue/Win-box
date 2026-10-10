@@ -14,6 +14,7 @@ import { useTheme } from '../lib/theme';
 import { wrapImageUrlForRelay, needsDriveBind } from '../../shared/driveProvider';
 import { pickCover, preloadImage } from '../lib/coverPick';
 import DriveBindModal from '../components/DriveBindModal';
+import { isSearchWindow, openSearchWindow } from '../lib/searchWin';
 
 type SortClassView = { id: string; name: string; flag?: string; filters?: FilterGroup[] };
 
@@ -493,7 +494,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         }
         // ★ 搜索 → 详情 → 返回：恢复上次搜索结果界面（不重新浏览首页）
         const memSearch = uiMem.home.search;
-        if (memSearch && memSearch.aggMode) {
+        if (isSearchWindow() && memSearch && memSearch.aggMode) {
           applySearchMem(memSearch);
           const pick = pickSource();
           if (pick) {
@@ -553,13 +554,17 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
      *   内存不是这个词（换词 / 从别处跳来 / 重启后）才真正发起一次搜索。
      */
     const mem = uiMem.home.search;
-    if (mem && mem.aggMode && mem.agg && mem.wd === aggParam) {
+    if (isSearchWindow() && mem && mem.aggMode && mem.agg && mem.wd === aggParam) {
       applySearchMem(mem);
       return;
     }
     setWd(aggParam);
     setSearchAllSources(true);
-    requestAnimationFrame(() => { void doSearch(false, aggParam, true); });
+    const frame = requestAnimationFrame(() => { void doSearch(false, aggParam, true); });
+    return () => {
+      cancelAnimationFrame(frame);
+      searchGen.current.next();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aggParam]);
 
@@ -773,7 +778,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    */
   function syncSearchUrl(term: string) {
     if (location.pathname !== '/search') return;
-    setSearchParams(term ? { agg: term } : {}, { replace: true });
+    setSearchParams(term ? { agg: term, ...(isSearchWindow() ? { sw: '1' } : {}) } : {}, { replace: true });
   }
 
   /** 恢复一份保存的搜索态（只读内存，不发起任何请求） */
@@ -805,6 +810,10 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
   async function doSearch(force = false, termOverride?: string, forceAllScope?: boolean) {
     const term = (termOverride ?? wd).trim();
     if (!term) return;
+    if (!isSearchWindow()) {
+      try { await openSearchWindow(term); } catch (e) { setErr(String(e)); }
+      return;
+    }
     const allScope = forceAllScope ?? searchAllSources;
     const k = keyRef.current;
     /**
@@ -907,12 +916,14 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
           aggRetryCount.current = 0;
         }
       } catch (e) {
-        setErr(`聚合搜索失败：${(e as Error).message}`);
+        if (searchGen.current.isCurrent(gen)) setErr(`聚合搜索失败：${(e as Error).message}`);
       } finally {
         if (flushTimer) clearTimeout(flushTimer);
         off();
-        setAggProgress(null);
-        setLoading(false);
+        if (searchGen.current.isCurrent(gen)) {
+          setAggProgress(null);
+          setLoading(false);
+        }
       }
       return;
     }
@@ -1025,7 +1036,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
    *   detailContent 为空或仅简介）⇒ 点封面**不进详情页**，改成拿片名做一次全源聚合搜索，
    *   让用户直接换到「能出剧集」的源。非豆瓣源保持原行为（进详情）。
    */
-  const goAggSearch = (name: string): void => { nav(`/search?agg=${encodeURIComponent(name)}`); };
+  const goAggSearch = (name: string): void => { void openSearchWindow(name).catch((e) => setErr(String(e))); };
   /**
    * ★ 2026-09-30（用户报「其他接口的盘搜类型源搜索结果看不了内容 → 无法正常展示详情」）：
    * 展开**文件夹条目**（`vod_tag=folder`）：盘搜/网盘族源的搜索结果不是片子，而是「夸克 (92个)」这类
@@ -1182,7 +1193,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
         * ★ 2026-09-24（用户定稿）：三套皮肤（网飝 / 哔哔 / 大果）的顶栏都已自带「全源搜索 + 换源」——
         *   浏览态整行不显示（避免重复）；仅「全源搜索结果态」保留（需要「返回浏览」出口与条数状态）。
         */}
-      {aggMode && (
+      {aggMode && !isSearchWindow() && (
       <div className="topbar">
         {folder ? (
           // ★ 2026-09-30：文件夹视图的出口 —— 回到上一层搜索结果（不重跑搜索；无快照时命中搜索缓存）
@@ -1202,6 +1213,7 @@ export default function HomePage({ onOpenDetail }: { onOpenDetail: (key: string,
       </div>
       )}
       <div className="content" ref={contentRef}>
+        {isSearchWindow() && folder && <button style={{ marginBottom: 12 }} onClick={exitFolder}>← 返回搜索结果</button>}
         {err && <div className="err" style={{ marginBottom: 10 }}>{err}</div>}
         {!err && fallback && !aggMode && (
           <div className="banner" style={{ borderLeftColor: 'var(--accent-2)', marginBottom: 12 }}>

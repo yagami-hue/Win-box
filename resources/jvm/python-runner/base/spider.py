@@ -10,6 +10,7 @@
 from urllib.parse import quote
 import json
 import re
+import os
 
 import requests
 import urllib3  # noqa: F401  与源内 `import urllib3` 对齐（可选，装了即用）
@@ -96,7 +97,7 @@ class Spider:
         return json.dumps(o, ensure_ascii=False)
 
     def getProxyUrl(self, local=True):
-        return '%s?do=py' % self._proxy_base()
+        return os.environ.get('WINBOX_PY_PROXY') or '%s/proxy?do=py' % self._proxy_base()
 
     def _proxy_base(self):
         return 'http://127.0.0.1:9978'

@@ -473,8 +473,8 @@ export function saveUiMemory() {
   // 播放器窗口：浏览态（home/detail）沿用盘里主窗口写的那份，绝不用自己的旧快照覆盖（见 markHistoryOnlyWriter）
   const keep = prev as { home?: unknown; detail?: unknown } | null;
   // ★ 2026-09-28：home 取「更新的那份」——播放器窗口不再把自己的旧快照（含上一次搜索态）写回去
-  const home = pickHomeForSave(uiMem.home, keep?.home, historyOnlyWriter);
-  const detail = historyOnlyWriter && Array.isArray(keep?.detail) ? keep.detail : Array.from(uiMem.detail.entries());
+  const home = historyOnlyWriter ? (normalizeHome(keep?.home) || { key: '', tid: '', pg: 1, scrollTop: 0, filters: {}, search: null }) : pickHomeForSave(uiMem.home, keep?.home, false);
+  const detail = historyOnlyWriter ? (Array.isArray(keep?.detail) ? keep.detail : []) : Array.from(uiMem.detail.entries());
   const tombstones = Array.from(uiMem.deleted.entries());
   const data = {
     home,
@@ -506,8 +506,10 @@ export function loadUiMemory() {
     if (!raw) return;
     const data = JSON.parse(raw);
     // ★ 2026-09-28：浏览态从盘上刷新，搜索态取 updatedAt 更新的一方（防盘上旧搜索覆盖内存里的新搜索）
-    uiMem.home = mergeHomeOnLoad(uiMem.home, data.home);
-    uiMem.detail = new Map(data.detail || []);
+    if (!historyOnlyWriter) {
+      uiMem.home = mergeHomeOnLoad(uiMem.home, data.home);
+      uiMem.detail = new Map(data.detail || []);
+    }
     uiMem.playTime = new Map(data.playTime || []);
     // ★ 2026-09-28：墓碑一起载入（本窗口内存 ∪ 盘上），再按墓碑过滤历史 —— 否则"删了再切回本页"会回弹
     uiMem.deleted = unionTombstones(uiMem.deleted, data.deleted);

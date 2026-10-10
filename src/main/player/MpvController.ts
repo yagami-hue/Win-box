@@ -51,7 +51,7 @@ export class MpvController {
   private session = 0;
   private target: BrowserWindow | null = null;
   private pushTimer: NodeJS.Timeout | null = null;
-  private quitTimer: NodeJS.Timeout | null = null;
+  private retiring = new Set<ChildProcess>();
   private pipeSeq = 0;
   private lineBuf = '';
   /** 本次会话是否已挂上外挂字幕（换字幕前先 sub-remove） */
@@ -93,7 +93,14 @@ export class MpvController {
     const url = String(opts?.url || '').trim();
     if (!url) throw new Error('播放地址为空');
 
-    this.stop(); // 单会话：旧进程先退
+    this.stop();
+    const reservation = this.session;
+    // A retiring process must release the embedded HWND before another VO attaches to it.
+    await Promise.all([...this.retiring].map(proc => new Promise<void>(resolve => {
+      if (proc.exitCode !== null || proc.signalCode !== null) { resolve(); return; }
+      proc.once('exit', () => resolve());
+    })));
+    if (reservation !== this.session) return { session: reservation, path: st.path };
     this.session += 1;
     const session = this.session;
     this.target = win;
@@ -132,7 +139,9 @@ export class MpvController {
     proc.stdout?.on('data', onOut);
     proc.stderr?.on('data', onOut);
 
-    const sock = await this.connectPipe(pipe, CONNECT_TIMEOUT_MS);
+    let sock: Socket;
+    try { sock = await this.connectPipe(pipe, CONNECT_TIMEOUT_MS); }
+    catch (e) { if (proc === this.proc) this.stop(); throw e; }
     // 连接期间可能已被 stop/换集 → 丢弃这条管道
     if (session !== this.session || proc !== this.proc) {
       try {
@@ -196,10 +205,6 @@ export class MpvController {
       clearTimeout(this.pushTimer);
       this.pushTimer = null;
     }
-    if (this.quitTimer) {
-      clearTimeout(this.quitTimer);
-      this.quitTimer = null;
-    }
     try {
       sock?.write(mpvCmdLine(['quit']));
     } catch {
@@ -210,9 +215,9 @@ export class MpvController {
     } catch {
       /* ignore */
     }
-    if (proc && !proc.killed) {
-      this.quitTimer = setTimeout(() => {
-        this.quitTimer = null;
+    if (proc && !proc.killed && proc.exitCode === null && proc.signalCode === null) {
+      this.retiring.add(proc);
+      const quitTimer = setTimeout(() => {
         try {
           proc.kill();
         } catch {
@@ -220,10 +225,8 @@ export class MpvController {
         }
       }, QUIT_GRACE_MS);
       proc.once('exit', () => {
-        if (this.quitTimer) {
-          clearTimeout(this.quitTimer);
-          this.quitTimer = null;
-        }
+        clearTimeout(quitTimer);
+        this.retiring.delete(proc);
       });
     }
     this.state = initialKernelState();

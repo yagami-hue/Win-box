@@ -7,10 +7,11 @@
 //     KungFu404 的 token 文件、PushAgent 系蜘蛛推送的图片）；安卓侧由内置
 //     Local 蜘蛛从 assets/数据目录读出。桌面版必须实现同名路由，否则这些蜘蛛
 //     拿到 404 → 初始化失败 → 分类/首页空白。
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, validateHeaderValue, type IncomingMessage, type ServerResponse } from 'node:http';
 import { request as undiciRequest, Agent } from 'undici';
 import { readFileSync, existsSync, statSync, createReadStream } from 'node:fs';
 import { join, normalize, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { decodeUrlSafe } from '../../engine/util/base64';
 import type { Logger } from '../../shared/types';
 import { LOCAL_PROXY_BASE, LOCAL_PROXY_PORT } from '../../shared/constants';
@@ -22,6 +23,7 @@ import { mergeSetCookies, setCookieList, cookiePairOf } from '../net/cookieMerge
 import { purifyVodM3u8 } from '../../engine/util/m3u8Purify';
 import { parseBtRoute } from '../../engine/torrent/magnet';
 import { resolvePkgFile } from '../../engine/config/localPkg';
+import { HtmlMedia } from '../player/HtmlMedia';
 
 const agent = new Agent({ connect: { timeout: 30000 } });
 /** 出图中继专用（TMDB 图床经 DoH 可达；渲染层直连可能被 DNS 污染 → 图裂） */
@@ -68,6 +70,7 @@ const DETECT_HEAD_LEN = 128 * 1024;
 //   普通节点（dl-pc-zb 及非夸克源）保留 8 并发聚合（release65 验证：标准 206 + Content-Range，可靠提速）。
 
 export class LocalProxyServer {
+  private htmlMedia: HtmlMedia;
   private server?: ReturnType<typeof createServer>;
   /** 实时网速回调（KB/s）：主进程注入后即可把真实转发字节推给渲染层显示 */
   onSpeed?: (kbs: number) => void;
@@ -77,6 +80,7 @@ export class LocalProxyServer {
    *   key 只有那个 JVM 能解，所以这里要做一次本机转发；转发的同时通知池别回收它，否则播放中段断流。
    */
   onSpiderProxy?: (port: number) => void;
+  onPythonProxy?: (key: string, params: Record<string, string>) => Promise<unknown[]>;
   /** ★ 2026-09-29：BT 取流口（磁力 B；main/index.ts 注入 TorrentPlay；未注入 = /bt 一律 404） */
   bt?: BtStreamAccess;
   /**
@@ -93,6 +97,8 @@ export class LocalProxyServer {
    *   仅内存态（一次播放会话内有效），上限 20 条防无限增长。
    */
   private playCookieJar = new Map<string, string[]>();
+  /** 百度成功 CDN 跳转：按 dlink 和凭据隔离，Range 间复用；5 分钟过期、最多 32 项，仅内存。 */
+  private baiduPlayNodes = new Map<string, { url: string; expires: number }>();
 
   constructor(
     private logger: Logger,
@@ -109,7 +115,7 @@ export class LocalProxyServer {
      *   凭据只存在主进程加密存储里，**绝不进 URL**；不注入 = 不做 WebDAV 认证（旧行为）。
      */
     private davAuth?: (id: string) => string,
-  ) {}
+  ) { this.htmlMedia = new HtmlMedia(logger); }
 
   /** 把 jar 里记下的 Set-Cookie 键值合并进本次请求的 Cookie（无记录则原样返回） */
   private applyPlayCookieJar(provider: string, base: string): string {
@@ -150,6 +156,8 @@ export class LocalProxyServer {
   }
 
   stop(): void {
+    this.htmlMedia.stop();
+    this.baiduPlayNodes.clear();
     this.server?.close();
   }
 
@@ -247,6 +255,24 @@ export class LocalProxyServer {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const u = new URL(req.url || '', `http://127.0.0.1:${LOCAL_PROXY_PORT}`);
+      if ((u.pathname === '/proxy' || u.pathname === '/') && u.searchParams.get('do') === 'py') {
+        if (!this.onPythonProxy) throw new Error('Python 代理未就绪');
+        const params = Object.fromEntries(u.searchParams);
+        if (req.headers.range) params.Range = String(req.headers.range);
+        const result = await this.onPythonProxy(params.key || '', params);
+        const status = Number(result[0]);
+        if (!Number.isInteger(status) || status < 100 || status > 599) throw new Error('Python 代理状态无效');
+        const headers: Record<string, string> = { 'Access-Control-Allow-Origin': '*', 'Content-Type': safeResponseHeader('content-type', String(result[1] || 'application/octet-stream')) || 'application/octet-stream' };
+        if (result[3] && typeof result[3] === 'object') for (const [name, value] of Object.entries(result[3])) {
+          const safe = safeResponseHeader(name, value);
+          if (safe && !/^(connection|transfer-encoding|content-length)$/i.test(name)) headers[name] = safe;
+        }
+        const body = result[2] as { base64?: string } | string;
+        res.writeHead(status, headers);
+        res.end(typeof body === 'object' && body?.base64 ? Buffer.from(body.base64, 'base64') : String(body || ''));
+        return;
+      }
+      if (u.pathname.startsWith('/html/')) return await this.htmlMedia.handle(u, req, res);
       if (u.pathname.startsWith('/proxy/')) {
         return await this.spiderJvmProxy(u, req, res);
       }
@@ -616,7 +642,8 @@ private imgProxy(u: URL, res: ServerResponse): void {
     const range = req.headers['range'];
     if (range) headers['Range'] = Array.isArray(range) ? range[0] : String(range);
 
-    let resp = await this.openStream(target, headers);
+    let resp = await this.openPlayStream(target, headers);
+    let bufferedHead: Buffer = Buffer.alloc(0);
     // ★ 2026-09-28：网盘会话过期（UC 非会员尤甚）→ 上游 401/403 往往**同时下发刷新后的会话 Cookie**
     //   （`__puus`）。先把 Set-Cookie 记进会话 jar，再用刷新后的 Cookie 重试一次；仍失败才把失败透传。
     if (ck && (resp.status === 401 || resp.status === 403)) {
@@ -627,10 +654,31 @@ private imgProxy(u: URL, res: ServerResponse): void {
         cookie = retryCookie;
         headers['Cookie'] = cookie;
         this.logger.w(`proxy /play: 上游 ${resp.status} → 用刷新后的会话 Cookie 重试一次（provider=${ck}）`);
-        resp = await this.openStream(target, headers);
+        resp = await this.openPlayStream(target, headers);
       } else {
         this.logger.w(`proxy /play: 上游 ${resp.status} 且无可刷新的会话 Cookie（provider=${ck}，绑定可能已失效）`);
       }
+    }
+    // 百度 dlink 是短时签名地址。部分节点会在首次响应 403 时给出可诊断的
+    // 31326/31045 文本；只记数字错误码，避免把“签名失效”和“账号失效”
+    // 混成播放器统一的加载失败。只预读首块，不下载完整错误体或记录凭据。
+    for (let attempt = 0; attempt < 2 && resp.status === 403 && isBaiduTarget(target); attempt++) {
+      bufferedHead = await this.readHead(resp.body as unknown as NodeJS.ReadableStream, 256, () => true);
+      const text = bufferedHead.subarray(0, 256).toString('utf8');
+      const code = /(?:error_code|error_no|errno)["']?\s*[:=]\s*["']?(-?\d+)/i.exec(text)?.[1] || '-';
+      const hitcode = /hitcode["']?\s*[:=]\s*["']?(\d+)/i.exec(text)?.[1] || '-';
+      this.logger.w(`proxy /play: 百度 dlink 403 code=${code} hitcode=${hitcode} upstream=${redactUrl(resp.finalUrl)}`);
+      // 真机验证：原 dlink 首次跳转的 CDN 偶发 31326/104，重新从 dlink
+      // 获取跳转即可 206。只处理此错误一次，不改 UA/Range、不重转存，
+      // 也不直接重试旧 CDN URL（其它账号/防盗链错误应原样返回）。
+      let baiduCdn = false;
+      baiduCdn = isBaiduCdn(resp.finalUrl);
+      if (attempt !== 0 || code !== '31326' || hitcode !== '104' || !baiduCdn) break;
+      resp.body.on('error', () => undefined);
+      resp.body.destroy();
+      this.logger.w('proxy /play: 百度 CDN 31326/104 → 从原 dlink 重新获取跳转一次');
+      resp = await this.openPlayStream(target, headers);
+      bufferedHead = Buffer.alloc(0);
     }
     // 上游 Set-Cookie（刷新后的 __puus 等）→ 记入本会话 cookie jar，供后续分片/清单请求使用
     if (ck) this.rememberPlaySetCookies(ck, resp.headers);
@@ -644,7 +692,7 @@ private imgProxy(u: URL, res: ServerResponse): void {
       range: range ? String(range).slice(0, 32) : undefined,
       url: redactUrl(target),
     });
-    const ct = (resp.headers['content-type'] as string | undefined) || 'application/octet-stream';
+    const ct = safeResponseHeader('content-type', resp.headers['content-type']) || 'application/octet-stream';
     // ★ 2026-09-23 修复 py 源「视频无法播放」：清单判定不能只看 Content-Type，
     //   且**相对地址必须以「302 之后的最终地址」为基准**重写。
     //   实测（可可影视）：play URL 在 208.69.102.188:21302 → 302 到 142.248.97.185:11302；
@@ -717,15 +765,13 @@ private imgProxy(u: URL, res: ServerResponse): void {
     // 子 Range 会让部分 pcs 节点把后续请求判为重复/失效，表现为首个 206
     // 之后 other side closed 或 403。真实小 Range 探针不会触发此分支，
     // 因此这里必须按 provider 禁用聚合，保留单连接和原始签名。
-    let targetHost = '';
-    try { targetHost = new URL(target).hostname; } catch { /* 保持空值，交给普通链路 */ }
-    const isBaiduDirect = /(?:^|\.)pcs\.baidu\.com$/i.test(targetHost);
+    const isBaiduDirect = isBaiduTarget(target);
     const rng = range === undefined ? '' : Array.isArray(range) ? range[0] : String(range);
     // ★★ 2026-10-08（用户报「橘汁4K · jd4k 点开就提示已播放完毕」根因修复）★★
     //   **jpg 伪装分片剥离**：仅对「整段起始」请求（无 Range 或 `bytes=0-`）嗅探响应头 ≤128KB；
     //   命中 [JPEG 缩略图][TS 载荷] 拼接体 → 只把 TS 部分回给播放器（否则 ffmpeg 按 mjpeg 解析、
     //   读包失败 ×10 → mpv 当 EOF → 「已播放完毕」假象；识别口径见 jpegPreludeLen 注释）。
-    //   非伪装响应：已读头部 unshift 回填（流仍处于 paused），聚合/透传路径一字不变。
+    //   非伪装响应：保留已消费字节，透传时先写预读头部再接剩余流。
     //   ★ 带偏移的 Range 请求不嗅探（HLS 拖动 = 重开分片，实测 mpv/ffmpeg 均从 0 开始取）。
     if (resp.status < 400 && resp.body && (rng === '' || parseByteRange(rng)?.start === 0)) {
       const head = await this.readHead(resp.body as unknown as NodeJS.ReadableStream, DETECT_HEAD_LEN, (b) => {
@@ -748,7 +794,8 @@ private imgProxy(u: URL, res: ServerResponse): void {
         const upstream = resp.body as unknown as NodeJS.ReadableStream;
         // 客户端 seek 中止（AbortError）属预期，静默；其余交给管道自然结束
         upstream.on('error', () => { /* ignore */ });
-        (upstream as unknown as { pipe(dest: ServerResponse): unknown }).pipe(res);
+        if ((upstream as { readableEnded?: boolean }).readableEnded) res.end();
+        else (upstream as unknown as { pipe(dest: ServerResponse): unknown }).pipe(res);
         // 与常规透传同款收尾：客户端断开（seek 关旧连接）→ 立即 destroy 上游，不留悬挂流
         req.on('close', () => {
           if (!res.writableEnded) {
@@ -759,9 +806,9 @@ private imgProxy(u: URL, res: ServerResponse): void {
         this.logger.i(`proxy /play: 已剥离 jpg 伪装前导 ${pre} 字节 → TS（${redactUrl(target)}）`);
         return;
       }
-      if (head.length) {
-        try { (resp.body as unknown as { unshift?: (b: Buffer) => void }).unshift?.(head); } catch { /* 流已结束：忽略 */ }
-      }
+      // 短响应可能在预读后已经 end/destroy，此时 unshift 会丢失字节甚至挂起。
+      // 保留已消费的头部，透传时先写它，再 pipe 剩余流（不重复回源）。
+      bufferedHead = head;
     }
     const canAggregate =
       !!rng &&
@@ -785,7 +832,13 @@ private imgProxy(u: URL, res: ServerResponse): void {
     const fwd: Record<string, string | string[]> = { 'Content-Type': ct };
     for (const h of ['content-length', 'content-range', 'accept-ranges', 'content-disposition', 'last-modified', 'etag', 'cache-control', 'content-encoding']) {
       const v = resp.headers[h];
-      if (v !== undefined) fwd[h] = Array.isArray(v) ? v[0] : v;
+      // 百度 dlink 的 Content-Disposition 常含 UTF-8 文件名字节；Node 在存在
+      // Content-Length 时还会把它按 Latin-1 转成 Buffer 再校验，直接透传会抛出
+      // `Invalid character in header content`，导致已经拿到 206 的媒体连接被中断。
+      // 这类展示性 header 对播放不是必需的，非法值直接丢弃；长度/范围等合法
+      // header 仍然完整透传。
+      const value = safeResponseHeader(h, v);
+      if (value !== undefined) fwd[h] = value;
     }
     res.writeHead(resp.status, fwd);
     // resp.body 是 Node 可读流（undici BodyReadable），直接管道转发 → 边收边发给播放器
@@ -808,39 +861,81 @@ private imgProxy(u: URL, res: ServerResponse): void {
       }
       (upstream as { destroy?: () => void }).destroy?.();
     });
-    (upstream as unknown as { pipe(dest: ServerResponse): unknown }).pipe(res);
+    if (bufferedHead.length) res.write(bufferedHead);
+    if ((upstream as { readableEnded?: boolean }).readableEnded) res.end();
+    else (upstream as unknown as { pipe(dest: ServerResponse): unknown }).pipe(res);
     res.on('error', (e: unknown) => {
       // 客户端断开(seek)时 res 也可能抛 AbortError/EPIPE，一并吞掉避免冒泡
       if (!(e instanceof Error) || e.name !== 'AbortError') this.logger.e('proxy /play 响应流错误', e);
     });
-    req.on('close', () => {
+    res.on('close', () => {
       if (!res.writableEnded) {
-        try { res.destroy(); } catch { /* ignore */ }
         (upstream as { destroy?: () => void }).destroy?.();
       }
     });
+  }
+
+  /** 百度播放器读取 MP4 尾部索引/seek 时复用已成功的 CDN，避免每个 Range 重新跳转到拒绝访问节点。 */
+  private async openPlayStream(target: string, headers: Record<string, string>) {
+    if (!isBaiduTarget(target)) return this.openStream(target, headers);
+    const authHeaders = Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'range')
+      .map(([name, value]) => [name.toLowerCase(), value]).sort(([a], [b]) => a.localeCompare(b));
+    const key = createHash('sha256').update(JSON.stringify([target, authHeaders])).digest('hex');
+    const now = Date.now();
+    for (const [k, value] of this.baiduPlayNodes) if (value.expires <= now) this.baiduPlayNodes.delete(k);
+    const cached = this.baiduPlayNodes.get(key);
+    let resp: Awaited<ReturnType<LocalProxyServer['openStream']>> | undefined;
+    if (cached) {
+      try { resp = await this.openStream(cached.url, headers); }
+      catch { this.baiduPlayNodes.delete(key); }
+      if (resp && [401, 403, 404, 410].includes(resp.status)) {
+        resp.body.on('error', () => undefined);
+        resp.body.destroy();
+        this.baiduPlayNodes.delete(key);
+        resp = undefined;
+      }
+    }
+    resp ??= await this.openStream(target, headers);
+    if ((resp.status === 200 || resp.status === 206) && isBaiduCdn(resp.finalUrl)) {
+      if (!this.baiduPlayNodes.has(key) && this.baiduPlayNodes.size >= 32) {
+        this.baiduPlayNodes.delete(this.baiduPlayNodes.keys().next().value!);
+      }
+      // 缓存命中不延长签名有效期。
+      this.baiduPlayNodes.set(key, { url: resp.finalUrl, expires: cached && this.baiduPlayNodes.has(key) ? cached.expires : now + 5 * 60_000 });
+    }
+    return resp;
   }
 
   /**
    * ★ 2026-10-08（jpg 伪装分片剥离配套）：从上游流预读 ≤n 字节头部后**暂停**流。
    *   - `stop(head)` 返回 true 即提前结束（普通流读到首块就停，不拖慢起播）；
    *   - 8s 兜底超时（流卡住时不再等，按已读内容继续）；
-   *   - 调用方负责后续：命中伪装 → 丢弃前导并 pipe 剩余；未命中 → `unshift(head)` 回填再走原路径。
+   *   - 调用方负责后续：命中伪装 → 丢弃前导；未命中 → 先写 head，再 pipe 剩余（已 end 则直接结束响应）。
    */
   private readHead(stream: NodeJS.ReadableStream, n: number, stop: (head: Buffer) => boolean): Promise<Buffer> {
-    return new Promise<Buffer>((resolve) => {
+    return new Promise<Buffer>((resolve, reject) => {
       let done = false;
       const chunks: Buffer[] = [];
       let got = 0;
       const timer = setTimeout(finish, 8000);
-      function finish(): void {
-        if (done) return;
-        done = true;
+      function cleanup(): void {
         clearTimeout(timer);
         stream.removeListener('data', onData as never);
         stream.removeListener('end', finish as never);
+        stream.removeListener('error', onError as never);
         try { (stream as unknown as { pause?: () => void }).pause?.(); } catch { /* ignore */ }
+      }
+      function finish(): void {
+        if (done) return;
+        done = true;
+        cleanup();
         resolve(Buffer.concat(chunks));
+      }
+      function onError(error: Error): void {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(error); // 不能把上游失败当 EOF 后继续 pipe 已销毁流，否则播放器会一直等待。
       }
       function onData(c: Buffer | string): void {
         const b = Buffer.isBuffer(c) ? c : Buffer.from(c);
@@ -850,7 +945,7 @@ private imgProxy(u: URL, res: ServerResponse): void {
       }
       stream.on('data', onData as never);
       stream.once('end', finish as never);
-      stream.once('error', finish as never);
+      stream.once('error', onError as never);
     });
   }
 
@@ -1115,6 +1210,33 @@ private imgProxy(u: URL, res: ServerResponse): void {
     }
     return { status: 0, body: Buffer.alloc(0) };
   }
+}
+
+/** 只转发 Node 能安全写出的 HTTP header；不把文件名等展示信息当作播放必要条件。 */
+function safeResponseHeader(name: string, raw: unknown): string | undefined {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof value !== 'string') return undefined;
+  // 该展示头不是播放必要条件。只保留 ASCII（含 RFC5987 编码文件名），
+  // 同时规避 Node 对 Content-Disposition 的特殊 Buffer 转换行为。
+  if (name === 'content-disposition' && /[^\x00-\x7f]/.test(value)) return undefined;
+  try {
+    validateHeaderValue(name, value);
+    return value;
+  } catch {
+    return undefined;
+  }
+}
+
+function isBaiduTarget(target: string): boolean {
+  try { return /(?:^|\.)pcs\.baidu\.com$/i.test(new URL(target).hostname); }
+  catch { return false; }
+}
+
+function isBaiduCdn(target: string): boolean {
+  try {
+    const url = new URL(target);
+    return url.protocol === 'https:' && /(?:^|\.)baidupcs\.com$/i.test(url.hostname);
+  } catch { return false; }
 }
 
 /** 带 URI 属性的 HLS 标签（密钥/初始化段/子清单/备用音轨/低延迟分片…） */

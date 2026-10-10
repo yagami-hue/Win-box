@@ -273,7 +273,7 @@
 
 /* 页面顶栏（各页自带）：去边框透明底 + 大标题（M3 large title 观感） */
 :root[data-theme='douban'] .topbar {
-  background: none; border-bottom: none; padding: 4px 0 12px;
+  background: none; border-bottom: none; padding: 12px 22px;
 }
 :root[data-theme='douban'] .topbar h2 { font-size: 22px; font-weight: 850; letter-spacing: -.02em; }
 :root[data-theme='douban'] .topbar button { flex: 0 0 auto; white-space: nowrap; }
@@ -339,6 +339,9 @@
 :root[data-theme='douban'] .dav-row { border-radius: 12px; }
 :root[data-theme='douban'] .dav-row:hover { background: var(--accent-soft); }
 :root[data-theme='douban'] .hist-undo { background: #fff; border: 1px solid var(--border-soft); box-shadow: var(--db-card-shadow); }
+:root[data-theme='douban'] .content.cfg-content { padding: 20px 22px 108px; }
+:root[data-theme='douban'] .content.hist-content { padding: 18px 22px 108px; }
+:root[data-theme='douban'] .cfg-content > .card { padding: 20px !important; }
 :root[data-theme='douban'] table th, :root[data-theme='douban'] table td { border-color: var(--border-soft); }
 :root[data-theme='douban'] tr.selectable:hover { background: rgba(46, 150, 41, .06); }
 :root[data-theme='douban'] tr.active-row { background: var(--accent-soft) !important; outline: 1px solid rgba(46, 150, 41, .4); }

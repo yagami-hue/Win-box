@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { client } from '../api/client';
 import { formatBytes, type UpdateCheckResult, type UpdateProgress } from '../../shared/update';
 import { isDetailWinHash } from '../../shared/detailWin';
+import { isSearchWindow } from '../lib/searchWin';
 
 /** 独立播放器窗口（`#/player`）不参与门禁：更新由主窗口统一触发 */
 function isPlayerWindow(): boolean {
@@ -22,7 +23,7 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
    * ★ 2026-10-08（用户要求「详情页独立窗口」）：详情窗口同样跳过门禁 —— 它只是主窗口的副本窗口，
    *   门禁/下载由主窗口统一负责（否则两个窗口各下一次 Setup）。
    */
-  const skip = isPlayerWindow() || isDetailWinHash(window.location.hash);
+  const skip = isPlayerWindow() || isDetailWinHash(window.location.hash) || isSearchWindow();
   const [info, setInfo] = useState<UpdateCheckResult | null>(null);
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
   const [error, setError] = useState('');

@@ -82,45 +82,6 @@ export function useWaterfall(): boolean {
 }
 
 /**
- * ★ 2026-10-08（用户要求「设置-外观加开关：控制视频详情页是否单独窗口展示」）：
- *   详情页「独立窗口」偏好（localStorage `winbox-detail-window`；默认**关** = 主窗口内嵌，与现状一致）。
- *   开启后：点列表/历史 → 在独立窗口打开详情；已开窗口复用（聚焦 + 换路由），不再堆窗口。
- */
-const KEY_DETAIL_WINDOW = 'winbox-detail-window';
-
-export function getDetailWindowPref(): boolean {
-  try {
-    return localStorage.getItem(KEY_DETAIL_WINDOW) === '1';
-  } catch {
-    return false;
-  }
-}
-
-export function setDetailWindowPref(v: boolean): void {
-  try {
-    localStorage.setItem(KEY_DETAIL_WINDOW, v ? '1' : '0');
-  } catch {
-    /* ignore */
-  }
-  try {
-    window.dispatchEvent(new Event(UI_PREFS_EVENT));
-  } catch {
-    /* ignore */
-  }
-}
-
-/** React Hook：订阅「详情页独立窗口」偏好（配置页切换后，App 的打开详情行为立即跟着变） */
-export function useDetailWindowPref(): boolean {
-  const [on, setOn] = useState<boolean>(() => getDetailWindowPref());
-  useEffect(() => {
-    const onChange = (): void => setOn(getDetailWindowPref());
-    window.addEventListener(UI_PREFS_EVENT, onChange);
-    return () => window.removeEventListener(UI_PREFS_EVENT, onChange);
-  }, []);
-  return on;
-}
-
-/**
  * ★ 2026-10-08（用户要求「整体重做界面视觉与动效交互」）：**界面动效偏好**。
  *   Windows 的「动画效果」是系统级开关（`prefers-reduced-motion`）——本机实测该开关为关时，
  *   浏览器会把一切动画/过渡折叠掉，用户看不到任何动效。所以给一个应用内三态：

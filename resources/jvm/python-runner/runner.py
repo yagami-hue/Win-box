@@ -20,6 +20,8 @@ import json
 import os
 import sys
 import traceback
+import inspect
+import base64
 
 # ---- 1. sys.path 注入（必须在 import 第三方库/脚本之前） ----
 def _dir_of(p):
@@ -44,6 +46,34 @@ for _p in [
 _REAL_OUT = sys.stdout
 
 
+def _windows_ca_bundle():
+    """Requests uses certifi alone; include Windows-trusted server CAs without disabling TLS verification."""
+    if os.name != 'nt' or os.environ.get('REQUESTS_CA_BUNDLE'):
+        return
+    try:
+        import ssl
+        import certifi
+        with open(certifi.where(), 'rb') as f:
+            pem = f.read() + b'\n'
+        for store in ('ROOT', 'CA'):
+            for cert, encoding, trust in ssl.enum_certificates(store):
+                if encoding == 'x509_asn' and (trust is True or '1.3.6.1.5.5.7.3.1' in trust):
+                    pem += ssl.DER_cert_to_PEM_cert(cert).encode('ascii')
+        path = os.path.join(PY_DIR, 'windows-ca.pem')
+        existing = b''
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                existing = f.read()
+        if existing != pem:
+            tmp = path + '.' + str(os.getpid())
+            with open(tmp, 'wb') as f:
+                f.write(pem)
+            os.replace(tmp, path)
+        os.environ['REQUESTS_CA_BUNDLE'] = path
+    except (ImportError, OSError):
+        pass  # Keep certifi verification if the optional Windows store cannot be read.
+
+
 def _fail(err):
     sys.stderr.write('[SpiderRunner.ERROR] %s: %s\n' % (type(err).__name__, err))
     traceback.print_exc(file=sys.stderr)
@@ -57,13 +87,28 @@ def _invoke(sp, name, *args):
     return fn(*args)
 
 
+def _invoke_variants(sp, name, variants):
+    fn = getattr(sp, name, None)
+    if fn is None:
+        raise AttributeError('method not found: %s' % name)
+    signature = inspect.signature(fn)
+    for args in variants:
+        try:
+            signature.bind(*args)
+        except TypeError:
+            continue
+        # Do not retry a TypeError raised inside the source itself.
+        return fn(*args)
+    raise TypeError('unsupported signature for %s: %s' % (name, signature))
+
+
 def _load_script(py_path):
     """读取并编译 py 脚本一次，返回其模块命名空间（脚本目录注入 sys.path）。"""
     script_dir = _dir_of(py_path)
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
-    ns = {}
-    with open(py_path, 'r', encoding='utf-8') as f:
+    ns = {'__file__': os.path.abspath(py_path), '__name__': 'winbox_spider'}
+    with open(py_path, 'r', encoding='utf-8-sig') as f:
         src = f.read()
     exec(compile(src, py_path, 'exec'), ns)
     return ns
@@ -79,7 +124,7 @@ def _new_instance(ns, class_name):
 def _call_method(sp, method, rest):
     """方法分派（对齐 Jython PythonRunner.java）。rest 为实参数组（下标 0 起即方法参数，与 argv 中 [ext] 之后对齐）。"""
     if method == 'homeContent':
-        return _invoke(sp, 'homeContent', True)
+        return _invoke_variants(sp, 'homeContent', [(True,), ()])
     if method == 'homeVideoContent':
         return _invoke(sp, 'homeVideoContent')
     if method == 'categoryContent':
@@ -100,13 +145,8 @@ def _call_method(sp, method, rest):
         return _invoke(sp, 'detailContent', ids_obj)
     if method == 'searchContent':
         key = rest[0] if len(rest) > 0 else ''
-        pg = rest[2] if len(rest) > 2 else ''
-        if pg and pg.strip():
-            try:
-                return _invoke(sp, 'searchContent', key, False, pg)
-            except TypeError:
-                return _invoke(sp, 'searchContent', key, False)
-        return _invoke(sp, 'searchContent', key, False)
+        pg = rest[2] if len(rest) > 2 and rest[2].strip() else '1'
+        return _invoke_variants(sp, 'searchContent', [(key, False, pg), (key, False), (key,)])
     if method == 'playerContent':
         flag = rest[0] if len(rest) > 0 else ''
         pid = rest[1] if len(rest) > 1 else ''
@@ -119,7 +159,13 @@ def _call_method(sp, method, rest):
     if method == 'liveContent':
         return _invoke(sp, 'liveContent', rest[0] if len(rest) > 0 else '')
     if method == 'proxy':
-        return _invoke(sp, 'proxy', rest[0] if len(rest) > 0 else '{}')
+        params = json.loads(rest[0]) if rest else {}
+        fn = 'proxy' if 'proxy' in type(sp).__dict__ else 'localProxy'
+        result = _invoke(sp, fn, params)
+        if isinstance(result, (list, tuple)) and len(result) >= 3 and isinstance(result[2], bytes):
+            result = list(result)
+            result[2] = {'base64': base64.b64encode(result[2]).decode('ascii')}
+        return result
     raise SystemExit('unknown method: %s' % method)
 
 
@@ -234,6 +280,7 @@ def _serialize_raw(result):
 def main():
     # ★ 蜘蛛 print() → stderr（结果/信封走 _REAL_OUT，见其注释）：行协议不被日志碎片打穿
     sys.stdout = sys.stderr
+    _windows_ca_bundle()
     # ★ 常驻模式：runner.py -serve <pyPath> <className>
     if len(sys.argv) >= 4 and sys.argv[1] == '-serve':
         _serve(sys.argv[2], sys.argv[3])

@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { client } from '../api/client';
+import { openSearchWindow } from '../lib/searchWin';
 import { useTheme } from '../lib/theme';
 import HScrollRow from '../components/HScrollRow';
 import HeroBackdrop from '../components/HeroBackdrop';
@@ -85,7 +86,7 @@ export default function DiscoverPage() {
   /** ★ 2026-10-08（豆风）：海报墙当前分区（顶部 pill 切换 —— 替代「一行行横滑」的堆叠布局） */
   const [wallSec, setWallSec] = useState(0);
 
-  const goSearch = (title: string): void => { nav(`/search?agg=${encodeURIComponent(title)}`); };
+  const goSearch = (title: string): void => { void openSearchWindow(title).catch((e) => window.alert(String(e))); };
 
   /**
    * 拉榜单（走主进程 6h 缓存）。

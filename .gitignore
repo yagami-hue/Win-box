@@ -3,6 +3,7 @@ node_modules/
 dist/
 release*/
 *.log
+__pycache__/
 npm-debug.log*
 .DS_Store
 Thumbs.db
@@ -29,6 +30,7 @@ docs/
 # --- 专有 / 运行时 / 编译产物：不随源码分发 ---
 # mpv 播放内核（官方 v0.41.0 构建，约 100MB；GPL/LGPL，随安装包分发，不入源码库）
 resources/mpv/
+resources/ffmpeg/*.exe
 # 逆向自第三方 app 的私有蜘蛛 jar 与壳，版权属原作者，不接受开源分发
 resources/jvm/shell-shim/
 resources/jvm/real/

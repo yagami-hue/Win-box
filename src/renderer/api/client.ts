@@ -197,6 +197,9 @@ declare global {
         isAlwaysOnTop: () => Promise<IpcResult<boolean>>;
         // ★ 2026-10-08（用户要求）：详情页独立窗口（已开则复用并通知换路由）
         openDetail: (a: { key: string; id: string; query?: string }) => Promise<IpcResult<{ ok: boolean; reused: boolean }>>;
+        openSearch: (term: string) => Promise<IpcResult<{ ok: boolean; reused: boolean }>>;
+        routeReady: () => Promise<IpcResult<void>>;
+        reportError: (message: string) => Promise<IpcResult<void>>;
         onNavigate: (cb: (route: string) => void) => () => void;
       };
       net: {
@@ -206,7 +209,7 @@ declare global {
       };
       player: {
         open: (init: unknown) => Promise<IpcResult<void>>;
-        switchEp: (epIndex: number) => Promise<IpcResult<void>>;
+        switchEp: (request: number | import('../../shared/playerEpisode').PlayerEpisodeSwitch) => Promise<IpcResult<void>>;
         /** ★ 2026-09-30：订阅就绪 → 主进程重发最新 init（新窗口首推与订阅的竞态） */
         ready: () => Promise<IpcResult<{ ok: boolean }>>;
         isOpen: () => Promise<IpcResult<{ open: boolean }>>;
@@ -320,12 +323,15 @@ export const client = {
   winIsAlwaysOnTop: () => unwrap(window.api.win.isAlwaysOnTop()),
   // ★ 2026-10-08（用户要求）：详情页独立窗口
   winOpenDetail: (a: { key: string; id: string; query?: string }) => unwrap(window.api.win.openDetail(a)),
+  winOpenSearch: (term: string) => unwrap(window.api.win.openSearch(term)),
+  winRouteReady: () => unwrap(window.api.win.routeReady()),
+  winReportError: (message: string) => unwrap(window.api.win.reportError(message)),
   winOnNavigate: (cb: (route: string) => void) => window.api.win.onNavigate(cb),
   appQuit: () => unwrap(window.api.system.quit()),
   /** ★ 2026-09-30：本次主进程启动的会话标识（渲染层判定「新一次启动」→ 丢页面状态类记忆） */
   systemSessionId: () => unwrap(window.api.system.sessionId()),
   playerOpen: (init: unknown) => unwrap(window.api.player.open(init)),
-  playerSwitchEp: (epIndex: number) => unwrap(window.api.player.switchEp(epIndex)),
+  playerSwitchEp: (request: number | import('../../shared/playerEpisode').PlayerEpisodeSwitch) => unwrap(window.api.player.switchEp(request)),
   /** ★ 2026-09-30：播放器窗口订阅就绪 → 重发最新 init（修新窗口「等待播放…」竞态） */
   playerReady: () => unwrap(window.api.player.ready()),
   playerIsOpen: () => unwrap(window.api.player.isOpen()),

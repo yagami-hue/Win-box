@@ -129,6 +129,9 @@ export const IPC = {
    * 窗口 hash 带 `dw=1` 标记（渲染层据此只写历史/进度、返回键改为关窗）。
    */
   WIN_OPEN_DETAIL: 'win:openDetail',
+  WIN_OPEN_SEARCH: 'win:openSearch',
+  WIN_ROUTE_READY: 'win:routeReady',
+  WIN_REPORT_ERROR: 'win:reportError',
   /** 主进程 → 渲染层：让已打开的详情窗口切换路由（`/detail/:key/:id?…&dw=1`） */
   WIN_NAVIGATE: 'win:navigate',
   /** ★ 2026-09-30（用户要求「软件关闭后，所有的墓碑机制都应该脱钩」）：主进程**本次启动**的唯一标识

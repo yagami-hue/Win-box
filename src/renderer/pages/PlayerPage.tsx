@@ -9,6 +9,7 @@ import { client } from '../api/client';
 import { uiMem, recordWatch, saveUiMemory, markHistoryOnlyWriter, historyGroupKey } from '../lib/uiMemory';
 import { formatEpisodeLabel } from '../lib/epName';
 import { makeStaleGuard, acceptInitSeq } from '../lib/staleGuard';
+import type { PlayResult } from '../../shared/types';
 
 /**
  * ★ 2026-09-26：本页只在**独立播放器窗口**运行（主窗口无 /player 路由）。
@@ -42,6 +43,7 @@ export default function PlayerPage() {
   const [epIndex, setEpIndex] = useState(0);
   const [activeUrl, setActiveUrl] = useState('');
   const [curName, setCurName] = useState('');
+  const [resolving, setResolving] = useState(false);
   // ★ 网盘资源未绑定 cookie（主进程 play 检出）→ 传给播放器提示去配置页绑定
   const [driveBind, setDriveBind] = useState<string | null>(null);
   // 小窗口模式（主进程改窗口尺寸后广播同步）
@@ -68,7 +70,7 @@ export default function PlayerPage() {
   const initSeqRef = useRef(0);
 
   // 解析并播放指定集
-  const resolve = useCallback(async (d: PlayerInitData, idx: number) => {
+  const resolve = useCallback(async (d: PlayerInitData, idx: number, preparedUrl = '') => {
     const eps = d.episodes;
     if (!eps || idx < 0 || idx >= eps.length) return;
     const target = eps[idx];
@@ -80,22 +82,33 @@ export default function PlayerPage() {
     const display = mainTitle ? `${mainTitle} - ${label}` : label;
     setEpIndex(idx);
     setCurName(display);
+    setResolving(true);
+    setActiveUrl('');
+    setParseMsg('');
+    setDriveBind(null);
     try {
-      const r = await client.play({ key: d.key, flag: d.flag, id: target.url });
+      const r: PlayResult = preparedUrl ? { url: preparedUrl, parse: 0, flag: d.flag, playUrl: '' } : await client.play({ key: d.key, flag: d.flag, id: target.url });
       if (!resolveGen.current.isCurrent(gen)) return; // 过期结果：不 setActiveUrl、不记历史
       setDriveBind(r.needDriveCookieBind || null);
+      if (r.needDriveCookieBind) { setActiveUrl(target.url); return; }
       if (r.parse === 1) {
         // 主进程已尽力做「解析接口 → 隐藏窗口嗅探」，仍拿不到直连地址：
-        // 上屏原因（r.message），同时保底播放原始地址（个别站点直链其实能直连）
+        // 只显示原因，不把网盘/网页原始地址当成媒体地址硬播。
         setParseMsg(r.message || '该播放地址需要网页解析，未能自动解析出直连地址');
-        setActiveUrl(target.url);
+        return;
+      }
+      if (!r.url) {
+        setParseMsg(r.message || '未能取得播放地址，请重试或切换线路');
         return;
       }
       setParseMsg('');
-      setActiveUrl(r.url || target.url);
-    } catch {
+      setActiveUrl(r.url);
+    } catch (e) {
       if (!resolveGen.current.isCurrent(gen)) return; // 过期失败：不要用旧集的原始地址顶掉新集
-      setActiveUrl(target.url);
+      setParseMsg(e instanceof Error ? e.message : String(e));
+      return;
+    } finally {
+      if (resolveGen.current.isCurrent(gen)) setResolving(false);
     }
     // 记录观看历史（url 去重 + 刮削元数据）
     if (d.meta?.fromKey || d.meta?.id) {
@@ -120,11 +133,25 @@ export default function PlayerPage() {
 
   // 收到初始化数据 → 重置并播放
   const applyInit = useCallback(
-    (d: PlayerInitData) => {
+    async (d: PlayerInitData) => {
+      // 历史记录仅保存当前集；重新取同片详情以恢复上下集，而不是永远只有一集。
+      const hydrateGen = resolveGen.current.next();
+      setResolving(true);
+      setActiveUrl('');
+      if (d.episodes?.length === 1 && d.meta?.vodId && d.key) {
+        try {
+          const detail = await client.detail({ key: d.key, ids: [d.meta.vodId] });
+          if (!resolveGen.current.isCurrent(hydrateGen)) return;
+          const eps = detail?.episodes[d.flag] || [];
+          const idx = eps.findIndex((ep) => ep.url === d.episodes[0].url);
+          if (idx >= 0) d = { ...d, episodes: eps, epIndex: idx };
+        } catch { /* 详情失效：仍可按历史原始地址续播 */ }
+      }
+      if (!resolveGen.current.isCurrent(hydrateGen)) return;
       setInit(d);
       setActiveUrl('');
       const idx = Math.max(0, Math.min(d.epIndex || 0, (d.episodes?.length || 1) - 1));
-      void resolve(d, idx);
+      void resolve(d, idx, d.lastUrl);
     },
     [resolve],
   );
@@ -132,7 +159,11 @@ export default function PlayerPage() {
   // 主窗口换集 → 本页切换到对应集
   const applySwitch = useCallback(
     (idx: number) => {
-      if (init) void resolve(init, idx);
+      if (init) {
+        const next = { ...init, startTime: 0, lastUrl: '' };
+        setInit(next);
+        void resolve(next, idx);
+      }
     },
     [init, resolve],
   );
@@ -144,7 +175,7 @@ export default function PlayerPage() {
       if (!acceptInitSeq(initSeqRef.current, incoming?.initSeq)) return;
       initSeqRef.current = Math.max(initSeqRef.current, Number(incoming?.initSeq) || 0);
       loadingRef.current = false;
-      applyInit(d as PlayerInitData);
+      void applyInit(d as PlayerInitData);
     });
     const offSwitch = client.playerOnSwitchEp((idx) => {
       loadingRef.current = false;
@@ -172,7 +203,11 @@ export default function PlayerPage() {
   // 播放器内换集
   const goEp = useCallback(
     (idx: number) => {
-      if (init) void resolve(init, idx);
+      if (init) {
+        const next = { ...init, startTime: 0, lastUrl: '' };
+        setInit(next);
+        void resolve(next, idx);
+      }
     },
     [init, resolve],
   );
@@ -183,9 +218,9 @@ export default function PlayerPage() {
 
   // ★★ 进度回写历史（与 PlayPage 对称）：读「播放直链」的 playTime，写到「原始 episode url」历史键。
   //   历史键与直链键不同源 —— 只有这里定时回写，历史的 time 才会推进，下次续播才能 seek 新进度。
-  const liveRef = useRef({ raw: '', url: '', name: '' });
+  const liveRef = useRef<{ raw: string; url: string; name: string; flag?: string; meta?: PlayerInitData['meta'] }>({ raw: '', url: '', name: '' });
   useEffect(() => {
-    liveRef.current = { raw: init?.episodes?.[epIndex]?.url || '', url: activeUrl, name: curName || init?.lastName || '' };
+    liveRef.current = { raw: init?.episodes?.[epIndex]?.url || '', url: activeUrl, name: curName || init?.lastName || '', flag: init?.flag, meta: init?.meta };
   }, [init, epIndex, activeUrl, curName]);
   useEffect(() => {
     const raw = init?.episodes?.[epIndex]?.url || '';
@@ -226,11 +261,11 @@ export default function PlayerPage() {
           recordWatch({
             url: c.raw,
             rawUrl: c.raw,
-            flag: init?.flag,
-            sourceName: init?.meta?.sourceName,
-            sourceKey: init?.meta?.fromKey,
-            vodId: init?.meta?.vodId ?? init?.meta?.id,
-            pic: init?.meta?.pic,
+            flag: c.flag,
+            sourceName: c.meta?.sourceName,
+            sourceKey: c.meta?.fromKey,
+            vodId: c.meta?.vodId ?? c.meta?.id,
+            pic: c.meta?.pic,
             name: c.name,
             time: sec,
           });
@@ -340,7 +375,13 @@ export default function PlayerPage() {
               skipEpisodeLabel={eps[epIndex]?.name || curName}
             />
           ) : (
-            <div className="empty">等待播放…</div>
+             <div className="empty">{resolving ? '正在解析本集…' : parseMsg ? '播放失败，可重试或切换集数' : '等待播放…'}
+               {!resolving && init && <div style={{ marginTop: 12, display: 'flex', gap: 12, justifyContent: 'center' }}>
+                 <button disabled={!canPrev} onClick={() => goEp(epIndex - 1)}>上一集</button>
+                 <button onClick={() => void resolve(init, epIndex)}>重试</button>
+                 <button disabled={!canNext} onClick={() => goEp(epIndex + 1)}>下一集</button>
+               </div>}
+             </div>
           )}
         </div>
       </div>

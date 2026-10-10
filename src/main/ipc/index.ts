@@ -40,7 +40,8 @@ import { openPlayerWindow, playerSwitchEpisode, isPlayerOpen, closePlayerWindow,
 // ★ 2026-10-08 MPV 高兼容播放内核（独立播放器窗口内嵌 --wid）
 import { MpvController } from '../player/MpvController';
 // ★ 2026-10-08 详情页独立窗口（外观开关控制；见 renderer/lib/detailWin.ts）
-import { openDetailWindow } from '../player/DetailWindow';
+import { openDetailWindow, detailWindowReady } from '../player/DetailWindow';
+import { openSearchWindow, searchWindowReady } from '../player/SearchWindow';
 import type { MpvCommand, MpvStartOptions } from '../../shared/player';
 // 老板键
 import { bossKey, BOSS_DEFAULT_ACCEL } from '../bossKey';
@@ -502,8 +503,8 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     openPlayerWindow(init);
     return { ok: true };
   }, log);
-  registerHandler(IPC.PLAYER_SWITCH_EP, (_e: any, epIndex: number) => {
-    playerSwitchEpisode(Number(epIndex));
+  registerHandler(IPC.PLAYER_SWITCH_EP, (_e: any, request: number | import('../../shared/playerEpisode').PlayerEpisodeSwitch) => {
+    playerSwitchEpisode(request);
     return { ok: true };
   }, log);
   registerHandler(IPC.PLAYER_IS_OPEN, () => ({ open: isPlayerOpen() }), log);
@@ -525,9 +526,20 @@ export function registerIpc(host: SpiderHost, dav: DavService, dlna: DlnaService
     return { ok: true };
   }, log);
 
-  // ---- ★ 2026-10-08 详情页独立窗口（外观开关；已开则复用：聚焦 + 通知其换路由）----
+  // ---- 详情/搜索独立窗口（已开则复用：聚焦 + 通知其换路由）----
   registerHandler(IPC.WIN_OPEN_DETAIL, (_e: any, a: { key?: string; id?: string; query?: string }) =>
     openDetailWindow(a || {}), log);
+  registerHandler(IPC.WIN_OPEN_SEARCH, (_e: any, term: string) => openSearchWindow(term), log);
+  registerHandler(IPC.WIN_ROUTE_READY, (e: any) => {
+    searchWindowReady(e.sender.id);
+    detailWindowReady(e.sender.id);
+    return { ok: true };
+  }, log);
+  registerHandler(IPC.WIN_REPORT_ERROR, (e: any, message: string) => {
+    // 报告只保留异常/组件栈，移除 URL（源地址可能含凭据）。
+    log.w(`renderer-error wc=${e.sender.id}: ${String(message).replace(/https?:\/\/\S+/gi, '[url]').slice(0, 3000)}`);
+    return { ok: true };
+  }, log);
 
   // ---- ★ 2026-10-08 MPV 高兼容播放内核（独立播放器窗口内嵌；见 main/player/MpvController）----
   registerHandler(IPC.MPV_STATUS, () => mpv.status(), log);

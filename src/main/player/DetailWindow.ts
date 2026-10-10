@@ -1,5 +1,5 @@
 // src/main/player/DetailWindow.ts
-// ★ 2026-10-08（用户要求「设置-外观加开关：控制视频详情页是否单独窗口展示」）：
+// 所有详情默认独立展示；已开则复用。
 //   独立「详情页」窗口控制器 —— 与播放器窗口同族（无边框 + 同名 preload + hash 路由），
 //   打开时加载 `#/detail/:key/:id?…&dw=1`；已开则**复用**（聚焦 + WIN_NAVIGATE 通知其换路由，
 //   不在点第二个片子时堆一串窗口）。
@@ -15,6 +15,20 @@ import { IPC } from '../../shared/ipc-channels';
 import { detailWindowRoute } from '../../shared/detailWin';
 
 let detailWin: BrowserWindow | null = null;
+let pendingRoute = '';
+let ready = false;
+
+function pushPendingRoute(): void {
+  if (detailWin && !detailWin.isDestroyed() && ready && !detailWin.webContents.isLoading()) {
+    detailWin.webContents.send(IPC.WIN_NAVIGATE, pendingRoute);
+  }
+}
+
+export function detailWindowReady(senderId: number): void {
+  if (!detailWin || detailWin.isDestroyed() || detailWin.webContents.id !== senderId) return;
+  ready = true;
+  detailWin.webContents.send(IPC.WIN_NAVIGATE, pendingRoute);
+}
 
 declare const __dirname: string;
 
@@ -31,11 +45,18 @@ export function openDetailWindow(payload: { key?: string; id?: string; query?: s
   const id = String(payload?.id || '').trim();
   if (!key || !id) throw new Error('详情参数不完整（缺少源 key 或影片 id）');
   const hash = detailWindowRoute(key, id, payload?.query);
+  pendingRoute = hash;
   if (detailWin && !detailWin.isDestroyed()) {
+    if (detailWin.isMinimized()) detailWin.restore();
+    detailWin.show();
     detailWin.focus();
-    detailWin.webContents.send(IPC.WIN_NAVIGATE, hash);
+    if (ready) {
+      pushPendingRoute();
+      setTimeout(pushPendingRoute, 80).unref();
+    }
     return { ok: true, reused: true };
   }
+  ready = false;
   detailWin = new BrowserWindow({
     width: 1100,
     height: 720,
@@ -54,7 +75,7 @@ export function openDetailWindow(payload: { key?: string; id?: string; query?: s
       sandbox: false,
     },
   });
-  detailWin.on('ready-to-show', () => detailWin?.show());
+  detailWin.on('ready-to-show', () => { detailWin?.show(); setTimeout(pushPendingRoute, 80).unref(); });
   // 最大化/还原：圆角偏好 + 强制重绘（与主/播放器窗口同款修复）
   detailWin.on('maximize', () => {
     if (detailWin) { applyWindowCorner(detailWin, false); detailWin.webContents.invalidate(); }
@@ -68,6 +89,7 @@ export function openDetailWindow(payload: { key?: string; id?: string; query?: s
   });
   detailWin.on('closed', () => {
     detailWin = null;
+    ready = false;
   });
   if (isDev()) {
     detailWin.loadURL(`http://localhost:5173/#${hash}`);

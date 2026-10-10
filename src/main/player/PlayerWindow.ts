@@ -5,6 +5,7 @@
 import { app, BrowserWindow, screen, shell } from 'electron';
 import { join } from 'node:path';
 import { applyWindowCorner } from '../util/windowCorner';
+import { applyEpisodeSwitch, type PlayerEpisodeSwitch } from '../../shared/playerEpisode';
 
 // 与渲染层 PlayerPage 约定的初始播放数据（可序列化）
 export interface PlayerInit {
@@ -234,9 +235,14 @@ export function openPlayerWindow(init: PlayerInit): void {
 }
 
 /** 主窗口换集：通知播放器窗口切换到指定集 */
-export function playerSwitchEpisode(epIndex: number): void {
+export function playerSwitchEpisode(request: number | PlayerEpisodeSwitch): void {
   if (playerWin && !playerWin.isDestroyed()) {
-    playerWin.webContents.send('player:switchEp', epIndex);
+    if (typeof request === 'number') {
+      playerWin.webContents.send('player:switchEp', request);
+    } else if (pendingInit) {
+      const next = applyEpisodeSwitch(pendingInit, request);
+      if (next) playerWin.webContents.send('player:init', stampInit(next));
+    }
   }
 }
 

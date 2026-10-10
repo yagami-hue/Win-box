@@ -8,7 +8,7 @@ import { EXT_TEMPLATES, validateExtJson } from '../../engine/config/extHelper';
 import { sourceKindInfo } from '../../engine/config/sourceKind';
 import type { AuditItem, SourceDebugReport } from '../../shared/types';
 import { applyTheme, currentTheme } from '../lib/theme';
-import { getShowDiscover, setShowDiscover, getDetailWindowPref, setDetailWindowPref, getMotionPref, setMotionPref, type MotionPref } from '../lib/uiPrefs';
+import { getShowDiscover, setShowDiscover, getMotionPref, setMotionPref, type MotionPref } from '../lib/uiPrefs';
 import { THEME_LABELS, type Theme } from '../lib/themeTokens';
 import { DEFAULT_META_SETTINGS, type MetaSettings, type MetaSource } from '../../shared/meta';
 import { DEFAULT_PLAYER_SETTINGS, type PlayerSettings, type MpvStatus } from '../../shared/player';
@@ -87,7 +87,6 @@ export default function ConfigPage() {
   /** ★ 2026-09-30（用户要求）：是否展示「发现」页（默认展示；关掉后导航与默认落地页相应变化） */
   const [showDiscover, setShowDiscoverState] = useState<boolean>(() => getShowDiscover());
   /** ★ 2026-10-08（用户要求）：详情页是否单独窗口展示（默认关；切换即时生效，见 lib/detailWin.ts） */
-  const [detailWindow, setDetailWindowState] = useState<boolean>(() => getDetailWindowPref());
   /** ★ 2026-10-08：界面动效三态（跟随系统 / 始终开启 / 关闭）—— 本机系统「动画效果」为关时也能强制开启动效 */
   const [motion, setMotionState] = useState<MotionPref>(() => getMotionPref());
   // 外挂字幕（多源：SubtitleCat 免 token / assrt 需 token）
@@ -808,7 +807,7 @@ export default function ConfigPage() {
   };
 
   return (
-    <div className="content">
+    <div className="content cfg-content">
       <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
         {TABS.map((t) => (
           <button
@@ -1543,26 +1542,6 @@ export default function ConfigPage() {
         </label>
         <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
           关闭后导航里不再出现「发现」，打开软件直接进「点播」（源主页）。默认开启。
-        </div>
-      </div>
-
-      {/* ★ 2026-10-08（用户要求）：详情页「独立窗口」开关（默认关 = 详情在主窗口内嵌，与现状一致） */}
-      <div className="card" id="cfg-detail-window" style={{ padding: 12, marginBottom: 16 }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={detailWindow}
-            onChange={(e) => {
-              const on = e.target.checked;
-              setDetailWindowState(on);
-              setDetailWindowPref(on);
-            }}
-          />
-          <span style={{ fontWeight: 600 }}>详情页单独窗口展示</span>
-        </label>
-        <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-          开启后：点列表/历史的影片 → 详情在独立窗口打开（已开则复用同一个窗口，不堆窗口）；
-          主窗口保持原浏览位置，窗口里的「返回」= 关闭该窗口。默认关闭（详情在主窗口内嵌，与旧版一致）。
         </div>
       </div>
 

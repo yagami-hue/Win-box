@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { client } from '../api/client';
+import { openSearchWindow } from '../lib/searchWin';
 import type { MetaSuggestion } from '../../shared/meta';
 import {
   clearSearchHistory,
@@ -124,7 +125,7 @@ export default function SearchPanel({ bar = false }: { bar?: boolean }) {
     setOpen(false);
     setQ('');
     setSug([]);
-    nav(`/search?agg=${encodeURIComponent(t)}`);
+    void openSearchWindow(t).catch((e) => window.alert(`无法打开搜索窗口：${e instanceof Error ? e.message : String(e)}`));
   };
 
   /** 删除一条搜索历史（不影响列表其它条目） */

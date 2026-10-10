@@ -185,6 +185,9 @@ const api = {
     isAlwaysOnTop: () => invoke<boolean>(IPC.WIN_IS_ALWAYS_ON_TOP),
     // ★ 2026-10-08（用户要求）：详情页独立窗口（外观开关；已开则复用并通知换路由）
     openDetail: (a: { key: string; id: string; query?: string }) => invoke(IPC.WIN_OPEN_DETAIL, a),
+    openSearch: (term: string) => invoke(IPC.WIN_OPEN_SEARCH, term),
+    routeReady: () => invoke(IPC.WIN_ROUTE_READY),
+    reportError: (message: string) => invoke(IPC.WIN_REPORT_ERROR, message),
     onNavigate: (cb: (route: string) => void) => {
       const l = (_e: unknown, route: unknown) => cb(String(route || ''));
       ipcRenderer.on(IPC.WIN_NAVIGATE, l);
@@ -204,7 +207,7 @@ const api = {
   },
   player: {
     open: (init: unknown) => invoke(IPC.PLAYER_OPEN, init),
-    switchEp: (epIndex: number) => invoke(IPC.PLAYER_SWITCH_EP, epIndex),
+    switchEp: (request: number | import('../shared/playerEpisode').PlayerEpisodeSwitch) => invoke(IPC.PLAYER_SWITCH_EP, request),
     /** ★ 2026-09-30：渲染层订阅就绪 → 主进程重发最新 init（新窗口首推与订阅的竞态，见 PlayerWindow） */
     ready: () => invoke(IPC.PLAYER_READY),
     isOpen: () => invoke<{ open: boolean }>(IPC.PLAYER_IS_OPEN),

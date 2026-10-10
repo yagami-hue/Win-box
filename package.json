@@ -1,6 +1,6 @@
 {
   "name": "win-box",
-  "version": "1.20.2",
+  "version": "1.20.3",
   "private": true,
   "description": "Win-Box (CatVod 引擎) 的 Windows 桌面移植版 — 导入源规则与安卓版保持一致",
   "type": "module",
@@ -54,7 +54,7 @@
     "appId": "com.winbox.win",
     "productName": "Win-Box",
     "directories": {
-      "output": "release1.20.2"
+      "output": "release1.20.3"
     },
     "files": [
       "dist/**",
@@ -64,7 +64,8 @@
       "!resources/jvm/tools/**",
       "!resources/jvm/libs/jython-standalone-2.7.3.jar",
       "!resources/**/hs_err_pid*.log",
-      "!resources/**/replay_pid*.log"
+       "!resources/**/replay_pid*.log",
+       "!resources/**/__pycache__/**"
     ],
     "asarUnpack": [
       "resources/**"

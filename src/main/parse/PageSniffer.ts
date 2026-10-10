@@ -158,8 +158,8 @@ export async function sniffMediaUrl(
       const ct = String(
         (details.responseHeaders?.['Content-Type'] || details.responseHeaders?.['content-type'] || [''])[0] || '',
       );
-      if (/mpegurl|video\/(mp4|x-flv|mp2t)/i.test(ct)) {
-        note(details.url || '');
+      if (/mpegurl|video\/(mp4|x-flv|mp2t)|audio\//i.test(ct)) {
+        if (details.url && !candidates.includes(details.url)) candidates.push(details.url);
         timers.push(setTimeout(settle, 300));
       }
       cb({ responseHeaders: details.responseHeaders });

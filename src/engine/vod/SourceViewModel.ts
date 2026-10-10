@@ -552,8 +552,9 @@ export class SourceViewModel {
         }
       : undefined;
     if (url.startsWith('video://')) {
-      // 蜘蛛显式 parse 声明优先，仅未声明时才由前缀推断 parse=1
-      return { url: url.slice('video://'.length), parse: declaredParse ?? 1, header };
+      // Explicit HTML pages always need sniffing; preserve declared parse for stream URLs.
+      const page = url.slice('video://'.length);
+      return { url: page, parse: /\.html?(?:[?#]|$)/i.test(page) ? 1 : declaredParse ?? 1, header };
     }
     if (url.startsWith('proxy://')) {
       const rest = url.slice('proxy://'.length);

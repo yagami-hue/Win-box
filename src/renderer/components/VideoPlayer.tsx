@@ -355,6 +355,29 @@ export default function VideoPlayer(props: VideoPlayerProps) {
   kernelRef.current = kernel;
   const kernelPrefRef = useRef<KernelPref>(kernelPref);
   kernelPrefRef.current = kernelPref;
+  const [htmlSource, setHtmlSource] = useState<{ source: string; url: string } | null>(null);
+  const htmlUrl = htmlSource?.source === url ? htmlSource.url : '';
+  useEffect(() => {
+    if (kernel !== 'html5' || !url || isAudio || isImage) return;
+    setHtmlSource(null);
+    let alive = true;
+    let sessionUrl = '';
+    const controller = new AbortController();
+    const target = resolvePlayTarget(url);
+    const needsProbe = /^http:\/\/127\.0\.0\.1:\d+\/play\?/.test(url) && /(?:baidu\.com|baidupcs\.com|quark\.cn|pds\.uc\.cn)/i.test(target) && !/\.m3u8(?:[?#]|$)/i.test(target);
+    if (!needsProbe) { setHtmlSource({ source: url, url }); return; }
+    setLoading(true); setErr('');
+    const endpoint = new URL('/html/prepare', url);
+    endpoint.searchParams.set('url', url);
+    void fetch(endpoint, { signal: controller.signal }).then(async r => {
+      const result = await r.json();
+      if (!r.ok || !result.url) throw new Error(result.error || '媒体兼容处理失败');
+      if (result.session) sessionUrl = new URL(`/html/${result.session}/release`, url).href;
+      if (alive) setHtmlSource({ source: url, url: result.url });
+      else if (sessionUrl) void fetch(sessionUrl).catch(() => undefined);
+    }).catch(e => { if (alive) { setLoading(false); setErr(`HTML 播放准备失败：${e.message}`); } });
+    return () => { alive = false; controller.abort(); if (sessionUrl) void fetch(sessionUrl).catch(() => undefined); };
+  }, [url, kernel, isAudio, isImage]);
   /** mpv 内核状态镜像（主进程 200ms 节流推送；进度条/弹幕/跳过片头片尾都读它） */
   const mpvStateRef = useRef<MpvKernelState>({
     time: null,
@@ -1154,7 +1177,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
 
   useEffect(() => {
     const v = ref.current;
-    if (!v || !url) return;
+    if (!v || !url || !htmlUrl) return;
     // ★ 2026-09-30：图片/音频不走 <video> 通道（由 ImageViewer / AudioPlayer 接管）→ 不建 hls/mpegts、不置 src
     if (isImage || isAudio) return;
     // ★ 2026-10-08 MPV 内核：<video> 不参与播放（mpv 在窗口里渲染）；切回 HTML5 时本 effect 会重跑
@@ -1192,7 +1215,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
     (v as unknown as { __flv?: mpegts.Player }).__flv = undefined;
 
     // ★ 判型还原：py 蜘蛛中继 URL（/play?url=…）还原为真实 m3u8/flv 目标（见 resolvePlayTarget）
-    const low = resolvePlayTarget(url).toLowerCase().split('?')[0];
+    const low = resolvePlayTarget(htmlUrl).toLowerCase().split('?')[0];
     let restored = false;
     // ---- 实时网速：原生直连（无 hls/mpegts 统计）时用 Resource Timing 采样，统一以 KB/s 上报 ----
     let speedTimer: ReturnType<typeof setInterval> | null = null;
@@ -1321,11 +1344,11 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       v.play().then(() => setPaused(false)).catch(() => {});
     };
 
-    if (mediaKind === 'hls') {
+    if (detectMediaKind(htmlUrl) === 'hls') {
       // ★ 2026-09-29（用户报「部分资源播放会报 HLS 错误」）：判型放宽到「URL 含 m3u8 / 路径含 /hls/」
       //   （不少 CDN 的清单没有 .m3u8 后缀，此前落到原生 <video> → Chromium 不会解 HLS → 必失败）
       if (v.canPlayType('application/vnd.apple.mpegurl')) {
-        v.src = url;
+        v.src = htmlUrl;
         start();
       } else if (Hls.isSupported()) {
         // ★ 2026-09-29（用户报「部分资源播放会报 HLS 错误」）：显式加大清单/分片重试，
@@ -1340,7 +1363,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           fragLoadingRetryDelay: 800,
         });
         hlsRef.current = hls;
-        hls.loadSource(url);
+        hls.loadSource(htmlUrl);
         hls.attachMedia(v);
         hls.on(Hls.Events.MANIFEST_PARSED, () => start());
         /**
@@ -1402,7 +1425,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
         // 直连 .ts 多为单文件直播流（URL 常含 live）；flv 沿用既有「按直播处理」口径
         const p = mpegts.createPlayer({
           type: isFlv ? 'flv' : 'mpegts',
-          url,
+          url: htmlUrl,
           isLive: isFlv || /live/i.test(low),
         });
         (v as unknown as { __flv?: mpegts.Player }).__flv = p;
@@ -1454,7 +1477,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
           prevTime = now;
         }
       }, 600);
-      v.src = url;
+      v.src = htmlUrl;
       start();
     }
 
@@ -1483,7 +1506,7 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, kernel]);
+  }, [url, kernel, htmlUrl]);
 
   /**
    * ★ 2026-10-08 MPV 内核会话：url/内核变化即重启（换集 = stop + start 新进程）；

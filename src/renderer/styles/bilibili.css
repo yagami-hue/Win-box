@@ -126,8 +126,14 @@
 :root[data-theme='bilibili'] .vp-buffer { background: rgba(255, 255, 255, .4); }
 :root[data-theme='bilibili'] .vp-played { background: var(--b-blue); }
 :root[data-theme='bilibili'] .vp-thumb { width: 9px; height: 9px; background: #fff; box-shadow: 0 0 0 2px rgba(0, 174, 236, .45); }
-:root[data-theme='bilibili'] .vp-ctl { color: #fff; }
-:root[data-theme='bilibili'] .vp-ctl:hover { color: var(--b-blue); }
+:root[data-theme='bilibili'] .vp-ctl {
+  color: #fff; background: transparent; border: none; padding: 0; box-shadow: none;
+}
+:root[data-theme='bilibili'] .vp-ctl:hover { color: var(--b-blue); background: rgba(255,255,255,.14); border: none; box-shadow: none; }
+:root[data-theme='bilibili'] .vp-ctl:disabled { color: rgba(255,255,255,.28); background: transparent; }
+:root[data-theme='bilibili'] .app.pwin .tb-btn { color: #ddd; background: transparent; border: none; padding: 0; box-shadow: none; }
+:root[data-theme='bilibili'] .app.pwin .tb-btn:hover { color: #fff; background: rgba(255,255,255,.14); }
+:root[data-theme='bilibili'] .app.pwin .tb-btn.tb-close:hover { background: #e5484d; }
 :root[data-theme='bilibili'] .vp-next { background: rgba(0, 0, 0, .85); border-radius: 8px; }
 :root[data-theme='bilibili'] .vp-next button, :root[data-theme='bilibili'] .vp-next button.primary { background: var(--b-blue); border-color: var(--b-blue); }
 :root[data-theme='bilibili'] .app.pwin, :root[data-theme='bilibili'] .app.pwin .main { background: #000; }

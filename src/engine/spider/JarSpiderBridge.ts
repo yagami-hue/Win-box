@@ -1139,14 +1139,17 @@ export class JarSpiderBridge {
    * ★ 预热：提前 spawn 常驻 Python runner（-serve）并发 `__warm__` 探针（预建实例进缓存）。
    * 运行时/脚本任一未落盘 → 直接 0：预热**绝不触发**嵌入式 Python 下载（那是 11MB 级重活）。
    */
-  prewarmPython(pyPath: string, clsName: string, count = 1, ext = ''): number {
+  prewarmPython(pyPath: string, clsName: string, count = 1, ext = '', siteKey = ''): number {
     if (!this.pool || !this.pyRuntimeDir) return 0;
     const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
     const pyExe = join(dir, 'python.exe');
     const runner = join(dir, 'runner.py');
     if (!existsSync(pyPath) || !existsSync(pyExe) || !existsSync(runner)) return 0;
+    if (!this.pyRuntimeReady()) return 0;
+    this.placeRunnerFiles(dir);
     const serveArgv = [runner, '-serve', pyPath, clsName];
-    const env = { PYTHONIOENCODING: 'utf-8' };
+    const env = { PYTHONIOENCODING: 'utf-8', ...(this.proxyProvider?.().env ?? {}),
+      ...(siteKey ? { WINBOX_PY_PROXY: `${LOCAL_PROXY_BASE}/proxy?do=py&key=${encodeURIComponent(siteKey)}` } : {}) };
     const key = servePoolKey(pyExe, serveArgv, env);
     return this.pool.warm(key, { exe: pyExe, serveArgv, env, key }, count, { className: clsName, method: WARM_METHOD, args: [ext] });
   }
@@ -1167,7 +1170,9 @@ export class JarSpiderBridge {
   pyRuntimeReady(): boolean {
     if (!this.pyRuntimeDir) return false;
     const dir = join(this.pyRuntimeDir, JarSpiderBridge.PY_VER);
-    return existsSync(join(dir, 'python.exe')) && existsSync(join(dir, 'runner.py'));
+    return existsSync(join(dir, 'python.exe')) && existsSync(join(dir, 'runner.py')) &&
+      existsSync(join(dir, 'Lib', 'site-packages', '.certifi-2026.7.22')) &&
+      JarSpiderBridge.PY_WHEELS.every(w => !w.required || this.dirNonEmpty(join(dir, 'Lib', 'site-packages', w.name)));
   }
 
   /**
@@ -1452,17 +1457,18 @@ export class JarSpiderBridge {
    * （Lib/site-packages/base），已处理 embed 包 _pth 隔离。
    * ★ 中文 Windows Python 默认 stdout GBK → 必须显式 PYTHONIOENCODING=utf-8。
    */
-  async callPython(pyPath: string, clsName: string, method: string, args: string[], timeoutMs?: number): Promise<string> {
+  async callPython(pyPath: string, clsName: string, method: string, args: string[], timeoutMs?: number, siteKey = ''): Promise<string> {
     // 运行时缺失/下载失败 → ensurePythonRuntime 抛错，上层（PySpider）转 PY_UNSUPPORTED 上屏
     const dir = await this.ensurePythonRuntime();
     const pyExe = join(dir, 'python.exe');
     const runner = join(dir, 'runner.py');
     const argv = [runner, pyPath, clsName, method, ...args];
+    const pyEnv = { PYTHONIOENCODING: 'utf-8', ...(this.proxyProvider?.().env ?? {}),
+      ...(siteKey ? { WINBOX_PY_PROXY: `${LOCAL_PROXY_BASE}/proxy?do=py&key=${encodeURIComponent(siteKey)}` } : {}) };
     // ★ 进程池：常驻 Python（-serve）跨请求复用（服务端循环；env 带 PYTHONIOENCODING）
     //   语义同 JVM：仅传输层失败回退一次性，空结果是合法结果。
     if (this.pool) {
       const serveArgv = [runner, '-serve', pyPath, clsName];
-      const pyEnv = { PYTHONIOENCODING: 'utf-8', ...(this.proxyProvider?.().env ?? {}) };
       const key = servePoolKey(pyExe, serveArgv, pyEnv);
       try {
         const r = await this.poolSubmit(pyExe, key, serveArgv, clsName, method, args, pyEnv, timeoutMs ?? 100000);
@@ -1471,7 +1477,7 @@ export class JarSpiderBridge {
         /* 池异常 → 回退一次性 */
       }
     }
-    return this.runSubprocess(pyExe, argv, clsName, method, timeoutMs ?? 100000, { PYTHONIOENCODING: 'utf-8' });
+    return this.runSubprocess(pyExe, argv, clsName, method, timeoutMs ?? 100000, pyEnv);
   }
 
   /** 进程池提交：同类请求复用同一 serve 进程。ok=false 仅表示进程/传输层失败（调用方回退一次性）。 */
@@ -1562,7 +1568,7 @@ export class JarSpiderBridge {
   private static readonly PY_WHEELS: Array<{ name: string; pkg?: string; file: string; platform?: string; required: boolean }> = [
     { name: 'requests', file: 'requests-2.31.0-py3-none-any.whl', platform: 'py3-none-any', required: true },
     { name: 'urllib3', file: 'urllib3-1.26.18-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: true },
-    { name: 'certifi', file: 'certifi-2023.7.22-py2.py3-none-any.whl', platform: 'py2.py3-none-any', required: true },
+    { name: 'certifi', file: 'certifi-2026.7.22-py3-none-any.whl', platform: 'py3-none-any', required: true },
     { name: 'charset_normalizer', file: 'charset_normalizer-3.2.0-py3-none-any.whl', platform: 'py3-none-any', required: true },
     { name: 'idna', file: 'idna-3.4-py3-none-any.whl', platform: 'py3-none-any', required: true },
     { name: 'lxml', file: 'lxml-4.9.2-cp311-cp311-win_amd64.whl', platform: 'cp311-cp311-win_amd64', required: false },
@@ -1617,7 +1623,7 @@ export class JarSpiderBridge {
     const pyExe = join(dir, 'python.exe');
     if (existsSync(pyExe)) {
       // 运行时已就绪但第三方库/runner 可能缺失 → 幂等补齐（首次下载中断后重试自愈）
-      await this.ensureRuntimeLibs(dir).catch(() => undefined);
+      await this.ensureRuntimeLibs(dir);
       this.placeRunnerFiles(dir);
       return dir;
     }
@@ -1779,7 +1785,8 @@ export class JarSpiderBridge {
    *  （每包「索引页 + 包体」两次往返）是首次加载时间的大头之一。 */
   private async ensureRuntimeLibs(dir: string): Promise<void> {
     const sp = join(dir, 'Lib', 'site-packages');
-    const pending = JarSpiderBridge.PY_WHEELS.filter((w) => !this.dirNonEmpty(join(sp, w.name)));
+    const pending = JarSpiderBridge.PY_WHEELS.filter((w) => !this.dirNonEmpty(join(sp, w.name)) ||
+      (w.name === 'certifi' && !existsSync(join(sp, '.certifi-2026.7.22'))));
     const WAVE = 3;
     for (let i = 0; i < pending.length; i += WAVE) {
       await Promise.all(
@@ -1790,6 +1797,8 @@ export class JarSpiderBridge {
             this.host?.logger?.w?.(`python: 可选依赖 ${w.name} 下载失败（不影响纯 py 源）: ${(e as Error).message}`);
             return false;
           });
+          if (!ok && w.required) throw new Error(`python: ${w.name} 下载失败`);
+          if (ok && w.name === 'certifi') writeFileSync(join(sp, '.certifi-2026.7.22'), '');
           if (ok && !this.dirNonEmpty(pkgDir)) {
             if (w.required) throw new Error(`python: ${w.name} 解压后为空`);
             this.host?.logger?.w?.(`python: 可选依赖 ${w.name} 解压后为空（跳过）`);
@@ -1843,11 +1852,13 @@ export class JarSpiderBridge {
         }
         if (!href) continue;
         // href 形如 `../../packages/<hash>/<file>` → 相对 simpleBase 解析
-        const real = new URL(href, simpleBase).href;
+        const real = new URL(href.replace(/&amp;/g, '&'), `${simpleBase}${project}/`).href;
         const res = await this.host!.http.request({ url: real, method: 'get', timeoutMs: 120000, buffer: 2 });
         const buf = Buffer.from(Array.isArray(res.content) ? res.content as unknown as number[] : Buffer.from(String(res.content), 'base64'));
         if (buf.length < 1024) continue; // 404/HTML 错误页
+        if (!looksLikeZip(buf)) continue;
         pushEntries(buf);
+        if (!this.dirNonEmpty(join(sp, w.name))) continue;
         return true;
       } catch { /* 换下一个镜像 */ }
     }

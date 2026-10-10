@@ -1618,6 +1618,15 @@ export class SpiderHost {
     if (!b) throw new Error(`源不存在: ${key}`);
     return this.vm.home(b);
   }
+  async pythonProxy(key: string, params: Record<string, string>): Promise<unknown[]> {
+    const source = this.getSource(key);
+    if (!source || !/\.py(?:[?#]|$)/i.test(source.api || '')) throw new Error('Python 代理源不存在');
+    const spider = this.vm.spiderFactory.getCSP(source, this.host);
+    const raw = await spider.proxy(params);
+    const result: unknown = JSON.parse(raw);
+    if (!Array.isArray(result)) throw new Error('Python 源未返回有效代理响应');
+    return result;
+  }
   category(key: string, tid: string, pg: string, extend: Record<string, string>) {
     const b = this.getSource(key);
     if (!b) throw new Error(`源不存在: ${key}`);
@@ -1708,6 +1717,8 @@ export class SpiderHost {
     for (let i = 0; i < pool.length; i++) {
       const b = pool[i];
       if (this.unsupportedSources.has(b.key)) continue;
+      // CMS/type4 走 SourceViewModel 内联请求，不是 JVM 蜘蛛，不能判成 jar 未就绪。
+      if (b.type !== 3) continue;
       try {
         const sp = this.vm.spiderFactory.getCSP(b, this.host) as {
           runtimeState?: () => 'ready' | 'preparing' | 'unavailable';
@@ -2061,6 +2072,15 @@ export class SpiderHost {
   private async playInner(key: string, flag: string, id: string, retried = false): Promise<PlayResult> {
     const b = this.getSource(key);
     if (!b) throw new Error(`源不存在: ${key}`);
+    // Native Quark resolution precedes playerContent and JVM self-resolution.
+    if (isQuarkSharePlay(id) || /^quark/i.test(parsePanProxyQuery(id).site || '')) {
+      const miss: string[] = [];
+      const got = await this.quarkFromPanUrl(id, flag, miss);
+      if (got) return got;
+      return { parse: 1, url: '', playUrl: '', flag, jx: 0,
+        ...(!this.driveList()['quark'] ? { needDriveCookieBind: 'quark' } : {}),
+        message: `夸克网盘取流失败（${miss.join('；') || '缺少分享或文件信息'}）` };
+    }
     // ★ 2026-09-29（用户报「部分资源夸克网盘播放还是存在播放失败」）：
     //   转存失败原来只写日志（`quarkTransfer 未成功(reason)，回退蜘蛛`）→ 用户看到黑屏没有原因。
     //   这里记下原因，蜘蛛也拿不到地址时**翻译成可执行的中文提示上屏**（走既有 parse:1 + message 通道）。
@@ -2250,7 +2270,7 @@ export class SpiderHost {
         } catch {
           jvmPort = null;
         }
-        if (jvmPort) {
+        if (jvmPort && !/^quark/i.test(pan.site || '') && !extractQuarkShare(r.url)) {
           const mProxy = /^http:\/\/127\.0\.0\.1:(?:9978|-1)\/proxy\?/i.exec(r.url);
           if (mProxy) {
             const rewritten = r.url.replace(mProxy[0], `http://127.0.0.1:9978/proxy/${jvmPort}?`);

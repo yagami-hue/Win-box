@@ -93,7 +93,7 @@ export class PySpider extends Spider {
           const base = (this.api || '').split('?')[0];
           const path = base.startsWith('file://') ? fileURLToPath(base) : join(this.bridge.pyCacheDir, `${md5Hex(base)}.py`);
           if (existsSync(path)) {
-            this.bridge.prewarmPython(path, this.clsName, 1, enrichExt(this.ext || '', this.host?.driveTokens?.()));
+            this.bridge.prewarmPython(path, this.clsName, 1, enrichExt(this.ext || '', this.host?.driveTokens?.()), this.siteKey);
           }
         }
       } catch { /* 预热失败静默：首次正常调用会重试并上屏真实原因 */ } finally {
@@ -116,7 +116,7 @@ export class PySpider extends Spider {
       return 0;
     }
     // ★ 深度预热：同 Java 侧 —— 预建实例（含 init(ext)）进 python 侧实例缓存
-    return this.bridge.prewarmPython(path, this.clsName, count, enrichExt(this.ext || '', this.host?.driveTokens?.()));
+    return this.bridge.prewarmPython(path, this.clsName, count, enrichExt(this.ext || '', this.host?.driveTokens?.()), this.siteKey);
   }
 
   /** 下载/定位 .py 到本地并按 URL md5 缓存；失败置 loadError 并返回 false。 */
@@ -178,7 +178,7 @@ export class PySpider extends Spider {
       throw new SourceProblemError('SPIDER_ERROR', this.loadError, { sourceKey: this.siteKey });
     }
     try {
-      return await this.bridge.callPython(this.pyPath, this.clsName, method, [this.enrichedExt(), ...args], timeoutMs);
+      return await this.bridge.callPython(this.pyPath, this.clsName, method, [this.enrichedExt(), ...args], timeoutMs, this.siteKey);
     } catch (e) {
       // ★ 运行时缺失/下载失败 → 明确提示（不静默空结果）
       throw new SourceProblemError(
