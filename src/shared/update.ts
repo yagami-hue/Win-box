@@ -59,7 +59,6 @@ export const GH_ACCEL_PREFIXES: string[] = [
   'https://gh.idayer.com/',
   'https://githubdog.com/',
   'https://git.yylx.win/',
-  'https://ghproxy.imciel.com/',
   'https://ghm.078465.xyz/',
   'https://gitproxy.mrhjx.cn/',
   'https://gh.monlor.com/',
